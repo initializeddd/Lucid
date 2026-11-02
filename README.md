@@ -68,7 +68,7 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-Prebuilt beta bundles are attached to the [latest release](https://github.com/initializeddd/Lucid/releases/latest):
+Prebuilt beta bundles are attached to the [latest release](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.1):
 
 | Platform | Artifact | Notes |
 | --- | --- | --- |

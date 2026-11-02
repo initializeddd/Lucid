@@ -5,6 +5,10 @@
 #include <thread>
 
 int main() {
+#if defined(_WIN32)
+    // Compile terminals are not implemented on Windows yet.
+    return 0;
+#else
     lucid::platform::PtyProcess process;
     std::string error;
     if (!process.start(".", {"printf 'hello\\n'", "printf 'world\\n'"}, error)) {
@@ -38,4 +42,5 @@ int main() {
     }
 
     return 0;
+#endif
 }

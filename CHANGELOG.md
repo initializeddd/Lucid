@@ -29,6 +29,7 @@ First public beta. Download builds for macOS, Linux and Windows from the
 
 - Linux builds now compile the platform-neutral command and shift keycaps.
 - Windows builds now compile the PTY stub and use `_popen`/`_pclose` for compiler diagnostics.
+- MSVC compiles with `/utf-8`, keeping Unicode documents intact on Windows.
 
 ## [0.1.0]
 

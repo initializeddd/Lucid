@@ -264,6 +264,14 @@ void configureApplicationWindow(void* nativeWindow, std::string_view title) {
     }
 }
 
+bool openBinaryFile(std::string_view path) {
+    if (!confirmDestructiveAction("Open binary file?", "Open this binary file with the default application?", "Open")) return false;
+    @autoreleasepool {
+        NSString* file = [NSString stringWithUTF8String:std::string(path).c_str()];
+        return [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:file]];
+    }
+}
+
 bool confirmDestructiveAction(std::string_view title, std::string_view message,
                               std::string_view confirmLabel) {
     @autoreleasepool {

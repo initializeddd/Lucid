@@ -1414,6 +1414,18 @@ void Application::openFile(const std::string& path) {
         return;
     }
 
+    // NUL bytes and non-whitespace control characters are strong indicators of
+    // binary data. Do not feed such data to the text editor.
+    const bool binary = std::any_of(content.begin(), content.end(), [](unsigned char c) {
+        return c == 0 || (c < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\f');
+    });
+    if (binary) {
+        if (!platform::openBinaryFile((m_project.root() / relative).string())) {
+            setCommandStatus("Binary file was not opened: " + relative, false);
+        }
+        return;
+    }
+
     closeCompileTerminal();
     m_document = editor::Document::fromUtf8(content);
     m_hasDocument = true;

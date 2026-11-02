@@ -7,6 +7,7 @@
 
 #include <dwmapi.h>
 #include <windows.h>
+#include <shellapi.h>
 
 #include <string>
 
@@ -24,7 +25,40 @@
 #endif
 #endif
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <sys/wait.h>
+#include <unistd.h>
+#include <string>
+#endif
+
 namespace lucid::platform {
+
+#if defined(_WIN32)
+bool openBinaryFile(std::string_view path) {
+    if (!confirmDestructiveAction("Open binary file?", "Open this binary file with the default application?", "Open")) return false;
+    const std::string file(path);
+    return reinterpret_cast<intptr_t>(ShellExecuteA(nullptr, "open", file.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+#elif !defined(__APPLE__)
+bool openBinaryFile(std::string_view path) {
+    const pid_t prompt = fork();
+    if (prompt == 0) {
+        execlp("zenity", "zenity", "--question", "--title=Open binary file?", "--text=Open this binary file with the default application?", "--ok-label=Open", static_cast<char*>(nullptr));
+        execlp("kdialog", "kdialog", "--yesno", "Open this binary file with the default application?", "--title", "Open binary file?", static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    if (prompt < 0 || waitpid(prompt, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return false;
+    const std::string file(path);
+    const pid_t child = fork();
+    if (child == 0) {
+        execlp("xdg-open", "xdg-open", file.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    return child > 0 && waitpid(child, &status, 0) > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+#endif
+
 
 #if !defined(__APPLE__)
 void installApplicationMenu(const MenuActions& /*actions*/) {}

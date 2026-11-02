@@ -24,6 +24,8 @@ struct MenuActions {
     std::function<void()> selectAll;
 };
 
+[[nodiscard]] bool openBinaryFile(std::string_view path);
+
 void installApplicationMenu(const MenuActions& actions);
 void configureApplicationWindow(void* nativeWindow, std::string_view title);
 [[nodiscard]] bool confirmDestructiveAction(std::string_view title,

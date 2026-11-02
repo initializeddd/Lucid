@@ -43,7 +43,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
-    target_link_libraries(lucid_core PUBLIC dwmapi)
+    target_link_libraries(lucid_core PUBLIC dwmapi shell32)
 endif()
 
 if(APPLE)

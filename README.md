@@ -32,7 +32,7 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Status:** public beta (`0.1.0-beta.1`). The core editing loop is usable and the test suite runs
+> **Status:** public beta (`0.1.0-beta.2`). The core editing loop is usable and the test suite runs
 > on all three platforms, but APIs and file formats may still change. The beta channel is shown in
 > the window title, the status bar and the About panel.
 
@@ -68,13 +68,17 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-Prebuilt beta bundles are attached to the [latest release](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.1):
+Prebuilt beta bundles are attached to the [latest release](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.2):
 
 | Platform | Artifact | Notes |
 | --- | --- | --- |
-| macOS | `Lucid-v0.1.0-beta.1-macOS.zip` | Ad-hoc signed; unzip and open `Lucid.app` |
-| Linux | `Lucid-v0.1.0-beta.1-Linux.tar.gz` | Extract and run `lucid`; needs a Vulkan driver |
-| Windows | `Lucid-v0.1.0-beta.1-Windows.zip` | Extract and run `Lucid.exe`; needs the Vulkan runtime |
+| macOS | `Lucid-v0.1.0-beta.2-macOS.zip` | Ad-hoc signed; unzip and open `Lucid.app` |
+| Linux | `Lucid-v0.1.0-beta.2-Linux.tar.gz` | Extract and run `./lucid`; shared libraries are bundled |
+| Windows | `Lucid-v0.1.0-beta.2-Windows.zip` | Extract and run `Lucid.exe`; needs the Vulkan runtime |
+
+The Linux tarball is self-contained: it ships `libglfw`, the Vulkan loader and the X11/Wayland
+runtime libraries next to the binary, so no development packages are required. A working Vulkan
+driver is still needed to render.
 
 Beta builds are not notarized or code-signed for distribution. macOS Gatekeeper and Windows
 SmartScreen may warn on first launch; build from source below if you prefer.

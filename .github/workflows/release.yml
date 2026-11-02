@@ -80,9 +80,31 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist
-          tar -czf "dist/Lucid-${GITHUB_REF_NAME}-Linux.tar.gz" \
-            -C build/bin lucid assets
+          set -euo pipefail
+          name="Lucid-${GITHUB_REF_NAME}-Linux"
+          stage="dist/${name}"
+          mkdir -p "${stage}/lib" dist
+          cp build/bin/lucid "${stage}/"
+          cp -r build/bin/assets "${stage}/assets"
+          cp LICENSE "${stage}/LICENSE"
+          printf '%s\n' \
+            "Lucid (Beta)" \
+            "" \
+            "Run: ./lucid" \
+            "" \
+            "All required shared libraries are bundled in lib/." \
+            > "${stage}/README.txt"
+          while read -r library; do
+            case "$(basename "${library}")" in
+              libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|libutil.so.*|libgcc_s.so.*|libstdc++.so.*|libresolv.so.*|ld-linux*) continue ;;
+            esac
+            cp -L "${library}" "${stage}/lib/"
+          done < <(ldd build/bin/lucid | awk '/=> \// {print $3}')
+          if ldd "${stage}/lucid" | grep -q "not found"; then
+            ldd "${stage}/lucid"
+            exit 1
+          fi
+          tar -czf "dist/${name}.tar.gz" -C "${stage}" .
 
       - name: Package (Windows)
         if: runner.os == 'Windows'

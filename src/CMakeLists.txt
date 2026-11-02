@@ -73,6 +73,13 @@ if(WIN32)
     set_target_properties(lucid PROPERTIES OUTPUT_NAME "Lucid")
 endif()
 
+if(UNIX AND NOT APPLE)
+    target_link_options(lucid PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(lucid PROPERTIES
+        BUILD_RPATH "$ORIGIN/lib"
+        INSTALL_RPATH "$ORIGIN/lib")
+endif()
+
 if(APPLE)
     set(LUCID_MACOS_ICON "${PROJECT_SOURCE_DIR}/packaging/macos/Lucid.icns")
     set(LUCID_MACOS_ASSET_CAR "${PROJECT_SOURCE_DIR}/packaging/macos/Assets.car")

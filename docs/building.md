@@ -121,6 +121,11 @@ cmake --install build --prefix ~/.local
 The desktop file is `packaging/linux/dev.lucid.editor.desktop` and the icon is installed under
 `share/icons/hicolor/512x512/apps`.
 
+The release workflow produces a self-contained tarball. It copies the executable's shared
+dependencies into `lib/` (except glibc, libstdc++ and the dynamic loader) and links Lucid with
+`$ORIGIN/lib`, so the downloaded build runs without installing GLFW, the Vulkan loader or the
+X11/Wayland development packages. A working Vulkan driver is still required.
+
 ## Windows
 
 Install the **Vulkan SDK** from LunarG, CMake 3.24+, and a C++20 toolchain (Visual Studio 2022 with

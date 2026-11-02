@@ -5,6 +5,14 @@ All notable changes to Lucid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.2] - 2026-11-02
+
+### Fixed
+
+- Linux release tarballs are now self-contained: `libglfw`, the Vulkan loader and the X11/Wayland
+  runtime libraries are bundled in `lib/` and resolved through an `$ORIGIN/lib` runtime path.
+  No dependency installation is required beyond a working Vulkan driver.
+
 ## [0.1.0-beta.1] - 2026-11-02
 
 First public beta. Download builds for macOS, Linux and Windows from the
@@ -35,6 +43,7 @@ First public beta. Download builds for macOS, Linux and Windows from the
 
 - Initial public foundation: Vulkan renderer, window layer, editor core and build system.
 
-[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.1.0-beta.2...HEAD
+[0.1.0-beta.2]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.1
 [0.1.0]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0

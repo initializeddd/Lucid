@@ -1,5 +1,6 @@
 #include "renderer/vulkan/UiPass.hpp"
 
+#include "core/Version.hpp"
 #include "editor/syntax/Syntax.hpp"
 #include "ui/Overlay.hpp"
 #include "ui/Welcome.hpp"
@@ -36,6 +37,8 @@ constexpr std::u32string_view kCommandGlyph = U"\u2318";
 constexpr std::u32string_view kShiftGlyph = U"\u21E7";
 constexpr std::string_view kCommandFallback = "Cmd";
 #else
+constexpr std::u32string_view kCommandGlyph = U"Ctrl";
+constexpr std::u32string_view kShiftGlyph = U"Shift";
 constexpr std::string_view kCommandFallback = "Ctrl";
 #endif
 
@@ -905,23 +908,29 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
 
     TextRange statusRange{0, 0, fullScissor};
     bool hasStatus = false;
-    if (!state.statusText.empty() || state.hasDocument) {
+    {
         const std::size_t statusFirst = vertices.size();
         const float statusCenter = viewportHeight - editorBottom * 0.5F;
         const float baseline = statusCenter + fontCenter;
+        const std::array<float, 4> statusColor = toGpuColor(ui::theme::kLineNumber);
 
         if (!state.statusText.empty()) {
             appendText(vertices, state.statusText, margin, baseline,
                        toGpuColor(state.statusIsError ? ui::theme::kError : ui::theme::kTextMuted));
         }
 
+        float rightEdge = viewportWidth - margin;
         if (state.hasDocument) {
             const std::string position = std::to_string(state.cursorLine + 1) + ":" +
                                          std::to_string(state.cursorColumn + 1);
             const float positionWidth = measureText(position);
-            appendText(vertices, position, viewportWidth - margin - positionWidth, baseline,
-                       toGpuColor(ui::theme::kLineNumber));
+            appendText(vertices, position, rightEdge - positionWidth, baseline, statusColor);
+            rightEdge -= positionWidth + 18.0F * contentScale;
         }
+
+        const std::string version = "v" + std::string(kVersionString);
+        const float versionWidth = measureText(version);
+        appendText(vertices, version, rightEdge - versionWidth, baseline, statusColor);
 
         if (vertices.size() > statusFirst) {
             statusRange = makeRange(statusFirst, fullScissor);

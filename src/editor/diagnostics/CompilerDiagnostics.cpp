@@ -15,6 +15,18 @@ namespace lucid::editor {
 namespace {
 
 [[nodiscard]] std::string shellQuote(std::string_view value) {
+#if defined(_WIN32)
+    std::string quoted = "\"";
+    for (const char character : value) {
+        if (character == '"') {
+            quoted += "\\\"";
+        } else {
+            quoted.push_back(character);
+        }
+    }
+    quoted.push_back('"');
+    return quoted;
+#else
     std::string quoted = "'";
     for (const char character : value) {
         if (character == '\'') {
@@ -25,7 +37,22 @@ namespace {
     }
     quoted.push_back('\'');
     return quoted;
+#endif
 }
+
+#if defined(_WIN32)
+[[nodiscard]] std::FILE* openCommandPipe(const char* command) {
+    return _popen(command, "r");
+}
+
+int closeCommandPipe(std::FILE* pipe) { return _pclose(pipe); }
+#else
+[[nodiscard]] std::FILE* openCommandPipe(const char* command) {
+    return popen(command, "r");
+}
+
+int closeCommandPipe(std::FILE* pipe) { return pclose(pipe); }
+#endif
 
 [[nodiscard]] std::string tempFileName(bool cpp) {
     static std::atomic<std::uint64_t> counter{0};
@@ -183,7 +210,7 @@ CompilerResult runCompilerDiagnostics(const CompilerRequest& request) {
     }
     command += " " + shellQuote(sourcePath.generic_string()) + " 2>&1";
 
-    std::FILE* pipe = popen(command.c_str(), "r");
+    std::FILE* pipe = openCommandPipe(command.c_str());
     if (pipe == nullptr) {
         std::filesystem::remove(sourcePath, filesystemError);
         result.error = "Could not start the compiler";
@@ -195,7 +222,7 @@ CompilerResult runCompilerDiagnostics(const CompilerRequest& request) {
     while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         output += buffer;
     }
-    const int status = pclose(pipe);
+    const int status = closeCommandPipe(pipe);
     std::filesystem::remove(sourcePath, filesystemError);
 
     if (status == -1) {

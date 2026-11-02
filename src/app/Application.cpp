@@ -231,8 +231,7 @@ suggestDirectories(std::string_view query, const std::filesystem::path& fallback
 
 Application::Application(ApplicationConfig config)
     : m_config(std::move(config)), m_window(m_config.window) {
-    log::info(std::string(kAppName) + " " + std::to_string(kVersionMajor) + "." +
-              std::to_string(kVersionMinor) + "." + std::to_string(kVersionPatch));
+    log::info(std::string(kAppDisplayName) + " " + std::string(kVersionString));
 
     const std::filesystem::path projects = projectsDirectory();
     if (!projects.empty()) {
@@ -2015,7 +2014,7 @@ bool Application::ensureCompileTerminalWindow() {
         config.height = 250;
         config.minWidth = 380;
         config.minHeight = 180;
-        config.title = "Lucid - Compile";
+        config.title = std::string(kAppDisplayName) + " - Compile";
         config.resizable = true;
         m_compileTerminalWindow = std::make_unique<Window>(config);
         platform::configureApplicationWindow(m_compileTerminalWindow->handle(),
@@ -2292,7 +2291,7 @@ void Application::runCompileFunction(editor::CompileFunction function,
     m_compileTerminalReveal = 1.0F;
     m_compileTerminalVelocity = 0.0F;
     if (m_compileTerminalWindow != nullptr) {
-        m_compileTerminalWindow->setTitle("Lucid - " + function.name);
+        m_compileTerminalWindow->setTitle(std::string(kAppDisplayName) + " - " + function.name);
         m_compileTerminalWindow->focus();
     }
     setStatus("Running compile function " + function.name, false);
@@ -3096,7 +3095,7 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     state.backgroundMotion = m_backgroundMotion;
     state.backgroundDim = m_backgroundDim;
 
-    std::string windowTitle = "Lucid";
+    std::string windowTitle(kAppDisplayName);
     if (m_hasDocument) {
         std::string filename = std::filesystem::path(m_filePath).filename().string();
         if (filename.empty()) {

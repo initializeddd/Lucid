@@ -74,7 +74,7 @@ chrome that each desktop expects.
 
 - **macOS:** `PlatformApp.mm` receives GLFW's `NSWindow`, enables
   `NSWindowStyleMaskFullSizeContentView`, makes the title bar transparent and hides the native title
-  while keeping the traffic-light controls. `UiPass` draws the centered `Lucid - filename*` title,
+  while keeping the traffic-light controls. `UiPass` draws the centered `Lucid (Beta) - filename*` title,
   and the real window title is kept in sync for Mission Control. The default application menu is
   replaced with **Lucid**, **File**, **Edit**, **Run**, **Window** and **Services** menus. Menu
   items route through `platform::MenuActions` back into `Application`, so menu commands and keyboard

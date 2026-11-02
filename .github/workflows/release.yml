@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -107,3 +107,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}

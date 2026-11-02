@@ -189,6 +189,9 @@ void PtyProcess::update() {
 }
 
 void PtyProcess::write(std::string_view text) {
+#if defined(_WIN32)
+    (void)text;
+#else
     if (m_fd < 0 || text.empty()) {
         return;
     }
@@ -205,6 +208,7 @@ void PtyProcess::write(std::string_view text) {
         }
         break;
     }
+#endif
 }
 
 void PtyProcess::appendEcho(std::string_view text) {

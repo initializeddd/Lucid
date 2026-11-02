@@ -37,7 +37,7 @@ constexpr std::u32string_view kCommandGlyph = U"\u2318";
 constexpr std::u32string_view kShiftGlyph = U"\u21E7";
 constexpr std::string_view kCommandFallback = "Cmd";
 #else
-constexpr std::u32string_view kCommandGlyph = U"Ctrl";
+constexpr std::u32string_view kCommandGlyph = U"\u2303 Ctrl";
 constexpr std::u32string_view kShiftGlyph = U"Shift";
 constexpr std::string_view kCommandFallback = "Ctrl";
 #endif
@@ -1067,7 +1067,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
     const bool useCommandGlyph = m_font.glyph(0x2318).hasPixels;
     const bool useShiftGlyph = m_font.glyph(0x21E7).hasPixels;
 #else
-    const bool useCommandGlyph = false;
+    const bool useCommandGlyph = m_font.glyph(0x2303).hasPixels;
     const bool useShiftGlyph = false;
 #endif
     const float commandTextWidth =
@@ -1583,7 +1583,6 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             rowStart, keyTop, rowStart + commandWidth, keyTop + layout.keyHeight,
             3.0F * contentScale, 1.0F * contentScale, 0.0F, 0.92F, keyFill,
             keyBorder});
-#if defined(__APPLE__)
         if (useCommandGlyph) {
             appendText(vertices, kCommandGlyph,
                        rowStart + (commandWidth - commandTextWidth) * 0.5F,
@@ -1593,11 +1592,6 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                        rowStart + (commandWidth - commandTextWidth) * 0.5F,
                        keyBaseline, actionColor);
         }
-#else
-        appendText(vertices, kCommandFallback,
-                   rowStart + (commandWidth - commandTextWidth) * 0.5F,
-                   keyBaseline, actionColor);
-#endif
         addKey(rowStart + commandWidth + keyGap, letterWidth, "P");
         appendText(vertices,
                    label, rowStart + commandWidth + keyGap + letterWidth + labelGap,

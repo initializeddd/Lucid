@@ -29,7 +29,7 @@ Windows builds produce `build\bin\Debug\Lucid.exe`. Linux builds install a launc
 
 ## 2. Open a project
 
-Press `⌘O` on macOS or `Ctrl+O` on Windows/Linux. Type the folder that contains the project, not
+Press `Ctrl+O` (Command+O on macOS). Type the folder that contains the project, not
 an individual source file.
 
 ```text
@@ -43,7 +43,7 @@ Press `Enter` to open it. If the folder does not exist, Lucid creates it.
 
 ## 3. Open a file
 
-Press `⌘K` (or `⌘N`) on macOS, or `Ctrl+K` on Windows/Linux. Type a relative path:
+Press `Ctrl+K` (or `Ctrl+N`). Type a relative path:
 
 ```text
 src/main.cpp
@@ -54,7 +54,7 @@ the suggestion list.
 
 ## 4. Change settings
 
-Press `⌘,` on macOS. Lucid opens a settings panel with theme presets, primary color swatches,
+Press `Ctrl+,` (Command+, on macOS). Lucid opens a settings panel with theme presets, primary color swatches,
 animation speed, zoom, cursor styles and editor toggles. **Edit settings...** opens a project named
 `Settings` with a `settings.json` file for advanced changes.
 
@@ -86,7 +86,7 @@ animation speed, zoom, cursor styles and editor toggles. **Edit settings...** op
 | `theme` | `lucid-dark`, `graphite`, `lucid-light` | Apply a built-in palette |
 | `primary` | `#RRGGBB` | Override the theme accent and selection tint; omit to use the theme default |
 
-Changes apply as you edit. Press `⌘S` to persist them. Invalid JSON leaves the previous settings
+Changes apply as you edit. Press `Ctrl+S` to persist them. Invalid JSON leaves the previous settings
 active and shows a red error; click the error to return to the settings file.
 
 Settings live at:
@@ -149,14 +149,14 @@ $cmake --build %project%/build --config Debug
 */
 ```
 
-Run one of these with `⌘R` while the caret is inside the block, click the highlighted `@name`, or
+Run one of these with `Ctrl+R` while the caret is inside the block, click the highlighted `@name`, or
 use **Run > Run Compile Function** on macOS. Lucid saves the file first.
 
 A terminal panel opens beside the function. It streams output, and you can click it to focus and
 type input. The red traffic light closes the panel and terminates the running process. Drag the
 terminal title bar to move it, or drag a diagnostic card by its body.
 
-Press `⌘⇧R` (`Ctrl+Shift+R` on Windows/Linux) or use **Run > Search Project Functions…** to
+Press `Ctrl+Shift+R` or use **Run > Search Project Functions…** to
 search every function in the project. Suggestions show the function name, file, line and platform.
 Pressing `Enter` opens the defining file and runs the function. Lucid caches the parsed index in
 `.lucid/cache/functions.json` so later searches only re-read files whose size or modification time
@@ -182,7 +182,7 @@ terminals are not yet available on Windows.
 
 | Message | Meaning |
 | --- | --- |
-| `Open a project first` | Open the project folder with `⌘O` before opening a file or running commands |
+| `Open a project first` | Open the project folder with `Ctrl+O` before opening a file or running commands |
 | `Compile function ... is not available on this platform` | The block has a platform suffix for another OS |
 | `Compile function ... has no commands` | Add at least one line beginning with `$` before `@end` |
 | `Compile terminals are not supported on this platform yet` | The PTY terminal is currently macOS/Linux-only |

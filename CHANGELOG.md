@@ -5,6 +5,13 @@ All notable changes to Lucid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.4] - 2026-11-02
+
+### Changed
+
+- Windows and Linux keycaps show the Control symbol next to `Ctrl`; macOS keeps the Command glyph.
+- Documentation writes shortcuts with `Ctrl` and `Alt` and maps macOS Command/Option explicitly.
+
 ## [0.1.0-beta.3] - 2026-11-02
 
 ### Fixed
@@ -50,7 +57,8 @@ First public beta. Download builds for macOS, Linux and Windows from the
 
 - Initial public foundation: Vulkan renderer, window layer, editor core and build system.
 
-[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.1.0-beta.4...HEAD
+[0.1.0-beta.4]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.1

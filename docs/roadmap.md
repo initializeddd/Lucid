@@ -46,7 +46,7 @@
 - [x] Project prompt that opens or creates a project root
 - [x] File prompt with fuzzy path suggestions
 - [x] Automatic folder creation from path segments
-- [x] Folder creation with a trailing slash or `⌘↵`
+- [x] Folder creation with a trailing slash or `Ctrl+Enter`
 - [x] Folder suggestions and keyboard navigation through directories
 - [x] Save before switching files/projects and on quit
 - [x] In-session recent projects and project directory browsing

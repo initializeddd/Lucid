@@ -27,6 +27,7 @@ public:
     static constexpr int kGlyphCount = kLastCodepoint - kFirstCodepoint + 1;
     static constexpr char32_t kCommandCodepoint = 0x2318;
     static constexpr char32_t kShiftCodepoint = 0x21E7;
+    static constexpr char32_t kControlCodepoint = 0x2303;
 
     explicit FontAtlas(int pixelHeight);
 
@@ -48,6 +49,7 @@ private:
     std::array<Glyph, kGlyphCount> m_glyphs{};
     Glyph m_commandGlyph{};
     Glyph m_shiftGlyph{};
+    Glyph m_controlGlyph{};
     std::vector<std::uint8_t> m_pixels;
     std::string m_fontPath;
 };

@@ -32,7 +32,7 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Status:** public beta (`0.1.0-beta.3`). The core editing loop is usable and the test suite runs
+> **Status:** public beta (`0.1.0-beta.4`). The core editing loop is usable and the test suite runs
 > on all three platforms, but APIs and file formats may still change. The beta channel is shown in
 > the window title, the status bar and the About panel.
 
@@ -48,8 +48,8 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 - **Real editing** — UTF-8 documents, selection, undo/redo, clipboard, auto-save, syntax
   highlighting and live C/C++ and JSON diagnostics.
 - **Inline compile functions** — declare build commands in a C/C++ comment block, run them with
-  `⌘R`, and watch a movable PTY terminal stream output beside the definition.
-- **Project-wide function search** — `⌘⇧R` lists compile functions from every text file, backed by
+  `Ctrl+R`, and watch a movable PTY terminal stream output beside the definition.
+- **Project-wide function search** — `Ctrl+Shift+R` lists compile functions from every text file, backed by
   a cache at `.lucid/cache/functions.json`.
 - **File-backed settings** — a modal panel, three theme presets, a custom accent color and live
   JSON validation.
@@ -68,13 +68,13 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-Prebuilt beta bundles are attached to the [latest release](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.3):
+Prebuilt beta bundles are attached to the [latest release](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.4):
 
 | Platform | Artifact | Notes |
 | --- | --- | --- |
-| macOS | `Lucid-v0.1.0-beta.3-macOS.zip` | Ad-hoc signed; unzip and open `Lucid.app` |
-| Linux | `Lucid-v0.1.0-beta.3-Linux.tar.gz` | Extract and run `./lucid`; shared libraries are bundled |
-| Windows | `Lucid-v0.1.0-beta.3-Windows.zip` | Extract and run `Lucid.exe`; needs the Vulkan runtime |
+| macOS | `Lucid-v0.1.0-beta.4-macOS.zip` | Ad-hoc signed; unzip and open `Lucid.app` |
+| Linux | `Lucid-v0.1.0-beta.4-Linux.tar.gz` | Extract and run `./lucid`; shared libraries are bundled |
+| Windows | `Lucid-v0.1.0-beta.4-Windows.zip` | Extract and run `Lucid.exe`; needs the Vulkan runtime |
 
 The Linux tarball is self-contained: it ships `libglfw`, the Vulkan loader and the X11
 runtime libraries next to the binary, so no development packages are required. A working Vulkan
@@ -223,7 +223,7 @@ See [Building](docs/building.md) for signing, packaging, icon regeneration and v
 
 ## Settings
 
-`⌘,` opens the settings panel. **Edit settings...** opens the `Settings` project; the file lives at:
+`Ctrl+,` opens the settings panel. **Edit settings...** opens the `Settings` project; the file lives at:
 
 | Platform | Path |
 | --- | --- |
@@ -255,35 +255,41 @@ the whole interface, including text, layout and mouse hit testing. `theme` accep
 selection tint; omit it to use the theme default. The settings panel includes primary color swatches
 for quick changes.
 
-Settings apply live while the file is edited; `⌘S` persists them. Invalid settings leave the last
+Settings apply live while the file is edited; `Ctrl+S` persists them. Invalid settings leave the last
 valid configuration active and show a red error in the top-right corner; click it to reopen
 `settings.json`.
 
 ## Keyboard shortcuts
 
-On macOS use `⌘`; on other platforms use `Ctrl`.
+Shortcuts are written for Windows and Linux. On macOS, use Command in place of `Ctrl` and Option
+in place of `Alt`:
+
+| Windows / Linux | macOS |
+| --- | --- |
+| `Ctrl` | Command |
+| `Alt` | Option |
 
 | Action | Shortcut |
 | --- | --- |
-| Open or create a project | `⌘P` / `⌘O` |
-| Open or create a file by path | `⌘K` / `⌘N` |
+| Open or create a project | `Ctrl+P` / `Ctrl+O` |
+| Open or create a file by path | `Ctrl+K` / `Ctrl+N` |
 | Complete the selected suggestion | `Tab` |
-| Create the typed folder and keep the prompt open | `⌘↵` |
+| Create the typed folder and keep the prompt open | `Ctrl+Enter` |
 | Dismiss the Path Lens | `Escape` |
-| Save | `⌘S` |
-| Close file (saves first) | `⌘W` |
-| Delete line | `⌘⌫` / `⌘⇧K` |
-| Insert line below / above | `⌘↵` / `⌘⇧↵` |
-| Toggle line comment | `⌘/` |
+| Save | `Ctrl+S` |
+| Close file (saves first) | `Ctrl+W` |
+| Delete line | `Ctrl+Backspace` / `Ctrl+Shift+K` |
+| Insert line below / above | `Ctrl+Enter` / `Ctrl+Shift+Enter` |
+| Toggle line comment | `Ctrl+/` |
 | Indent / outdent selection | `Tab` / `Shift+Tab` |
-| Move current line | `Option+Up` / `Option+Down` |
-| Undo / redo | `⌘Z` / `⌘⇧Z` / `⌘Y` |
-| Run compile function under caret | `⌘R` |
-| Search project compile functions | `⌘⇧R` |
-| Open settings | `⌘,` |
-| Select all / copy / cut / paste | `⌘A` / `⌘C` / `⌘X` / `⌘V` |
-| Duplicate line | `⌘D` |
-| Delete file / project | `⌘⇧⌫` / `⌘⇧⌥⌫` |
+| Move current line | `Alt+Up` / `Alt+Down` |
+| Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` |
+| Run compile function under caret | `Ctrl+R` |
+| Search project compile functions | `Ctrl+Shift+R` |
+| Open settings | `Ctrl+,` |
+| Select all / copy / cut / paste | `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
+| Duplicate line | `Ctrl+D` |
+| Delete file / project | `Ctrl+Shift+Backspace` / `Ctrl+Shift+Alt+Backspace` |
 
 Arrows, `Home` and `End` move the caret; hold `Shift` to extend the selection. Click a line to place
 the caret, drag to select, and `Shift`-click to extend. Scroll to move the viewport. Click anywhere
@@ -321,14 +327,14 @@ every platform. Variables are expanded before execution:
 | `%line%` | compile function definition line |
 | `%platform%` | `macOS`, `windows` or `linux` |
 
-Run a function with `⌘R` anywhere inside its block, click its highlighted `@name`, or use
+Run a function with `Ctrl+R` anywhere inside its block, click its highlighted `@name`, or use
 **Run > Run Compile Function** on macOS. The file is saved first. A terminal panel opens beside the
 function line, streams output and accepts keyboard input while the process is running. It is 50%
 opaque until clicked, then becomes fully opaque and receives focus. Its red traffic light closes the
 panel and terminates the process. Drag the terminal title bar to move the panel; drag a diagnostic
 card by its body.
 
-Press `⌘⇧R` (`Ctrl+Shift+R` elsewhere) or choose **Run > Search Project Functions…** to list
+Press `Ctrl+Shift+R` or choose **Run > Search Project Functions…** to list
 functions from every text file in the project. Type part of a name, then press `Enter` to open the
 defining file and run the matching function. Parsed functions are cached in
 `.lucid/cache/functions.json`; unchanged files are reused on later searches, and the cache is

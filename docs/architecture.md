@@ -98,15 +98,15 @@ copied. Windows embeds `packaging/windows/lucid.ico` plus version metadata throu
 `ui::FrameState` every frame; `UiPass` only reads that snapshot. The snapshot borrows views into
 application-owned strings and document lines, so no editor state leaks into the renderer.
 
-- `⌘P` opens the project prompt. Relative project paths resolve inside `~/Documents/Lucid`,
+- `Ctrl+P` opens the project prompt. Relative project paths resolve inside `~/Documents/Lucid`,
   while `~/...` and absolute paths stay explicit. The resolved path is passed to
   `workspace::Project::openOrCreate`. An empty query lists recent projects and directories inside
   the Lucid projects folder; a partial query browses the matching directory.
-- `⌘K` opens the file prompt. Files come from the project's fuzzy file index and folders from the
+- `Ctrl+K` opens the file prompt. Files come from the project's fuzzy file index and folders from the
   directory index. A non-existent typed path becomes a `+` create-file suggestion and a
   `+ path/` create-folder suggestion.
 - `Enter` opens an existing path or creates a missing one. Every parent directory is created as a
-  side effect. A trailing slash, or `⌘↵`, creates a directory and keeps the prompt open.
+  side effect. A trailing slash, or `Ctrl+Enter`, creates a directory and keeps the prompt open.
 - Selecting a folder suggestion and pressing `Enter` or `Tab` steps into it, which makes deep paths
   navigable without a tree.
 - The command surface is permanently borderless. Query text floats over a blurred, darkened canvas
@@ -129,9 +129,9 @@ application-owned strings and document lines, so no editor state leaks into the 
 ## Selection and clipboard
 
 `Document` owns an anchor plus an active cursor. Navigation methods take an `extendSelection`
-flag, so `Shift` movement and `⌘⇧←/→` grow the range without a separate selection
+flag, so `Shift` movement and `Ctrl+Shift+Left/Right` grow the range without a separate selection
 object. Editing replaces or removes the active range, and `selectionUtf8()` provides clipboard-ready
-text. `Application` maps `⌘C/X/V/A/D/Z` to copy, cut, system paste, select-all, duplicate-line and
+text. `Application` maps `Ctrl+C/X/V/A/D/Z` to copy, cut, system paste, select-all, duplicate-line and
 undo/redo; clipboard text goes through GLFW so it interoperates with other applications.
 
 `UiPass` renders selection ranges from `FrameState` before drawing line text. Mouse press starts a
@@ -155,13 +155,13 @@ geometry. With a document open, `FrameState::backgroundDim` eases the shader tow
 a darker tint and wider ribbons, and eases back when the document closes. The `backgroundMotion`
 setting removes the pass entirely, and the settings panel exposes the same toggle as **Motion**.
 `Application` uses the same layout for hit testing, so clicking the action opens the project prompt.
-On macOS the command and shift keycaps use the real `⌘` and `⇧` glyphs; the font atlas packs both
-symbols alongside its ASCII range. The surface remains visible under the blurred Path Lens overlay.
+On macOS the command and shift keycaps use the real Command and Shift glyphs; elsewhere the command
+keycap shows `⌃ Ctrl` and shift shows `Shift`. The font atlas packs these symbols alongside its ASCII range. The surface remains visible under the blurred Path Lens overlay.
 
 ## Diagnostics and settings
 
 Settings are a normal project named `Settings`. On macOS the root is
-`~/Library/Application Support/Lucid/Settings`; `⌘,` opens the modal settings panel.
+`~/Library/Application Support/Lucid/Settings`; `Ctrl+,` opens the modal settings panel.
 `ui::settingsPanelLayout` owns its geometry and `ui::settingsControlAt` maps clicks to controls. The
 panel changes theme, animation speed, UI zoom and editor toggles immediately and persists them to
 `settings.json`. **Edit settings...** opens the file for advanced changes, including a custom primary color.
@@ -200,7 +200,7 @@ numbers. `%project%`, `%file%`, `%fileDir%`, `%fileName%`, `%relative%`, `%line%
 are expanded immediately before execution.
 
 `Application` caches the parsed script by document revision. Clicking a highlighted directive or
-pressing `⌘R` saves the file and starts `platform::PtyProcess`, which runs `/bin/sh` through
+pressing `Ctrl+R` saves the file and starts `platform::PtyProcess`, which runs `/bin/sh` through
 `forkpty` in the project root. Commands run sequentially; a unique marker is appended to each shell
 command so output can be attributed before the next command is sent. PTY reads and command
 sequencing are nonblocking. ANSI escape sequences, carriage returns and control bytes are sanitized
@@ -216,10 +216,10 @@ terminal title bar and diagnostic cards are
 draggable; offsets are clamped to the viewport and reset when a new function runs, the terminal
 closes, diagnostics reset or the project changes.
 
-`⌘⇧R` opens the project function prompt. `workspace::searchFunctions` ranks exact name
+`Ctrl+Shift+R` opens the project function prompt. `workspace::searchFunctions` ranks exact name
 matches first, then prefixes, substrings, file matches and subsequences. Choosing a result opens
 the defining file, moves the caret to the function and runs it through the same PTY path as
-`⌘R`. The function index is built lazily and cached under `.lucid/cache/functions.json`.
+`Ctrl+R`. The function index is built lazily and cached under `.lucid/cache/functions.json`.
 
 ## Mouse input
 

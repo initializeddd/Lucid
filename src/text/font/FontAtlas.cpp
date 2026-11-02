@@ -170,6 +170,11 @@ FontAtlas::FontAtlas(int pixelHeight) : m_pixelHeight(pixelHeight) {
             const int shiftResult = stbtt_PackFontRange(
                 &packContext, fontData.data(), 0, static_cast<float>(pixelHeight),
                 static_cast<int>(kShiftCodepoint), 1, &packedShift);
+
+            stbtt_packedchar packedControl{};
+            const int controlResult = stbtt_PackFontRange(
+                &packContext, fontData.data(), 0, static_cast<float>(pixelHeight),
+                static_cast<int>(kControlCodepoint), 1, &packedControl);
             stbtt_PackEnd(&packContext);
 
             if (packedResult == 0) {
@@ -232,6 +237,10 @@ FontAtlas::FontAtlas(int pixelHeight) : m_pixelHeight(pixelHeight) {
             if (shiftResult != 0) {
                 fillExtraGlyph(packedShift, m_shiftGlyph);
             }
+            m_controlGlyph = Glyph{};
+            if (controlResult != 0) {
+                fillExtraGlyph(packedControl, m_controlGlyph);
+            }
 
             m_width = atlasSize;
             m_height = atlasSize;
@@ -253,6 +262,9 @@ const Glyph& FontAtlas::glyph(char32_t codepoint) const noexcept {
     }
     if (codepoint == kShiftCodepoint) {
         return m_shiftGlyph;
+    }
+    if (codepoint == kControlCodepoint) {
+        return m_controlGlyph;
     }
     if (codepoint < static_cast<char32_t>(kFirstCodepoint) ||
         codepoint > static_cast<char32_t>(kLastCodepoint)) {

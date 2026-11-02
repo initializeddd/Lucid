@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/initializeddd/Lucid/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue.
+  - name: Documentation
+    url: https://github.com/initializeddd/Lucid/tree/main/docs
+    about: Read the architecture, build and getting-started guides.

@@ -1,0 +1,36 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="rim" x1="168" y1="128" x2="860" y2="920" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.38"/>
+      <stop offset="0.4" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.2"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="307" y1="220" x2="307" y2="823" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A9ADFF"/>
+      <stop offset="0.5" stop-color="#787EFF"/>
+      <stop offset="1" stop-color="#5A61F5"/>
+    </linearGradient>
+    <linearGradient id="whiteMark" x1="412" y1="218" x2="734" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E9ECFF"/>
+    </linearGradient>
+    <filter id="shadow" x="38" y="54" width="948" height="950" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="26" stdDeviation="32" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+    <filter id="markGlow" x="218" y="130" width="610" height="780" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#06070C" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="188" fill="#242424"/>
+  </g>
+
+  <rect x="104" y="104" width="816" height="816" rx="184" stroke="url(#rim)" stroke-width="8"/>
+
+  <g filter="url(#markGlow)" transform="translate(188.9 212.4) scale(5.992)">
+    <path d="M45.0682 85V15.1818H59.8295V72.8295H89.7614V85H45.0682Z" fill="url(#whiteMark)"/>
+    <rect x="18" y="15" width="15" height="70" rx="1.5" fill="url(#accent)"/>
+    <path d="M59.8295 15.1818H45.0682V72.8295H59.8295V15.1818Z" fill="#FFFFFF" fill-opacity="0.06"/>
+  </g>
+</svg>

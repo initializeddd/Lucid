@@ -1,0 +1,71 @@
+# Roadmap
+
+## 0.1 — Foundation
+
+- [x] Project structure and build system
+- [x] GLFW window with a Vulkan surface
+- [x] MoltenVK-compatible instance, device and swapchain
+- [x] Resize handling and a dark, sRGB-aware clear pass
+- [x] Validation layer wiring
+
+## 0.2 — First pixels
+
+- [ ] Render hardware interface (`renderer/rhi`)
+- [ ] Pipeline cache
+- [x] Shader compilation pipeline
+- [ ] Fullscreen triangle
+- [x] Alpha-blended UI geometry
+- [x] Glyph atlas and text rendering prototype
+- [ ] Theme loading from `assets/themes`
+
+## 0.3 — Editor shell
+
+- [x] UTF-8 document model with cursor and keyboard editing
+- [x] Shift-keyboard and mouse-drag text selection
+- [x] System clipboard copy/paste and duplicate-line shortcut
+- [x] Undo/redo
+- [x] Editor layout, line-number gutter, animated caret and status line
+- [x] File open/save through the project workspace
+- [x] C++ syntax highlighting tokenizer
+- [x] Compiler-backed C/C++ diagnostics with anchored, dismissible error card
+- [x] File-backed settings project with live JSON validation
+- [x] Mouse caret placement, viewport scrolling and cursor affordances
+- [x] Brand palette, light/dark marks and GPU-drawn start surface
+- [x] Smooth, low-overshoot spring animation for carets, highlights and Path Lens
+- [x] Inline compile functions with platform filters, variables and clickable run targets
+- [x] Attached PTY terminal with streamed output, input, focus opacity and close control
+- [x] Movable compile terminal and diagnostic cards
+- [x] Project-wide function palette with cached `.lucid/cache/functions.json` index
+- [x] First-run shortcut guidance on the start and empty-project surfaces
+- [x] macOS `.app` bundle, layered Liquid Glass icon source, ICNS asset catalog and platform menu bar
+- [x] Windows executable icon, version resource and Windows 11 DWM caption colors
+- [x] Linux desktop entry and installed application icon
+
+## 0.4 — Path-native workspace
+
+- [x] Project prompt that opens or creates a project root
+- [x] File prompt with fuzzy path suggestions
+- [x] Automatic folder creation from path segments
+- [x] Folder creation with a trailing slash or `⌘↵`
+- [x] Folder suggestions and keyboard navigation through directories
+- [x] Save before switching files/projects and on quit
+- [x] In-session recent projects and project directory browsing
+- [ ] Persisted recent projects and session restore
+- [ ] Large-project index updates without a full refresh
+
+## 0.5 — Daily driver
+
+- [ ] Tabs and splits
+- [ ] Command palette and configurable key bindings
+- [x] Persisted settings and UI zoom
+- [x] JSON syntax highlighting and diagnostics
+- [ ] Symbol index
+- [ ] macOS app bundle and notarization
+
+## Later
+
+- [ ] Incremental parsing
+- [ ] Language server client
+- [ ] Multi-cursor editing
+- [ ] Plugin surface
+- [ ] Windows and Linux packaging

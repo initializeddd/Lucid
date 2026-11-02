@@ -1,0 +1,39 @@
+{
+  "fill": {
+    "solid": "extended-srgb:0.14118,0.14118,0.14118,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "fill": {
+            "automatic-gradient": "extended-gray:1.00000,1.00000"
+          },
+          "image-name": "lucid-1-mark-white.svg",
+          "name": "White L"
+        },
+        {
+          "image-name": "lucid-2-mark-accent.svg",
+          "name": "Indigo bar"
+        }
+      ],
+      "name": "Lucid mark",
+      "lighting": "combined",
+      "specular": true,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.4
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.18
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

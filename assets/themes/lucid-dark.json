@@ -1,0 +1,23 @@
+{
+  "name": "Lucid Dark",
+  "appearance": "dark",
+  "colors": {
+    "background": "#1c1c1c",
+    "surface": "#242424",
+    "surfaceRaised": "#2c2c2c",
+    "border": "#37373b",
+    "foreground": "#e6e6ea",
+    "foregroundMuted": "#9a9aa3",
+    "accent": "#787EFF",
+    "accentStrong": "#787EFF",
+    "selection": "#30304a",
+    "caret": "#F4F4F5",
+    "lineNumber": "#55555c",
+    "warning": "#FBBF24",
+    "error": "#F87171"
+  },
+  "metrics": {
+    "lineHeight": 1.5,
+    "uiScale": 1.0
+  }
+}

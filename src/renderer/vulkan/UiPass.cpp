@@ -1,0 +1,2947 @@
+#include "renderer/vulkan/UiPass.hpp"
+
+#include "editor/syntax/Syntax.hpp"
+#include "ui/Overlay.hpp"
+#include "ui/Welcome.hpp"
+#include "renderer/vulkan/Device.hpp"
+#include "renderer/vulkan/VulkanCommon.hpp"
+#include "text/font/FontAtlas.hpp"
+
+#include <cstdint>
+
+#include "shaders/ui_rect.vert.h"
+#include "shaders/ui_rect.frag.h"
+#include "shaders/ui_text.vert.h"
+#include "shaders/ui_text.frag.h"
+#include "shaders/fullscreen.vert.h"
+#include "shaders/welcome.frag.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace lucid::vk {
+namespace {
+
+constexpr std::uint32_t kMaxTextVertices = 262144;
+constexpr std::size_t kMaxLineChars = 512;
+
+#if defined(__APPLE__)
+constexpr std::u32string_view kCommandGlyph = U"\u2318";
+constexpr std::u32string_view kShiftGlyph = U"\u21E7";
+constexpr std::string_view kCommandFallback = "Cmd";
+#else
+constexpr std::string_view kCommandFallback = "Ctrl";
+#endif
+
+struct WelcomeShortcut {
+    bool command = false;
+    bool shift = false;
+    std::string_view key;
+    std::string_view label;
+};
+
+struct WelcomeRectSpec {
+    float x0 = 0.0F;
+    float y0 = 0.0F;
+    float x1 = 0.0F;
+    float y1 = 0.0F;
+    float radius = 0.0F;
+    float borderWidth = 0.0F;
+    float blur = 0.0F;
+    float opacity = 1.0F;
+    ui::theme::Color fill;
+    ui::theme::Color border;
+};
+
+[[nodiscard]] VkShaderModule createShaderModule(const Device& device,
+                                                const std::uint32_t* code,
+                                                std::size_t size) {
+    VkShaderModuleCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = size;
+    createInfo.pCode = code;
+
+    VkShaderModule module = VK_NULL_HANDLE;
+    LUCID_VK_CHECK(vkCreateShaderModule(device.handle(), &createInfo, nullptr, &module));
+    return module;
+}
+
+void destroyShaderModule(VkDevice device, VkShaderModule module) noexcept {
+    if (module != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device, module, nullptr);
+    }
+}
+
+} // namespace
+
+UiPass::UiPass(const Device& device, VkRenderPass renderPass, VkFormat format,
+               VkExtent2D extent, float contentScale, const text::FontAtlas& font)
+    : m_device(device),
+      m_renderPass(renderPass),
+      m_format(format),
+      m_extent(extent),
+      m_scale(contentScale),
+      m_font(font),
+      m_fontTexture(device, static_cast<std::uint32_t>(font.width()),
+                    static_cast<std::uint32_t>(font.height()), font.pixels().data(),
+                    static_cast<VkDeviceSize>(font.pixels().size())) {
+    try {
+        createDescriptorSetLayout();
+        createDescriptorSet();
+        createPipelineLayouts();
+        createPipelines();
+        createVertexBuffers();
+    } catch (...) {
+        destroy();
+        throw;
+    }
+}
+
+UiPass::~UiPass() {
+    destroy();
+}
+
+void UiPass::createDescriptorSetLayout() {
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    createInfo.bindingCount = 1;
+    createInfo.pBindings = &binding;
+    LUCID_VK_CHECK(
+        vkCreateDescriptorSetLayout(m_device.handle(), &createInfo, nullptr,
+                                    &m_descriptorSetLayout));
+}
+
+void UiPass::createDescriptorSet() {
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    LUCID_VK_CHECK(
+        vkCreateDescriptorPool(m_device.handle(), &poolInfo, nullptr, &m_descriptorPool));
+
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = m_descriptorPool;
+    allocateInfo.descriptorSetCount = 1;
+    allocateInfo.pSetLayouts = &m_descriptorSetLayout;
+    LUCID_VK_CHECK(
+        vkAllocateDescriptorSets(m_device.handle(), &allocateInfo, &m_descriptorSet));
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfo.imageView = m_fontTexture.view();
+    imageInfo.sampler = m_fontTexture.sampler();
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(m_device.handle(), 1, &write, 0, nullptr);
+}
+
+void UiPass::createPipelineLayouts() {
+    VkPushConstantRange rectRange{};
+    rectRange.stageFlags =
+        static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_VERTEX_BIT |
+                                        VK_SHADER_STAGE_FRAGMENT_BIT);
+    rectRange.offset = 0;
+    rectRange.size = sizeof(RectPushConstants);
+
+    VkPipelineLayoutCreateInfo rectInfo{};
+    rectInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    rectInfo.pushConstantRangeCount = 1;
+    rectInfo.pPushConstantRanges = &rectRange;
+    LUCID_VK_CHECK(
+        vkCreatePipelineLayout(m_device.handle(), &rectInfo, nullptr,
+                               &m_rectPipelineLayout));
+
+    VkPushConstantRange textRange{};
+    textRange.stageFlags =
+        static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_VERTEX_BIT |
+                                        VK_SHADER_STAGE_FRAGMENT_BIT);
+    textRange.offset = 0;
+    textRange.size = sizeof(TextPushConstants);
+
+    VkPipelineLayoutCreateInfo textInfo{};
+    textInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    textInfo.setLayoutCount = 1;
+    textInfo.pSetLayouts = &m_descriptorSetLayout;
+    textInfo.pushConstantRangeCount = 1;
+    textInfo.pPushConstantRanges = &textRange;
+    LUCID_VK_CHECK(
+        vkCreatePipelineLayout(m_device.handle(), &textInfo, nullptr,
+                               &m_textPipelineLayout));
+
+    VkPushConstantRange welcomeRange{};
+    welcomeRange.stageFlags =
+        static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_VERTEX_BIT |
+                                        VK_SHADER_STAGE_FRAGMENT_BIT);
+    welcomeRange.offset = 0;
+    welcomeRange.size = sizeof(WelcomePushConstants);
+
+    VkPipelineLayoutCreateInfo welcomeInfo{};
+    welcomeInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    welcomeInfo.pushConstantRangeCount = 1;
+    welcomeInfo.pPushConstantRanges = &welcomeRange;
+    LUCID_VK_CHECK(
+        vkCreatePipelineLayout(m_device.handle(), &welcomeInfo, nullptr,
+                               &m_welcomePipelineLayout));
+}
+
+void UiPass::createPipelines() {
+    VkShaderModule rectVert = VK_NULL_HANDLE;
+    VkShaderModule rectFrag = VK_NULL_HANDLE;
+    VkShaderModule textVert = VK_NULL_HANDLE;
+    VkShaderModule textFrag = VK_NULL_HANDLE;
+    VkShaderModule welcomeVert = VK_NULL_HANDLE;
+    VkShaderModule welcomeFrag = VK_NULL_HANDLE;
+
+    try {
+        rectVert = createShaderModule(m_device, ui_rect_vert_spv, sizeof(ui_rect_vert_spv));
+        rectFrag = createShaderModule(m_device, ui_rect_frag_spv, sizeof(ui_rect_frag_spv));
+        textVert = createShaderModule(m_device, ui_text_vert_spv, sizeof(ui_text_vert_spv));
+        textFrag = createShaderModule(m_device, ui_text_frag_spv, sizeof(ui_text_frag_spv));
+        welcomeVert = createShaderModule(m_device, fullscreen_vert_spv,
+                                         sizeof(fullscreen_vert_spv));
+        welcomeFrag = createShaderModule(m_device, welcome_frag_spv,
+                                         sizeof(welcome_frag_spv));
+
+        VkPipelineShaderStageCreateInfo rectStages[2]{};
+        rectStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        rectStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        rectStages[0].module = rectVert;
+        rectStages[0].pName = "main";
+        rectStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        rectStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        rectStages[1].module = rectFrag;
+        rectStages[1].pName = "main";
+
+        VkPipelineVertexInputStateCreateInfo rectVertexInput{};
+        rectVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterization{};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.depthClampEnable = VK_FALSE;
+        rasterization.rasterizerDiscardEnable = VK_FALSE;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.depthBiasEnable = VK_FALSE;
+        rasterization.lineWidth = 1.0F;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.minSampleShading = 1.0F;
+        multisampling.alphaToCoverageEnable = VK_FALSE;
+        multisampling.alphaToOneEnable = VK_FALSE;
+
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        blendAttachment.blendEnable = VK_TRUE;
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &blendAttachment;
+
+        const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                                VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = 2;
+        dynamicState.pDynamicStates = dynamicStates;
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = rectStages;
+        pipelineInfo.pVertexInputState = &rectVertexInput;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = m_rectPipelineLayout;
+        pipelineInfo.renderPass = m_renderPass;
+        pipelineInfo.subpass = 0;
+        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+        pipelineInfo.basePipelineIndex = -1;
+        LUCID_VK_CHECK(vkCreateGraphicsPipelines(m_device.handle(), VK_NULL_HANDLE, 1,
+                                                 &pipelineInfo, nullptr, &m_rectPipeline));
+
+        VkPipelineShaderStageCreateInfo textStages[2]{};
+        textStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        textStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        textStages[0].module = textVert;
+        textStages[0].pName = "main";
+        textStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        textStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        textStages[1].module = textFrag;
+        textStages[1].pName = "main";
+
+        const VkVertexInputBindingDescription binding{
+            0, sizeof(TextVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        const VkVertexInputAttributeDescription attributes[3] = {
+            {0, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<std::uint32_t>(offsetof(TextVertex, x))},
+            {1, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<std::uint32_t>(offsetof(TextVertex, u))},
+            {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+             static_cast<std::uint32_t>(offsetof(TextVertex, r))},
+        };
+
+        VkPipelineVertexInputStateCreateInfo textVertexInput{};
+        textVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        textVertexInput.vertexBindingDescriptionCount = 1;
+        textVertexInput.pVertexBindingDescriptions = &binding;
+        textVertexInput.vertexAttributeDescriptionCount = 3;
+        textVertexInput.pVertexAttributeDescriptions = attributes;
+
+        pipelineInfo.pStages = textStages;
+        pipelineInfo.pVertexInputState = &textVertexInput;
+        pipelineInfo.layout = m_textPipelineLayout;
+        LUCID_VK_CHECK(vkCreateGraphicsPipelines(m_device.handle(), VK_NULL_HANDLE, 1,
+                                                 &pipelineInfo, nullptr, &m_textPipeline));
+
+        VkPipelineShaderStageCreateInfo welcomeStages[2]{};
+        welcomeStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        welcomeStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        welcomeStages[0].module = welcomeVert;
+        welcomeStages[0].pName = "main";
+        welcomeStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        welcomeStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        welcomeStages[1].module = welcomeFrag;
+        welcomeStages[1].pName = "main";
+
+        pipelineInfo.pStages = welcomeStages;
+        pipelineInfo.pVertexInputState = &rectVertexInput;
+        pipelineInfo.layout = m_welcomePipelineLayout;
+        LUCID_VK_CHECK(vkCreateGraphicsPipelines(m_device.handle(), VK_NULL_HANDLE, 1,
+                                                 &pipelineInfo, nullptr,
+                                                 &m_welcomePipeline));
+    } catch (...) {
+        if (m_rectPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device.handle(), m_rectPipeline, nullptr);
+            m_rectPipeline = VK_NULL_HANDLE;
+        }
+        if (m_textPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device.handle(), m_textPipeline, nullptr);
+            m_textPipeline = VK_NULL_HANDLE;
+        }
+        if (m_welcomePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device.handle(), m_welcomePipeline, nullptr);
+            m_welcomePipeline = VK_NULL_HANDLE;
+        }
+        destroyShaderModule(m_device.handle(), rectVert);
+        destroyShaderModule(m_device.handle(), rectFrag);
+        destroyShaderModule(m_device.handle(), textVert);
+        destroyShaderModule(m_device.handle(), textFrag);
+        destroyShaderModule(m_device.handle(), welcomeVert);
+        destroyShaderModule(m_device.handle(), welcomeFrag);
+        throw;
+    }
+
+    destroyShaderModule(m_device.handle(), rectVert);
+    destroyShaderModule(m_device.handle(), rectFrag);
+    destroyShaderModule(m_device.handle(), textVert);
+    destroyShaderModule(m_device.handle(), textFrag);
+    destroyShaderModule(m_device.handle(), welcomeVert);
+    destroyShaderModule(m_device.handle(), welcomeFrag);
+}
+
+void UiPass::createVertexBuffers() {
+    const VkDeviceSize bufferSize =
+        static_cast<VkDeviceSize>(kMaxTextVertices) * sizeof(TextVertex);
+    for (Buffer& buffer : m_vertexBuffers) {
+        buffer.create(m_device, bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      true);
+    }
+}
+
+void UiPass::destroy() noexcept {
+    for (Buffer& buffer : m_vertexBuffers) {
+        buffer.destroy();
+    }
+
+    if (m_welcomePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device.handle(), m_welcomePipeline, nullptr);
+        m_welcomePipeline = VK_NULL_HANDLE;
+    }
+
+    if (m_textPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device.handle(), m_textPipeline, nullptr);
+        m_textPipeline = VK_NULL_HANDLE;
+    }
+
+    if (m_rectPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device.handle(), m_rectPipeline, nullptr);
+        m_rectPipeline = VK_NULL_HANDLE;
+    }
+
+    if (m_welcomePipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device.handle(), m_welcomePipelineLayout, nullptr);
+        m_welcomePipelineLayout = VK_NULL_HANDLE;
+    }
+
+    if (m_textPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device.handle(), m_textPipelineLayout, nullptr);
+        m_textPipelineLayout = VK_NULL_HANDLE;
+    }
+
+    if (m_rectPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device.handle(), m_rectPipelineLayout, nullptr);
+        m_rectPipelineLayout = VK_NULL_HANDLE;
+    }
+
+    if (m_descriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_device.handle(), m_descriptorPool, nullptr);
+        m_descriptorPool = VK_NULL_HANDLE;
+        m_descriptorSet = VK_NULL_HANDLE;
+    }
+
+    if (m_descriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device.handle(), m_descriptorSetLayout, nullptr);
+        m_descriptorSetLayout = VK_NULL_HANDLE;
+    }
+}
+
+void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
+                  const ui::FrameState& state) const {
+    const float viewportWidth = static_cast<float>(m_extent.width);
+    const float viewportHeight = static_cast<float>(m_extent.height);
+    if (viewportWidth <= 0.0F || viewportHeight <= 0.0F) {
+        return;
+    }
+
+    const float contentScale = m_scale;
+    const float margin = ui::theme::kSearchBarMargin * contentScale;
+    const float lineHeight = ui::theme::kEditorLineHeight * contentScale;
+    const float suggestionLineHeight = ui::theme::kSuggestionLineHeight * contentScale;
+    const float fontCenter = (m_font.ascent() + m_font.descent()) * 0.5F;
+    const float caretHeight = (m_font.ascent() - m_font.descent()) * 0.9F;
+    const double rawDelta =
+        m_lastDrawTime > 0.0 ? state.timeSeconds - m_lastDrawTime : 1.0;
+    const float speed = std::clamp(state.animationSpeed, 0.25F, 4.0F);
+    const float animationDelta =
+        static_cast<float>(std::clamp(rawDelta, 0.0, 0.05)) * speed;
+    const auto springStep = [](float& value, float& velocity, float target,
+                               float delta) {
+        constexpr float omega = 28.0F;
+        constexpr float damping = 0.92F;
+        constexpr float maxStep = 1.0F / 240.0F;
+        float remaining = delta;
+        while (remaining > 0.0F) {
+            const float step = std::min(remaining, maxStep);
+            const float acceleration =
+                omega * omega * (target - value) -
+                2.0F * damping * omega * velocity;
+            velocity += acceleration * step;
+            value += velocity * step;
+            remaining -= step;
+        }
+    };
+    m_lastDrawTime = state.timeSeconds;
+
+    if (!state.hasDocument) {
+        m_animationInitialized = false;
+    }
+
+    VkViewport viewport{};
+    viewport.x = 0.0F;
+    viewport.y = 0.0F;
+    viewport.width = viewportWidth;
+    viewport.height = viewportHeight;
+    viewport.minDepth = 0.0F;
+    viewport.maxDepth = 1.0F;
+
+    VkRect2D fullScissor{};
+    fullScissor.offset = {0, 0};
+    fullScissor.extent = m_extent;
+
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
+
+    std::vector<TextVertex> vertices;
+    vertices.reserve(16384);
+    std::vector<WelcomeRectSpec> welcomeRects;
+    welcomeRects.reserve(16);
+    std::vector<WelcomeRectSpec> suggestionIcons;
+    suggestionIcons.reserve(32);
+    std::vector<std::array<float, 4>> selectionRects;
+    selectionRects.reserve(16);
+    std::vector<WelcomeRectSpec> editorCaretRects;
+    editorCaretRects.reserve(8);
+    std::vector<WelcomeRectSpec> diagnosticRects;
+    diagnosticRects.reserve(24);
+    std::vector<WelcomeRectSpec> overlayRects;
+    overlayRects.reserve(48);
+    std::vector<WelcomeRectSpec> compileMarkers;
+    compileMarkers.reserve(32);
+    std::vector<WelcomeRectSpec> terminalRects;
+    terminalRects.reserve(8);
+    TextRange terminalTextRange{0, 0, fullScissor};
+    bool hasTerminalText = false;
+    std::vector<WelcomeRectSpec> settingsPanelRects;
+    settingsPanelRects.reserve(64);
+    TextRange settingsPanelTextRange{0, 0, fullScissor};
+    bool hasSettingsPanelText = false;
+
+    const auto canAppend = [&vertices](std::size_t count) {
+        return vertices.size() <= static_cast<std::size_t>(kMaxTextVertices) &&
+               count <= static_cast<std::size_t>(kMaxTextVertices) - vertices.size();
+    };
+    const auto makeRange = [&vertices](std::size_t first, VkRect2D scissor) {
+        return TextRange{static_cast<std::uint32_t>(first),
+                         static_cast<std::uint32_t>(vertices.size() - first), scissor};
+    };
+
+    TextRange editorRange{0, 0, fullScissor};
+    bool hasEditor = false;
+    bool hasHighlight = false;
+    float highlightTop = 0.0F;
+    float highlightBottom = 0.0F;
+
+    const float editorTop = ui::theme::kEditorTop * contentScale;
+    const float editorBottom = ui::theme::kEditorBottom * contentScale;
+    const float codeLeft = ui::theme::kEditorCodeLeft * contentScale;
+    const float gutterRight = ui::theme::kEditorGutterRight * contentScale;
+
+    std::int32_t editorScissorY = static_cast<std::int32_t>(std::floor(editorTop));
+    std::int32_t editorScissorHeight =
+        static_cast<std::int32_t>(std::ceil(viewportHeight - editorTop - editorBottom));
+    const std::int32_t maxEditorScissorHeight =
+        static_cast<std::int32_t>(m_extent.height) - editorScissorY;
+    editorScissorHeight = std::min(editorScissorHeight, maxEditorScissorHeight);
+
+    std::size_t drawnLines = 0;
+    if (state.hasDocument && !state.visibleLines.empty() && editorScissorY >= 0 &&
+        editorScissorHeight > 0) {
+        VkRect2D editorScissor{};
+        editorScissor.offset = {0, editorScissorY};
+        editorScissor.extent = {m_extent.width,
+                                static_cast<std::uint32_t>(editorScissorHeight)};
+
+        const std::size_t editorFirst = vertices.size();
+        const std::array<float, 4> numberColor = toGpuColor(ui::theme::kLineNumber);
+        const std::array<float, 4> currentNumberColor = toGpuColor(ui::theme::kAccent);
+        const std::array<float, 4> errorColor = toGpuColor(ui::theme::kError);
+        const std::array<float, 4> plainColor = toGpuColor(ui::theme::kText);
+        const std::array<std::array<float, 4>, 15> syntaxColors = {
+            plainColor,
+            toGpuColor(ui::theme::kSyntaxKeyword),
+            toGpuColor(ui::theme::kSyntaxType),
+            toGpuColor(ui::theme::kSyntaxString),
+            toGpuColor(ui::theme::kSyntaxNumber),
+            toGpuColor(ui::theme::kSyntaxComment),
+            toGpuColor(ui::theme::kSyntaxPreprocessor),
+            toGpuColor(ui::theme::kSyntaxFunction),
+            toGpuColor(ui::theme::kSyntaxPunctuation),
+            toGpuColor(ui::theme::kSyntaxFunction),
+            toGpuColor(ui::theme::kSyntaxCompileComment),
+            toGpuColor(ui::theme::kSyntaxCompileDirective),
+            toGpuColor(ui::theme::kSyntaxCompileFunction),
+            toGpuColor(ui::theme::kSyntaxCompileCommand),
+            toGpuColor(ui::theme::kSyntaxCompileVariable),
+        };
+
+        for (std::size_t index = 0; index < state.visibleLines.size(); ++index) {
+            const std::string number =
+                std::to_string(state.firstLine + static_cast<int>(index) + 1);
+            const std::u32string_view line = state.visibleLines[index];
+            const std::size_t lineChars = std::min(line.size(), kMaxLineChars);
+            const std::size_t estimated = (number.size() + lineChars) * 6U + 8U;
+            if (!canAppend(estimated)) {
+                break;
+            }
+
+            const float rowTop = editorTop + static_cast<float>(index) * lineHeight;
+            const float baseline = rowTop + lineHeight * 0.5F + fontCenter;
+            const float numberWidth = measureText(number);
+            const int absoluteLine = state.firstLine + static_cast<int>(index);
+            const bool currentLine = absoluteLine == state.cursorRow;
+            const bool diagnosticLine =
+                state.diagnosticsVisible && absoluteLine == state.diagnosticLine;
+            if (diagnosticLine) {
+                diagnosticRects.push_back(WelcomeRectSpec{
+                    0.0F, rowTop, viewportWidth, rowTop + lineHeight, 0.0F, 0.0F,
+                    0.0F, 0.08F, ui::theme::kError, ui::theme::kError});
+            }
+            if (state.showLineNumbers) {
+                appendText(vertices, number, gutterRight - numberWidth, baseline,
+                           diagnosticLine ? errorColor
+                                          : (currentLine ? currentNumberColor
+                                                         : numberColor));
+            }
+
+            const bool compileLine =
+                std::find(state.compileFunctionLines.begin(),
+                          state.compileFunctionLines.end(), absoluteLine) !=
+                state.compileFunctionLines.end();
+            if (compileLine) {
+                const float markerWidth = 3.0F * contentScale;
+                const float markerHeight = lineHeight * 0.52F;
+                compileMarkers.push_back(WelcomeRectSpec{
+                    gutterRight + 4.0F * contentScale,
+                    rowTop + (lineHeight - markerHeight) * 0.5F,
+                    gutterRight + 4.0F * contentScale + markerWidth,
+                    rowTop + (lineHeight + markerHeight) * 0.5F, 1.0F * contentScale,
+                    0.0F, 0.0F, 1.0F, ui::theme::kSyntaxCompileFunction,
+                    ui::theme::kSyntaxCompileFunction});
+            }
+
+            if (state.hasSelection && absoluteLine >= state.selectionStartLine &&
+                absoluteLine <= state.selectionEndLine) {
+                const std::size_t selectionStart =
+                    absoluteLine == state.selectionStartLine
+                        ? std::min(static_cast<std::size_t>(std::max(
+                                       state.selectionStartColumn, 0)),
+                                   line.size())
+                        : 0;
+                const std::size_t selectionEnd =
+                    absoluteLine == state.selectionEndLine
+                        ? std::min(static_cast<std::size_t>(std::max(
+                                       state.selectionEndColumn, 0)),
+                                   line.size())
+                        : line.size();
+                if (selectionEnd > selectionStart ||
+                    state.selectionEndLine > absoluteLine) {
+                    const float selectionX0 =
+                        codeLeft + measureText(line.substr(0, selectionStart));
+                    float selectionX1 =
+                        codeLeft + measureText(line.substr(0, selectionEnd));
+                    if (state.selectionEndLine > absoluteLine) {
+                        selectionX1 += lineHeight * 0.32F;
+                    }
+                    const float selectionY0 = rowTop + lineHeight * 0.08F;
+                    const float selectionY1 = rowTop + lineHeight * 0.92F;
+                    selectionRects.push_back(
+                        {selectionX0, selectionY0, selectionX1, selectionY1});
+                }
+            }
+
+            if (diagnosticLine) {
+                const std::size_t start = std::min(
+                    static_cast<std::size_t>(std::max(state.diagnosticColumn - 1, 0)),
+                    line.size());
+                const std::size_t length = std::max(1, state.diagnosticLength);
+                const std::size_t end = std::min(start + length, line.size());
+                const float x0 = codeLeft + measureText(line.substr(0, start));
+                float x1 = codeLeft + measureText(line.substr(0, end));
+                if (x1 <= x0) {
+                    x1 = x0 + 8.0F * contentScale;
+                }
+                const float underlineY = rowTop + lineHeight - 2.0F * contentScale;
+                diagnosticRects.push_back(WelcomeRectSpec{
+                    x0, underlineY, x1, underlineY + 1.5F * contentScale, 0.0F,
+                    0.0F, 0.0F, 0.9F, ui::theme::kError, ui::theme::kError});
+            }
+
+            const std::span<const editor::TokenSpan> tokens =
+                index < state.visibleTokens.size() ? state.visibleTokens[index]
+                                                    : std::span<const editor::TokenSpan>{};
+            if (tokens.empty()) {
+                appendText(vertices, line.substr(0, lineChars), codeLeft, baseline,
+                           plainColor);
+            } else {
+                float pen = codeLeft;
+                std::size_t consumed = 0;
+                for (const editor::TokenSpan& token : tokens) {
+                    if (consumed >= lineChars) {
+                        break;
+                    }
+                    const std::size_t start =
+                        std::min(static_cast<std::size_t>(token.start), lineChars);
+                    const std::size_t length =
+                        std::min(static_cast<std::size_t>(token.length), lineChars - start);
+                    if (start > consumed) {
+                        pen = appendText(vertices, line.substr(consumed, start - consumed),
+                                         pen, baseline, plainColor);
+                    }
+                    if (length > 0) {
+                        const std::size_t colorIndex = std::min(
+                            static_cast<std::size_t>(token.role),
+                            syntaxColors.size() - 1);
+                        pen = appendText(vertices, line.substr(start, length), pen, baseline,
+                                         syntaxColors[colorIndex]);
+                    }
+                    consumed = start + length;
+                }
+                if (consumed < lineChars) {
+                    appendText(vertices, line.substr(consumed, lineChars - consumed), pen,
+                               baseline, plainColor);
+                }
+            }
+            ++drawnLines;
+        }
+
+        if (vertices.size() > editorFirst) {
+            editorRange = makeRange(editorFirst, editorScissor);
+            hasEditor = true;
+        }
+    }
+
+    if (state.hasDocument && state.cursorRow >= 0 &&
+        static_cast<std::size_t>(state.cursorRow) < drawnLines) {
+        highlightTop = editorTop + static_cast<float>(state.cursorRow) * lineHeight;
+        highlightBottom = highlightTop + lineHeight;
+        hasHighlight = state.highlightCurrentLine;
+
+        const bool snap = !m_animationInitialized ||
+                          std::abs(highlightTop - m_animatedHighlightTop) >
+                              lineHeight * 5.0F;
+        if (snap) {
+            m_animatedHighlightTop = highlightTop;
+            m_animatedHighlightBottom = highlightBottom;
+            m_animatedHighlightTopVelocity = 0.0F;
+            m_animatedHighlightBottomVelocity = 0.0F;
+        } else {
+            springStep(m_animatedHighlightTop, m_animatedHighlightTopVelocity,
+                       highlightTop, animationDelta);
+            springStep(m_animatedHighlightBottom, m_animatedHighlightBottomVelocity,
+                       highlightBottom, animationDelta);
+        }
+
+        const std::u32string_view line =
+            state.visibleLines[static_cast<std::size_t>(state.cursorRow)];
+        const std::size_t column = std::min(
+            static_cast<std::size_t>(std::max(state.cursorColumn, 0)), line.size());
+        const float caretTargetX = codeLeft + measureText(line.substr(0, column));
+
+        if (!m_animationInitialized ||
+            std::abs(caretTargetX - m_animatedCaretX) > viewportWidth * 0.45F) {
+            m_animatedCaretX = caretTargetX;
+            m_animatedCaretVelocity = 0.0F;
+        } else {
+            springStep(m_animatedCaretX, m_animatedCaretVelocity, caretTargetX,
+                       animationDelta);
+        }
+
+        if (!state.cursorBlink ||
+            std::fmod(state.timeSeconds * speed, 1.06) < 0.53) {
+            const std::u32string_view caretGlyph =
+                column < line.size() ? line.substr(column, 1)
+                                     : std::u32string_view(U" ");
+            const float cellWidth = std::max(1.0F, measureText(caretGlyph));
+            const float cellTop = m_animatedHighlightTop + lineHeight * 0.08F;
+            const float cellBottom = m_animatedHighlightTop + lineHeight * 0.92F;
+
+            const auto pushCaretRect = [&](float x0, float y0, float x1, float y1,
+                                           float radius,
+                                           const ui::theme::Color& fill) {
+                editorCaretRects.push_back(
+                    WelcomeRectSpec{x0, y0, x1, y1, radius, 0.0F, 0.0F, 1.0F,
+                                    fill, fill});
+            };
+
+            switch (state.cursorStyle) {
+            case editor::CursorStyle::Line: {
+                const float caretTop =
+                    m_animatedHighlightTop + (lineHeight - caretHeight) * 0.5F;
+                pushCaretRect(m_animatedCaretX, caretTop,
+                              m_animatedCaretX +
+                                  std::max(1.0F, 1.5F * contentScale),
+                              caretTop + caretHeight,
+                              std::max(0.5F, 0.75F * contentScale),
+                              ui::theme::kCaret);
+                break;
+            }
+            case editor::CursorStyle::Block: {
+                pushCaretRect(m_animatedCaretX, cellTop,
+                              m_animatedCaretX + cellWidth, cellBottom,
+                              std::min(cellWidth * 0.5F, 1.5F * contentScale),
+                              ui::theme::kCaret);
+                break;
+            }
+            case editor::CursorStyle::Underscore: {
+                const float thickness = std::max(1.5F, 2.0F * contentScale);
+                pushCaretRect(m_animatedCaretX, cellBottom - thickness,
+                              m_animatedCaretX + cellWidth, cellBottom,
+                              thickness * 0.5F, ui::theme::kCaret);
+                break;
+            }
+            case editor::CursorStyle::Kitty: {
+                const float lineWidth = std::max(1.0F, 1.5F * contentScale);
+                const float caretTop =
+                    m_animatedHighlightTop + (lineHeight - caretHeight) * 0.5F;
+                pushCaretRect(m_animatedCaretX, caretTop,
+                              m_animatedCaretX + lineWidth,
+                              caretTop + caretHeight,
+                              lineWidth * 0.5F, ui::theme::kCaret);
+
+                const float earInset = std::max(0.5F, 0.5F * contentScale);
+                const float earWidth = std::max(1.5F, 2.4F * contentScale);
+                const float earHeight = std::max(2.0F, 3.2F * contentScale);
+                const float earX0 = m_animatedCaretX + lineWidth - earInset;
+                const float earX1 = earX0 + earWidth;
+                const float upperEarY = caretTop + std::max(1.0F, 1.4F * contentScale);
+                const float lowerEarY =
+                    upperEarY + earHeight + std::max(1.0F, 1.2F * contentScale);
+                pushCaretRect(earX0, upperEarY, earX1,
+                              upperEarY + earHeight, earWidth * 0.45F,
+                              ui::theme::kCaret);
+                pushCaretRect(earX0, lowerEarY,
+                              earX0 + earWidth * 0.82F,
+                              lowerEarY + earHeight * 0.82F,
+                              earWidth * 0.36F, ui::theme::kCaret);
+                break;
+            }
+            }
+        }
+
+        m_animationInitialized = true;
+    }
+
+    TextRange windowTitleRange{0, 0, fullScissor};
+    bool hasWindowTitle = false;
+    if (state.showWindowTitle && !state.windowTitle.empty()) {
+        std::string title(state.windowTitle);
+        const float maxWidth =
+            std::max(80.0F * contentScale, viewportWidth - 160.0F * contentScale);
+        bool truncated = false;
+        while (!title.empty() && measureText(title) > maxWidth) {
+            title.pop_back();
+            truncated = true;
+        }
+        if (truncated) {
+            title += "...";
+        }
+        const float titleWidth = measureText(title);
+        const std::array<float, 4> titleColor = toGpuColor(ui::theme::kTextMuted);
+        const std::size_t titleFirst = vertices.size();
+        appendText(vertices, title, (viewportWidth - titleWidth) * 0.5F,
+                   18.0F * contentScale + fontCenter, titleColor);
+        if (vertices.size() > titleFirst) {
+            windowTitleRange = makeRange(titleFirst, fullScissor);
+            hasWindowTitle = true;
+        }
+    }
+
+    TextRange ribbonRange{0, 0, fullScissor};
+    bool hasRibbon = false;
+    bool hasDirtyDot = false;
+    float dirtyDotX0 = 0.0F;
+    float dirtyDotX1 = 0.0F;
+    float dirtyDotY0 = 0.0F;
+    float dirtyDotY1 = 0.0F;
+
+    if (state.hasProject && !state.commandVisible && !state.showWindowTitle) {
+        const std::size_t ribbonFirst = vertices.size();
+        const float ribbonTop = margin;
+        const float baseline = ribbonTop + lineHeight * 0.5F + fontCenter;
+        const std::array<float, 4> muted = toGpuColor(ui::theme::kTextMuted);
+        const std::array<float, 4> text = toGpuColor(ui::theme::kText);
+        float pen = margin;
+
+        pen = appendText(vertices, state.projectName, pen, baseline, muted);
+        if (state.hasDocument && !state.filePath.empty()) {
+            pen = appendText(vertices, " / ", pen, baseline, muted);
+            const std::size_t slash = state.filePath.find_last_of('/');
+            if (slash != std::string_view::npos) {
+                pen = appendText(vertices, state.filePath.substr(0, slash + 1), pen, baseline,
+                                 muted);
+            }
+            const std::string_view filename =
+                slash == std::string_view::npos ? state.filePath
+                                                : state.filePath.substr(slash + 1);
+            pen = appendText(vertices, filename, pen, baseline, text);
+
+            if (state.dirty) {
+                const float centerY = ribbonTop + lineHeight * 0.5F;
+                hasDirtyDot = true;
+                dirtyDotX0 = pen + 6.0F * contentScale;
+                dirtyDotX1 = dirtyDotX0 + 4.0F * contentScale;
+                dirtyDotY0 = centerY - 2.0F * contentScale;
+                dirtyDotY1 = centerY + 2.0F * contentScale;
+            }
+        }
+
+        if (vertices.size() > ribbonFirst) {
+            ribbonRange = makeRange(ribbonFirst, fullScissor);
+            hasRibbon = true;
+        }
+    }
+
+    TextRange statusRange{0, 0, fullScissor};
+    bool hasStatus = false;
+    if (!state.statusText.empty() || state.hasDocument) {
+        const std::size_t statusFirst = vertices.size();
+        const float statusCenter = viewportHeight - editorBottom * 0.5F;
+        const float baseline = statusCenter + fontCenter;
+
+        if (!state.statusText.empty()) {
+            appendText(vertices, state.statusText, margin, baseline,
+                       toGpuColor(state.statusIsError ? ui::theme::kError : ui::theme::kTextMuted));
+        }
+
+        if (state.hasDocument) {
+            const std::string position = std::to_string(state.cursorLine + 1) + ":" +
+                                         std::to_string(state.cursorColumn + 1);
+            const float positionWidth = measureText(position);
+            appendText(vertices, position, viewportWidth - margin - positionWidth, baseline,
+                       toGpuColor(ui::theme::kLineNumber));
+        }
+
+        if (vertices.size() > statusFirst) {
+            statusRange = makeRange(statusFirst, fullScissor);
+            hasStatus = true;
+        }
+    }
+
+    TextRange overlayTextRange{0, 0, fullScissor};
+    bool hasOverlayText = false;
+    {
+        const std::size_t overlayTextFirst = vertices.size();
+        const float logicalWidth = viewportWidth / contentScale;
+        const float logicalHeight = viewportHeight / contentScale;
+        const auto scaled = [contentScale](const ui::Rect& source) {
+            return ui::Rect{source.x0 * contentScale, source.y0 * contentScale,
+                            source.x1 * contentScale, source.y1 * contentScale};
+        };
+        const auto addRect = [&overlayRects](const ui::Rect& rect, float radius,
+                                             float borderWidth, float opacity,
+                                             const ui::theme::Color& fill,
+                                             const ui::theme::Color& border) {
+            overlayRects.push_back(WelcomeRectSpec{
+                rect.x0, rect.y0, rect.x1, rect.y1, radius, borderWidth, 0.0F,
+                opacity, fill, border});
+        };
+        const std::array<float, 4> mutedText = toGpuColor(ui::theme::kTextMuted);
+        const std::array<float, 4> normalText = toGpuColor(ui::theme::kText);
+        const std::array<float, 4> errorText = toGpuColor(ui::theme::kError);
+
+        if (!state.commandVisible && state.settingsErrorVisible &&
+            !state.settingsErrorText.empty()) {
+            const ui::SettingsErrorLayout layout =
+                ui::settingsErrorLayout(logicalWidth, logicalHeight);
+            const ui::Rect textRect = scaled(layout.text);
+            std::string message = "Settings: ";
+            message += state.settingsErrorText;
+            const float maxWidth = textRect.x1 - textRect.x0;
+            while (!message.empty() && measureText(message) > maxWidth) {
+                message.pop_back();
+            }
+            if (!message.empty() && message.back() != '.') {
+                message += "...";
+            }
+            appendText(vertices, message,
+                       textRect.x1 - measureText(message),
+                       (textRect.y0 + textRect.y1) * 0.5F + fontCenter,
+                       errorText);
+        }
+
+        if (state.diagnosticsVisible) {
+            const ui::DiagnosticCardLayout layout =
+                state.diagnosticAnchorValid
+                    ? ui::diagnosticCardLayoutAt(
+                          logicalWidth, logicalHeight, state.diagnosticAnchorX,
+                          state.diagnosticLineTop, state.diagnosticLineBottom)
+                    : ui::diagnosticCardLayout(logicalWidth, logicalHeight);
+            const float diagnosticOffsetX =
+                state.diagnosticOffsetX * contentScale;
+            const float diagnosticOffsetY =
+                state.diagnosticOffsetY * contentScale;
+            const auto moveRect = [diagnosticOffsetX, diagnosticOffsetY](
+                                      ui::Rect rect) {
+                return ui::Rect{rect.x0 + diagnosticOffsetX,
+                                rect.y0 + diagnosticOffsetY,
+                                rect.x1 + diagnosticOffsetX,
+                                rect.y1 + diagnosticOffsetY};
+            };
+            const ui::Rect card = moveRect(scaled(layout.card));
+            const ui::Rect ignore = moveRect(scaled(layout.ignoreButton));
+
+            if (layout.anchored && diagnosticOffsetX == 0.0F &&
+                diagnosticOffsetY == 0.0F) {
+                const ui::Rect connector = moveRect(scaled(layout.connector));
+                addRect(connector, 0.0F, 0.0F, 0.55F, ui::theme::kError,
+                        ui::theme::kError);
+            }
+            addRect(card, 6.0F * contentScale, 1.0F * contentScale, 0.97F,
+                    ui::theme::kSurface, ui::theme::kBorder);
+            addRect(ui::Rect{card.x0, card.y0 + 8.0F * contentScale,
+                             card.x0 + 2.0F * contentScale,
+                             card.y1 - 8.0F * contentScale},
+                    1.0F * contentScale, 0.0F, 1.0F, ui::theme::kError,
+                    ui::theme::kError);
+            addRect(ignore, 3.0F * contentScale, 1.0F * contentScale,
+                    state.diagnosticIgnoreHovered ? 1.0F : 0.0F,
+                    state.diagnosticIgnoreHovered ? ui::theme::kSuggestionSelected
+                                                  : ui::theme::kSurface,
+                    ui::theme::kBorder);
+
+            const float textLeft = card.x0 + 16.0F * contentScale;
+            std::string label = state.diagnosticLabel.empty()
+                                    ? std::string("SYNTAX ERROR")
+                                    : std::string(state.diagnosticLabel);
+            if (!state.diagnosticCode.empty()) {
+                label += " [" + std::string(state.diagnosticCode) + "]";
+            }
+            appendText(vertices, label, textLeft,
+                       card.y0 + 23.0F * contentScale + fontCenter, errorText);
+
+            std::string message = "Line " +
+                                  std::to_string(state.diagnosticLine + 1) + ":" +
+                                  std::to_string(state.diagnosticColumn) + "  ";
+            message += state.diagnosticMessage;
+            const float maxWidth =
+                ignore.x0 - textLeft - 12.0F * contentScale;
+            bool truncated = false;
+            while (!message.empty() &&
+                   measureText(message) > maxWidth) {
+                message.pop_back();
+                truncated = true;
+            }
+            if (truncated) {
+                message += "...";
+            }
+            appendText(vertices, message, textLeft,
+                       card.y0 + 47.0F * contentScale + fontCenter, normalText);
+            appendText(vertices, "x",
+                       (ignore.x0 + ignore.x1) * 0.5F - measureText("x") * 0.5F,
+                       (ignore.y0 + ignore.y1) * 0.5F + fontCenter,
+                       state.diagnosticIgnoreHovered ? errorText : mutedText);
+        }
+
+        if (vertices.size() > overlayTextFirst) {
+            overlayTextRange = makeRange(overlayTextFirst, fullScissor);
+            hasOverlayText = true;
+        }
+    }
+
+    TextRange welcomeRange{0, 0, fullScissor};
+    bool hasWelcomeText = false;
+    const float backgroundDim = std::clamp(state.backgroundDim, 0.0F, 1.0F);
+    const bool hasWelcomeBackground = state.backgroundMotion;
+#if defined(__APPLE__)
+    const bool useCommandGlyph = m_font.glyph(0x2318).hasPixels;
+    const bool useShiftGlyph = m_font.glyph(0x21E7).hasPixels;
+#else
+    const bool useCommandGlyph = false;
+    const bool useShiftGlyph = false;
+#endif
+    const float commandTextWidth =
+        useCommandGlyph ? measureText(kCommandGlyph) : measureText(kCommandFallback);
+#if defined(__APPLE__)
+    const float shiftTextWidth =
+        useShiftGlyph ? measureText(kShiftGlyph) : measureText("Shift");
+#else
+    const float shiftTextWidth = measureText("Shift");
+#endif
+
+    enum class FileIconKind {
+        Generic,
+        Code,
+        Header,
+        Json,
+        Markdown,
+        Shell,
+        Image,
+        Config,
+        Cmake,
+        Git,
+        Text,
+    };
+
+    const auto fileIconKind = [](std::string_view path) {
+        const std::size_t slash = path.find_last_of("/\\");
+        std::string name(
+            path.substr(slash == std::string_view::npos ? 0 : slash + 1));
+        for (char& character : name) {
+            if (character >= 'A' && character <= 'Z') {
+                character = static_cast<char>(character - 'A' + 'a');
+            }
+        }
+        const auto endsWith = [&](std::string_view suffix) {
+            return name.size() >= suffix.size() &&
+                   std::string_view(name).substr(name.size() - suffix.size()) ==
+                       suffix;
+        };
+        const auto equals = [&](std::string_view value) { return name == value; };
+
+        if (equals("cmakelists.txt") || endsWith(".cmake")) {
+            return FileIconKind::Cmake;
+        }
+        if (equals(".gitignore") || equals(".gitattributes") ||
+            equals(".gitmodules") || equals(".gitconfig")) {
+            return FileIconKind::Git;
+        }
+        if (equals(".clang-format") || equals(".clang-tidy") ||
+            equals(".editorconfig") || endsWith(".env")) {
+            return FileIconKind::Config;
+        }
+        if (endsWith(".h") || endsWith(".hh") || endsWith(".hpp") ||
+            endsWith(".hxx") || endsWith(".inl") || endsWith(".ipp")) {
+            return FileIconKind::Header;
+        }
+        if (endsWith(".c") || endsWith(".cc") || endsWith(".cpp") ||
+            endsWith(".cxx") || endsWith(".m") || endsWith(".mm") ||
+            endsWith(".py") || endsWith(".pyw") || endsWith(".js") ||
+            endsWith(".jsx") || endsWith(".ts") || endsWith(".tsx") ||
+            endsWith(".java") || endsWith(".kt") || endsWith(".kts") ||
+            endsWith(".rs") || endsWith(".go") || endsWith(".rb") ||
+            endsWith(".php") || endsWith(".cs") || endsWith(".swift") ||
+            endsWith(".lua") || endsWith(".sql") || endsWith(".css") ||
+            endsWith(".scss") || endsWith(".sass") || endsWith(".less") ||
+            endsWith(".html") || endsWith(".htm") || endsWith(".vue") ||
+            endsWith(".svelte")) {
+            return FileIconKind::Code;
+        }
+        if (endsWith(".json") || endsWith(".jsonc") || endsWith(".lock")) {
+            return FileIconKind::Json;
+        }
+        if (endsWith(".md") || endsWith(".mdx") || endsWith(".markdown") ||
+            endsWith(".rst")) {
+            return FileIconKind::Markdown;
+        }
+        if (endsWith(".sh") || endsWith(".bash") || endsWith(".zsh") ||
+            endsWith(".fish") || endsWith(".command") || endsWith(".ps1") ||
+            endsWith(".bat") || endsWith(".cmd")) {
+            return FileIconKind::Shell;
+        }
+        if (endsWith(".png") || endsWith(".jpg") || endsWith(".jpeg") ||
+            endsWith(".gif") || endsWith(".webp") || endsWith(".bmp") ||
+            endsWith(".tif") || endsWith(".tiff") || endsWith(".ico") ||
+            endsWith(".svg") || endsWith(".heic") || endsWith(".avif")) {
+            return FileIconKind::Image;
+        }
+        if (endsWith(".yaml") || endsWith(".yml") || endsWith(".toml") ||
+            endsWith(".ini") || endsWith(".conf") || endsWith(".cfg") ||
+            endsWith(".properties") || endsWith(".plist") ||
+            endsWith(".xml")) {
+            return FileIconKind::Config;
+        }
+        if (endsWith(".txt") || endsWith(".log") || endsWith(".csv") ||
+            endsWith(".tsv")) {
+            return FileIconKind::Text;
+        }
+        return FileIconKind::Generic;
+    };
+
+    const ui::theme::Color noFill{0.0F, 0.0F, 0.0F, 0.0F};
+    const auto addIconRect = [&](std::vector<WelcomeRectSpec>& target, float x0,
+                                 float y0, float x1, float y1, float radius,
+                                 float borderWidth, float opacity,
+                                 const ui::theme::Color& fill,
+                                 const ui::theme::Color& border) {
+        target.push_back(WelcomeRectSpec{x0, y0, x1, y1, radius, borderWidth, 0.0F,
+                                         opacity, fill, border});
+    };
+    const auto addFileOutline = [&](std::vector<WelcomeRectSpec>& target, float x,
+                                    float y, float width, float height,
+                                    float opacity, const ui::theme::Color& color) {
+        const float borderWidth =
+            std::max(1.0F * contentScale, height * 0.055F);
+        addIconRect(target, x, y, x + width, y + height, height * 0.14F,
+                    borderWidth, opacity, noFill, color);
+    };
+    const auto addFileIcon = [&](std::vector<WelcomeRectSpec>& target, float x,
+                                 float y, float width, float height, float opacity,
+                                 const ui::theme::Color& color) {
+        addFileOutline(target, x, y, width, height, opacity, color);
+        const float lineHeight =
+            std::max(1.0F * contentScale, height * 0.055F);
+        const auto line = [&](float left, float top, float right) {
+            addIconRect(target, x + width * left, y + height * top,
+                        x + width * right, y + height * top + lineHeight,
+                        lineHeight * 0.5F, 0.0F, opacity, color, color);
+        };
+        line(0.24F, 0.30F, 0.62F);
+        line(0.24F, 0.47F, 0.74F);
+        line(0.24F, 0.64F, 0.54F);
+    };
+    const auto addFileTypeIcon = [&](std::vector<WelcomeRectSpec>& target, float x,
+                                     float y, float width, float height,
+                                     float opacity, const ui::theme::Color& color,
+                                     FileIconKind kind) {
+        addFileOutline(target, x, y, width, height, opacity, color);
+        const float thickness =
+            std::max(1.0F * contentScale, height * 0.055F);
+        const auto hline = [&](float left, float top, float right) {
+            addIconRect(target, x + width * left, y + height * top,
+                        x + width * right, y + height * top + thickness, 0.0F,
+                        0.0F, opacity, color, color);
+        };
+        const auto vline = [&](float left, float top, float bottom) {
+            addIconRect(target, x + width * left, y + height * top,
+                        x + width * left + thickness, y + height * bottom, 0.0F,
+                        0.0F, opacity, color, color);
+        };
+        const auto block = [&](float left, float top, float right,
+                               float bottom) {
+            addIconRect(target, x + width * left, y + height * top,
+                        x + width * right, y + height * bottom, 0.0F, 0.0F,
+                        opacity, color, color);
+        };
+        const auto dotAt = [&](float centerX, float centerY, float diameter) {
+            addIconRect(target, x + width * centerX - diameter * 0.5F,
+                        y + height * centerY - diameter * 0.5F,
+                        x + width * centerX + diameter * 0.5F,
+                        y + height * centerY + diameter * 0.5F, diameter * 0.5F,
+                        0.0F, opacity, color, color);
+        };
+
+        switch (kind) {
+        case FileIconKind::Generic:
+            addFileIcon(target, x, y, width, height, opacity, color);
+            break;
+        case FileIconKind::Code:
+            vline(0.24F, 0.30F, 0.70F);
+            hline(0.24F, 0.30F, 0.34F);
+            hline(0.24F, 0.70F, 0.34F);
+            vline(0.74F, 0.30F, 0.70F);
+            hline(0.64F, 0.30F, 0.74F);
+            hline(0.64F, 0.70F, 0.74F);
+            break;
+        case FileIconKind::Header:
+            vline(0.36F, 0.28F, 0.72F);
+            vline(0.62F, 0.28F, 0.72F);
+            hline(0.26F, 0.39F, 0.72F);
+            hline(0.26F, 0.59F, 0.72F);
+            break;
+        case FileIconKind::Json:
+            vline(0.32F, 0.30F, 0.70F);
+            hline(0.32F, 0.30F, 0.42F);
+            hline(0.32F, 0.70F, 0.42F);
+            hline(0.24F, 0.47F, 0.32F);
+            vline(0.68F, 0.30F, 0.70F);
+            hline(0.58F, 0.30F, 0.68F);
+            hline(0.58F, 0.70F, 0.68F);
+            hline(0.68F, 0.47F, 0.76F);
+            break;
+        case FileIconKind::Markdown:
+            vline(0.47F, 0.27F, 0.54F);
+            hline(0.36F, 0.54F, 0.64F);
+            hline(0.41F, 0.62F, 0.59F);
+            hline(0.46F, 0.70F, 0.54F);
+            break;
+        case FileIconKind::Shell:
+            hline(0.25F, 0.33F, 0.42F);
+            hline(0.34F, 0.43F, 0.51F);
+            hline(0.25F, 0.53F, 0.42F);
+            hline(0.52F, 0.67F, 0.76F);
+            break;
+        case FileIconKind::Image:
+            dotAt(0.64F, 0.34F,
+                  std::max(2.4F * contentScale, height * 0.16F));
+            hline(0.22F, 0.70F, 0.78F);
+            hline(0.28F, 0.60F, 0.50F);
+            hline(0.36F, 0.50F, 0.46F);
+            hline(0.48F, 0.63F, 0.72F);
+            break;
+        case FileIconKind::Config: {
+            hline(0.24F, 0.38F, 0.76F);
+            hline(0.24F, 0.60F, 0.76F);
+            const float knob =
+                std::max(2.6F * contentScale, height * 0.18F);
+            const float knobOffset = (thickness * 0.5F) / height;
+            dotAt(0.40F, 0.38F + knobOffset, knob);
+            dotAt(0.62F, 0.60F + knobOffset, knob);
+            break;
+        }
+        case FileIconKind::Cmake:
+            block(0.24F, 0.34F, 0.46F, 0.44F);
+            block(0.50F, 0.34F, 0.74F, 0.44F);
+            block(0.24F, 0.50F, 0.36F, 0.60F);
+            block(0.40F, 0.50F, 0.62F, 0.60F);
+            block(0.66F, 0.50F, 0.76F, 0.60F);
+            break;
+        case FileIconKind::Git: {
+            const float dot =
+                std::max(2.4F * contentScale, height * 0.16F);
+            vline(0.32F, 0.30F, 0.70F);
+            hline(0.32F, 0.48F, 0.66F);
+            dotAt(0.32F, 0.30F, dot);
+            dotAt(0.32F, 0.70F, dot);
+            dotAt(0.66F, 0.48F, dot);
+            break;
+        }
+        case FileIconKind::Text:
+            hline(0.24F, 0.27F, 0.72F);
+            hline(0.24F, 0.40F, 0.66F);
+            hline(0.24F, 0.53F, 0.70F);
+            hline(0.24F, 0.66F, 0.50F);
+            break;
+        }
+    };
+    const auto addFolderIcon = [&](std::vector<WelcomeRectSpec>& target, float x,
+                                   float y, float width, float height, float opacity,
+                                   const ui::theme::Color& color,
+                                   const ui::theme::Color& badgeColor) {
+        const float tabWidth = width * 0.46F;
+        const float tabHeight = height * 0.28F;
+        const float borderWidth =
+            std::max(1.0F * contentScale, height * 0.05F);
+        const float radius = std::max(1.0F * contentScale, height * 0.13F);
+        ui::theme::Color bodyFill = color;
+        bodyFill.a *= 0.16F;
+        addIconRect(target, x, y + tabHeight, x + width, y + height, radius,
+                    borderWidth, opacity, bodyFill, color);
+        addIconRect(target, x + width * 0.06F, y,
+                    x + width * 0.06F + tabWidth, y + tabHeight + borderWidth,
+                    radius * 0.75F, 0.0F, opacity, color, color);
+        if (badgeColor.a > 0.0F) {
+            const float badge = std::max(3.0F * contentScale, height * 0.22F);
+            const float badgeX = x + width - badge - width * 0.14F;
+            const float badgeY = y + height - badge - height * 0.14F;
+            addIconRect(target, badgeX, badgeY, badgeX + badge, badgeY + badge,
+                        badge * 0.24F, 0.0F, opacity, badgeColor, badgeColor);
+        }
+    };
+    const auto addProjectIcon = [&](std::vector<WelcomeRectSpec>& target, float x,
+                                    float y, float width, float height, float opacity,
+                                    const ui::theme::Color& color,
+                                    const ui::theme::Color& badgeColor) {
+        const float borderWidth =
+            std::max(1.0F * contentScale, height * 0.055F);
+        const float radius = std::max(1.0F * contentScale, height * 0.14F);
+        ui::theme::Color bodyFill = color;
+        bodyFill.a *= 0.12F;
+        addIconRect(target, x, y, x + width, y + height, radius, borderWidth,
+                    opacity, bodyFill, color);
+        const float barHeight = height * 0.30F;
+        addIconRect(target, x + borderWidth * 0.5F, y + borderWidth * 0.5F,
+                    x + width - borderWidth * 0.5F, y + barHeight,
+                    radius * 0.6F, 0.0F, opacity, color, color);
+        const float dot = std::max(2.0F * contentScale, height * 0.16F);
+        const float dotY = y + (barHeight - dot) * 0.5F;
+        addIconRect(target, x + width * 0.16F, dotY,
+                    x + width * 0.16F + dot, dotY + dot, dot * 0.5F, 0.0F,
+                    opacity, badgeColor, badgeColor);
+        ui::theme::Color contentColor = color;
+        contentColor.a *= 0.55F;
+        const float contentLine =
+            std::max(1.0F * contentScale, height * 0.045F);
+        addIconRect(target, x + width * 0.20F, y + height * 0.61F,
+                    x + width * 0.56F, y + height * 0.61F + contentLine,
+                    contentLine * 0.5F, 0.0F, opacity, contentColor,
+                    contentColor);
+        addIconRect(target, x + width * 0.20F, y + height * 0.75F,
+                    x + width * 0.42F, y + height * 0.75F + contentLine,
+                    contentLine * 0.5F, 0.0F, opacity, contentColor,
+                    contentColor);
+    };
+    const auto addPlusBadge = [&](std::vector<WelcomeRectSpec>& target, float x,
+                                  float y, float size, float opacity,
+                                  const ui::theme::Color& color) {
+        const float thickness = std::max(1.0F * contentScale, size * 0.16F);
+        addIconRect(target, x, y + (size - thickness) * 0.5F, x + size,
+                    y + (size + thickness) * 0.5F, thickness * 0.5F, 0.0F,
+                    opacity, color, color);
+        addIconRect(target, x + (size - thickness) * 0.5F, y,
+                    x + (size + thickness) * 0.5F, y + size, thickness * 0.5F,
+                    0.0F, opacity, color, color);
+    };
+
+    const auto drawWelcomeShortcuts = [&](float top, float centerX,
+                                          int columns, float left,
+                                          bool alignLeft,
+                                          const std::array<float, 4>& textColor) {
+        constexpr std::array<WelcomeShortcut, 6> shortcuts{{
+            {true, false, "K", "File"},
+            {true, false, "S", "Save"},
+            {true, true, "R", "Search"},
+            {true, false, "R", "Run"},
+            {true, false, "W", "Close"},
+            {true, false, ",", "Settings"},
+        }};
+
+        const float keyPad = 6.0F * contentScale;
+        const float keyGap = 6.0F * contentScale;
+        const float labelGap = keyGap;
+        const float chipGap = 20.0F * contentScale;
+        const float keyHeight = 18.0F * contentScale;
+        const float rowHeight = 24.0F * contentScale;
+        const float commandKeyWidth = commandTextWidth + keyPad * 2.0F;
+        const float shiftKeyWidth = shiftTextWidth + keyPad * 2.0F;
+        const auto keyWidth = [&](std::string_view key) {
+            return measureText(key) + keyPad * 2.0F;
+        };
+        const auto chipWidth = [&](const WelcomeShortcut& shortcut) {
+            float width = keyWidth(shortcut.key);
+            int keys = 1;
+            if (shortcut.command) {
+                width += commandKeyWidth;
+                ++keys;
+            }
+            if (shortcut.shift) {
+                width += shiftKeyWidth;
+                ++keys;
+            }
+            width += keyGap * static_cast<float>(keys - 1);
+            return width + labelGap + measureText(shortcut.label);
+        };
+
+        const std::array<float, 4> hintColor =
+            toGpuColor(ui::theme::kTextMuted);
+        std::array<float, 3> columnWidths{};
+        for (std::size_t shortcutIndex = 0; shortcutIndex < shortcuts.size();
+             ++shortcutIndex) {
+            const std::size_t column = shortcutIndex % static_cast<std::size_t>(columns);
+            columnWidths[column] =
+                std::max(columnWidths[column], chipWidth(shortcuts[shortcutIndex]));
+        }
+
+        float tableWidth = 0.0F;
+        for (int column = 0; column < columns; ++column) {
+            tableWidth += columnWidths[static_cast<std::size_t>(column)];
+        }
+        tableWidth += chipGap * static_cast<float>(columns - 1);
+        const float tableLeft = alignLeft ? left : centerX - tableWidth * 0.5F;
+
+        std::size_t index = 0;
+        std::size_t rowIndex = 0;
+        while (index < shortcuts.size()) {
+            const int rowSize = std::min<int>(
+                columns, static_cast<int>(shortcuts.size() - index));
+            const float rowTop = top + static_cast<float>(rowIndex) * rowHeight;
+            const float keyTop = rowTop + (rowHeight - keyHeight) * 0.5F;
+            const float baseline = keyTop + keyHeight * 0.5F + fontCenter;
+            float x = tableLeft;
+
+            const auto addKeycap = [&](float width, bool glyphAvailable,
+                                       std::u32string_view glyph,
+                                       std::string_view fallback) {
+                welcomeRects.push_back(WelcomeRectSpec{
+                    x, keyTop, x + width, keyTop + keyHeight,
+                    3.0F * contentScale, 1.0F * contentScale, 0.0F, 0.85F,
+                    ui::theme::kSurface, ui::theme::kBorder});
+                const float textWidth =
+                    glyphAvailable ? measureText(glyph) : measureText(fallback);
+                const float textX = x + (width - textWidth) * 0.5F;
+                if (glyphAvailable) {
+                    appendText(vertices, glyph, textX, baseline, textColor);
+                } else {
+                    appendText(vertices, fallback, textX, baseline, textColor);
+                }
+                x += width + keyGap;
+            };
+
+            for (int column = 0; column < rowSize; ++column) {
+                const WelcomeShortcut& shortcut =
+                    shortcuts[index + static_cast<std::size_t>(column)];
+                if (column > 0) {
+                    x += chipGap;
+                }
+                if (shortcut.shift) {
+                    addKeycap(shiftKeyWidth, useShiftGlyph, kShiftGlyph, "Shift");
+                }
+                if (shortcut.command) {
+                    addKeycap(commandKeyWidth, useCommandGlyph, kCommandGlyph,
+                              kCommandFallback);
+                }
+                addKeycap(keyWidth(shortcut.key), false, {}, shortcut.key);
+                appendText(vertices, shortcut.label, x, baseline, hintColor);
+                x += columnWidths[static_cast<std::size_t>(column)];
+            }
+
+            index += static_cast<std::size_t>(rowSize);
+            ++rowIndex;
+        }
+    };
+
+    if (state.showWelcome && !state.hasProject) {
+        const ui::WelcomeLayout layout =
+            ui::welcomeLayout(viewportWidth, viewportHeight, contentScale);
+        constexpr float logoMinX = 18.0F;
+        constexpr float logoMaxX = 89.7614F;
+        constexpr float logoMinY = 15.0F;
+        constexpr float logoArtHeight = 70.0F;
+        const float logoUnit = layout.logoSize / logoArtHeight;
+        const float logoLeft =
+            layout.logoLeft + layout.logoSize * 0.5F -
+            (logoMinX + logoMaxX) * 0.5F * logoUnit;
+        const float logoTop = layout.logoTop - logoMinY * logoUnit;
+
+        if (layout.showDivider) {
+            welcomeRects.push_back(WelcomeRectSpec{
+                layout.dividerX0, layout.dividerY0, layout.dividerX1,
+                layout.dividerY1, 0.0F, 0.0F, 0.0F, 0.55F,
+                ui::theme::kBorder, ui::theme::kBorder});
+            welcomeRects.push_back(WelcomeRectSpec{
+                layout.dividerX0 - 0.5F * contentScale, layout.dividerY0,
+                layout.dividerX1 + 0.5F * contentScale,
+                layout.dividerY0 + 24.0F * contentScale, 1.0F * contentScale,
+                0.0F, 0.0F, 0.9F, ui::theme::kPrimary, ui::theme::kPrimary});
+        }
+
+        const auto addLogoRect = [&](float x, float y, float width, float height,
+                                     const ui::theme::Color& color) {
+            welcomeRects.push_back(WelcomeRectSpec{
+                logoLeft + x * logoUnit, logoTop + y * logoUnit,
+                logoLeft + (x + width) * logoUnit,
+                logoTop + (y + height) * logoUnit, 0.0F, 0.0F, 0.0F, 1.0F, color,
+                color});
+        };
+
+        addLogoRect(18.0F, 15.0F, 15.0F, 70.0F, ui::theme::kLogoAccent);
+        addLogoRect(45.0682F, 15.1818F, 14.7613F, 69.8182F,
+                    ui::theme::kLogoForeground);
+        addLogoRect(45.0682F, 72.8295F, 44.6932F, 12.1705F,
+                    ui::theme::kLogoForeground);
+
+        const bool welcomeHovered = state.welcomeActionHovered;
+        const std::array<float, 4> actionColor =
+            toGpuColor(welcomeHovered ? ui::theme::kPrimary : ui::theme::kText);
+        const ui::theme::Color keyFill =
+            welcomeHovered ? ui::theme::kSurface : ui::theme::kBackground;
+        const ui::theme::Color keyBorder =
+            welcomeHovered ? ui::theme::kPrimary : ui::theme::kBorder;
+        const ui::theme::Color actionFill =
+            welcomeHovered ? ui::theme::kSuggestionSelected : ui::theme::kSurface;
+        const ui::theme::Color actionBorder =
+            welcomeHovered ? ui::theme::kPrimary : ui::theme::kBorder;
+
+        const std::size_t welcomeFirst = vertices.size();
+
+        welcomeRects.push_back(WelcomeRectSpec{
+            layout.actionX0, layout.actionY0, layout.actionX1, layout.actionY1,
+            9.0F * contentScale, 1.0F * contentScale, 0.0F,
+            welcomeHovered ? 0.98F : 0.72F, actionFill, actionBorder});
+
+        const float keyPad = 8.0F * contentScale;
+        const float keyGap = 6.0F * contentScale;
+        const float labelGap = 14.0F * contentScale;
+        const float actionPad = 16.0F * contentScale;
+        const float keyTop =
+            layout.actionY0 +
+            (layout.actionY1 - layout.actionY0 - layout.keyHeight) * 0.5F;
+        const float keyBaseline = keyTop + layout.keyHeight * 0.5F + fontCenter;
+        const float commandWidth = commandTextWidth + keyPad * 2.0F;
+        const float letterWidth = measureText("P") + keyPad * 2.0F;
+        const std::string_view label = "Open a project";
+        const float labelWidth = measureText(label);
+        const float totalWidth =
+            commandWidth + keyGap + letterWidth + labelGap + labelWidth;
+        const float rowStart = layout.actionX0 + actionPad;
+        const float arrowWidth = measureText(">");
+        const bool showArrow =
+            layout.actionX1 - layout.actionX0 >= totalWidth + actionPad * 2.0F +
+                                                  arrowWidth + 24.0F * contentScale;
+
+        const auto addKey = [&](float x, float width, std::string_view text) {
+            welcomeRects.push_back(WelcomeRectSpec{
+                x, keyTop, x + width, keyTop + layout.keyHeight,
+                3.0F * contentScale, 1.0F * contentScale, 0.0F, 0.92F,
+                keyFill, keyBorder});
+            const float textWidth = measureText(text);
+            appendText(vertices, text, x + (width - textWidth) * 0.5F, keyBaseline,
+                       actionColor);
+        };
+
+        welcomeRects.push_back(WelcomeRectSpec{
+            rowStart, keyTop, rowStart + commandWidth, keyTop + layout.keyHeight,
+            3.0F * contentScale, 1.0F * contentScale, 0.0F, 0.92F, keyFill,
+            keyBorder});
+#if defined(__APPLE__)
+        if (useCommandGlyph) {
+            appendText(vertices, kCommandGlyph,
+                       rowStart + (commandWidth - commandTextWidth) * 0.5F,
+                       keyBaseline, actionColor);
+        } else {
+            appendText(vertices, kCommandFallback,
+                       rowStart + (commandWidth - commandTextWidth) * 0.5F,
+                       keyBaseline, actionColor);
+        }
+#else
+        appendText(vertices, kCommandFallback,
+                   rowStart + (commandWidth - commandTextWidth) * 0.5F,
+                   keyBaseline, actionColor);
+#endif
+        addKey(rowStart + commandWidth + keyGap, letterWidth, "P");
+        appendText(vertices,
+                   label, rowStart + commandWidth + keyGap + letterWidth + labelGap,
+                   keyBaseline, actionColor);
+
+        if (showArrow) {
+            appendText(vertices, ">", layout.actionX1 - actionPad - arrowWidth,
+                       keyBaseline,
+                       toGpuColor(welcomeHovered ? ui::theme::kPrimary
+                                                 : ui::theme::kTextMuted));
+        }
+
+        drawWelcomeShortcuts(layout.hintTop, layout.centerX, layout.hintColumns,
+                             layout.hintLeft, layout.hintAlignLeft,
+                             toGpuColor(ui::theme::kTextMuted));
+
+        if (vertices.size() > welcomeFirst) {
+            welcomeRange = makeRange(welcomeFirst, fullScissor);
+            hasWelcomeText = true;
+        }
+    } else if (state.hasProject && !state.hasDocument && !state.commandVisible) {
+        const std::size_t emptyFirst = vertices.size();
+
+        const float centerY = viewportHeight * 0.44F;
+        const std::array<float, 4> titleColor =
+            toGpuColor(ui::theme::kTextMuted);
+        const std::array<float, 4> projectColor = toGpuColor(ui::theme::kText);
+        constexpr float projectScale = 1.5F;
+
+        if (!state.projectName.empty()) {
+            const float projectCenterY = centerY - lineHeight * 1.45F;
+            const float iconWidth = 30.0F * contentScale;
+            const float iconHeight = 24.0F * contentScale;
+            const float iconGap = 13.0F * contentScale;
+            const float maxTextWidth = std::max(
+                40.0F * contentScale,
+                (viewportWidth - 64.0F * contentScale - iconWidth - iconGap) /
+                    projectScale);
+            std::string projectName(state.projectName);
+            bool truncated = false;
+            while (!projectName.empty() &&
+                   measureText(projectName) > maxTextWidth) {
+                projectName.pop_back();
+                truncated = true;
+            }
+            if (truncated) {
+                projectName += "...";
+            }
+            const float projectTextWidth =
+                measureText(projectName) * projectScale;
+            const float groupWidth = iconWidth + iconGap + projectTextWidth;
+            const float groupLeft = (viewportWidth - groupWidth) * 0.5F;
+            const float iconTop = projectCenterY - iconHeight * 0.5F;
+
+            ui::theme::Color folderColor = ui::theme::kTextMuted;
+            folderColor.a = 0.72F;
+            ui::theme::Color badgeColor = ui::theme::kPrimary;
+            badgeColor.a = 0.95F;
+            addProjectIcon(welcomeRects, groupLeft, iconTop, iconWidth, iconHeight,
+                           1.0F, folderColor, badgeColor);
+
+            const std::size_t projectTextFirst = vertices.size();
+            appendText(vertices, projectName,
+                       -measureText(projectName) * 0.5F, 0.0F, projectColor);
+            const float projectCenterX =
+                groupLeft + iconWidth + iconGap + projectTextWidth * 0.5F;
+            for (std::size_t index = projectTextFirst; index < vertices.size();
+                 ++index) {
+                vertices[index].x =
+                    projectCenterX + vertices[index].x * projectScale;
+                vertices[index].y = projectCenterY + fontCenter * projectScale +
+                                    vertices[index].y * projectScale;
+            }
+        }
+
+        const std::string title = "No file open";
+        const float titleWidth = measureText(title);
+        appendText(vertices, title, (viewportWidth - titleWidth) * 0.5F,
+                   centerY + fontCenter, titleColor);
+        const ui::WelcomeLayout layout =
+            ui::welcomeLayout(viewportWidth, viewportHeight, contentScale);
+        drawWelcomeShortcuts(centerY + lineHeight * 1.15F, viewportWidth * 0.5F,
+                             layout.hintColumns, 0.0F, false,
+                             toGpuColor(ui::theme::kTextMuted));
+        if (vertices.size() > emptyFirst) {
+            welcomeRange = makeRange(emptyFirst, fullScissor);
+            hasWelcomeText = true;
+        }
+    }
+
+    float barX0 = 0.0F;
+    float barY1 = 0.0F;
+    float barBlur = 0.0F;
+    float barOpacity = std::clamp(state.opacity, 0.0F, 1.0F);
+
+    TextRange commandTextRange{0, 0, fullScissor};
+    bool hasCommandText = false;
+    TextRange commandStatusRange{0, 0, fullScissor};
+    bool hasCommandStatus = false;
+    std::array<TextRange, static_cast<std::size_t>(ui::theme::kMaxSuggestions)>
+        suggestionRanges{};
+    std::array<float, static_cast<std::size_t>(ui::theme::kMaxSuggestions)>
+        suggestionOpacities{};
+    std::size_t suggestionRangeCount = 0;
+    bool hasSuggestionSelection = false;
+    float suggestionSelectionX0 = 0.0F;
+    float suggestionSelectionY0 = 0.0F;
+    float suggestionSelectionX1 = 0.0F;
+    float suggestionSelectionY1 = 0.0F;
+    float suggestionSelectionRadius = 0.0F;
+    float suggestionSelectionOpacity = 0.0F;
+    bool hasSuggestionRail = false;
+    float suggestionRailX0 = 0.0F;
+    float suggestionRailY0 = 0.0F;
+    float suggestionRailX1 = 0.0F;
+    float suggestionRailY1 = 0.0F;
+    bool hasCommandCaret = false;
+    float commandCaretX0 = 0.0F;
+    float commandCaretX1 = 0.0F;
+    float commandCaretY0 = 0.0F;
+    float commandCaretY1 = 0.0F;
+
+    if (state.commandVisible) {
+        const float availableWidth = std::max(0.0F, viewportWidth - margin * 2.0F);
+        const float barWidth =
+            std::min(ui::theme::kSearchBarWidth * contentScale, availableWidth);
+        const float barHeight = ui::theme::kSearchBarHeight * contentScale;
+
+        if (barWidth > 0.0F && barHeight > 0.0F) {
+            const float baseX0 = margin;
+            const float baseY0 = std::max(
+                margin,
+                ui::commandBarTop(viewportHeight / contentScale) * contentScale);
+            const float baseY1 = baseY0 + barHeight;
+            const float offsetX = state.offsetX * contentScale;
+            const float scaleX = state.scaleX;
+            const float scaleY = state.scaleY;
+            const float pivotX = baseX0;
+            const float pivotY = baseY0 + barHeight * 0.5F;
+
+            const auto transformX = [pivotX, scaleX, offsetX](float x) {
+                return pivotX + (x - pivotX) * scaleX + offsetX;
+            };
+            const auto transformY = [pivotY, scaleY](float y) {
+                return pivotY + (y - pivotY) * scaleY;
+            };
+
+            barX0 = transformX(baseX0);
+            barY1 = transformY(baseY1);
+            barBlur = state.blur * contentScale;
+
+            const float padding = ui::theme::kSearchBarPadding * contentScale;
+            const float textX = baseX0 + padding;
+            const float centerY = baseY0 + barHeight * 0.5F;
+            const float baseline = centerY + fontCenter;
+            const bool empty = state.commandQuery.empty();
+            const std::string_view text =
+                empty ? (state.commandKind == ui::PromptKind::Project
+                             ? std::string_view("Open or create project...")
+                             : state.commandKind == ui::PromptKind::Function
+                                   ? std::string_view("Search project functions...")
+                                   : std::string_view("Open or create file..."))
+                      : state.commandQuery;
+            const std::array<float, 4> accentColor = toGpuColor(ui::theme::kAccent);
+            const std::array<float, 4> mutedColor = toGpuColor(ui::theme::kTextMuted);
+            const std::array<float, 4> primaryColor = toGpuColor(ui::theme::kText);
+            const std::array<float, 4> textColor =
+                empty ? mutedColor : primaryColor;
+
+            const std::size_t textFirst = vertices.size();
+            const float penX = appendText(vertices, text, textX, baseline, textColor);
+            for (std::size_t index = textFirst; index < vertices.size(); ++index) {
+                vertices[index].x = transformX(vertices[index].x);
+                vertices[index].y = transformY(vertices[index].y);
+            }
+
+            const auto makeScissorRect = [&](float x0, float y0, float x1, float y1) {
+                const int maxX = static_cast<int>(m_extent.width);
+                const int maxY = static_cast<int>(m_extent.height);
+                const int left = std::clamp(static_cast<int>(std::floor(x0)), 0, maxX);
+                const int top = std::clamp(static_cast<int>(std::floor(y0)), 0, maxY);
+                const int right = std::clamp(static_cast<int>(std::ceil(x1)), 0, maxX);
+                const int bottom = std::clamp(static_cast<int>(std::ceil(y1)), 0, maxY);
+                VkRect2D scissor{};
+                scissor.offset = {left, top};
+                scissor.extent = {static_cast<std::uint32_t>(std::max(0, right - left)),
+                                  static_cast<std::uint32_t>(std::max(0, bottom - top))};
+                return scissor;
+            };
+
+            const float textScissorX1 = transformX(
+                baseX0 + std::max(barWidth, std::min(viewportWidth - margin * 2.0F,
+                                                     520.0F * contentScale)));
+            const VkRect2D textScissor =
+                makeScissorRect(transformX(baseX0), transformY(baseY0),
+                                textScissorX1, transformY(baseY1));
+            if (textScissor.extent.width > 0 && textScissor.extent.height > 0 &&
+                vertices.size() > textFirst) {
+                commandTextRange = makeRange(textFirst, textScissor);
+                hasCommandText = true;
+            }
+
+            if (!empty && std::fmod(state.timeSeconds, 1.06) < 0.53) {
+                const float caretWidth = std::max(1.0F, 1.5F * contentScale);
+                const float caretBaseX = penX + 2.0F * contentScale;
+                const float caretTop = centerY - caretHeight * 0.5F;
+
+                hasCommandCaret = true;
+                commandCaretX0 = transformX(caretBaseX);
+                commandCaretX1 = transformX(caretBaseX + caretWidth);
+                commandCaretY0 = transformY(caretTop);
+                commandCaretY1 = transformY(caretTop + caretHeight);
+            }
+
+            const float statusLeft = barX0 + 12.0F * contentScale;
+            float suggestionTop = barY1 + ui::theme::kSuggestionGap * contentScale;
+            const float suggestionWidth = std::max(
+                barWidth, std::min(viewportWidth - margin * 2.0F, 520.0F * contentScale));
+            const float suggestionX0 = barX0;
+            const float suggestionX1 = barX0 + suggestionWidth * scaleX;
+            const float suggestionInset = ui::theme::kSuggestionInset * contentScale;
+            const float pathPadding = ui::theme::kSuggestionPaddingX * contentScale;
+
+            const auto easeOutCubic = [](float value) {
+                const float t = 1.0F - std::clamp(value, 0.0F, 1.0F);
+                return 1.0F - t * t * t;
+            };
+            const float revealAge = static_cast<float>(
+                std::max(0.0, state.timeSeconds - state.suggestionEpoch)) * speed;
+            const auto rowReveal = [revealAge, &easeOutCubic](std::size_t index) {
+                const float local =
+                    (revealAge - static_cast<float>(index) * 0.016F) / 0.14F;
+                return easeOutCubic(local);
+            };
+
+            if (!state.commandStatus.empty()) {
+                const std::size_t commandStatusFirst = vertices.size();
+                const float statusBaseline =
+                    suggestionTop + lineHeight * 0.5F + fontCenter;
+                appendText(vertices, state.commandStatus, statusLeft, statusBaseline,
+                           toGpuColor(state.commandStatusIsError ? ui::theme::kError
+                                                                 : ui::theme::kTextMuted));
+                const VkRect2D statusScissor = makeScissorRect(
+                    suggestionX0, suggestionTop, suggestionX1,
+                    suggestionTop + lineHeight);
+                if (statusScissor.extent.width > 0 && statusScissor.extent.height > 0 &&
+                    vertices.size() > commandStatusFirst) {
+                    commandStatusRange = makeRange(commandStatusFirst, statusScissor);
+                    hasCommandStatus = true;
+                }
+                suggestionTop += suggestionLineHeight;
+            }
+
+            const std::size_t count =
+                std::min(state.suggestions.size(),
+                         static_cast<std::size_t>(ui::theme::kMaxSuggestions));
+            if (count > 0) {
+                const VkRect2D suggestionScissor = makeScissorRect(
+                    suggestionX0, suggestionTop, suggestionX1,
+                    suggestionTop + static_cast<float>(count) * suggestionLineHeight +
+                        4.0F * contentScale);
+
+                const float selectionOpacity =
+                    std::clamp(state.suggestionSelectionOpacity, 0.0F, 1.0F) * barOpacity;
+                if (selectionOpacity > 0.01F && state.suggestionSelectionRow >= -0.5F) {
+                    const float selectedTop =
+                        suggestionTop + state.suggestionSelectionRow * suggestionLineHeight;
+                    const float rowX0 = std::clamp(suggestionX0 + suggestionInset, 0.0F,
+                                                   viewportWidth);
+                    const float rowX1 = std::clamp(suggestionX1 - suggestionInset, 0.0F,
+                                                   viewportWidth);
+                    const float rowY0 = selectedTop + 1.0F * contentScale;
+                    const float rowY1 =
+                        selectedTop + suggestionLineHeight - 1.0F * contentScale;
+                    if (rowX1 > rowX0 && rowY1 > rowY0) {
+                        hasSuggestionSelection = true;
+                        suggestionSelectionX0 = rowX0;
+                        suggestionSelectionY0 = rowY0;
+                        suggestionSelectionX1 = rowX1;
+                        suggestionSelectionY1 = rowY1;
+                        suggestionSelectionRadius =
+                            ui::theme::kSuggestionRadius * contentScale;
+                        suggestionSelectionOpacity = selectionOpacity;
+
+                        const float railWidth =
+                            ui::theme::kSuggestionRailWidth * contentScale;
+                        suggestionRailX0 = rowX0 + 3.0F * contentScale;
+                        suggestionRailX1 = suggestionRailX0 + railWidth;
+                        suggestionRailY0 = rowY0 + 3.0F * contentScale;
+                        suggestionRailY1 = rowY1 - 3.0F * contentScale;
+                        hasSuggestionRail = suggestionRailY1 > suggestionRailY0;
+                    }
+                }
+
+                for (std::size_t index = 0; index < count; ++index) {
+                    const ui::PathSuggestion& suggestion = state.suggestions[index];
+                    const bool selected =
+                        static_cast<int>(index) == state.selectedSuggestion;
+                    const float reveal = rowReveal(index);
+                    const float rowAlpha =
+                        barOpacity * std::clamp(reveal, 0.0F, 1.0F);
+                    const float rowTop = suggestionTop +
+                                         static_cast<float>(index) * suggestionLineHeight +
+                                         (1.0F - reveal) * 5.0F * contentScale;
+                    const float suggestionBaseline =
+                        rowTop + suggestionLineHeight * 0.5F + fontCenter;
+                    const float pathX = suggestionX0 + suggestionInset + pathPadding;
+                    const float iconWidth = 14.0F * contentScale;
+                    const float iconHeight = 15.0F * contentScale;
+                    const float iconTop =
+                        rowTop + suggestionLineHeight * 0.5F - iconHeight * 0.5F;
+                    const float iconX = pathX;
+                    const float suggestionTextX =
+                        iconX + iconWidth + 8.0F * contentScale;
+                    const std::size_t rowFirst = vertices.size();
+
+                    if (suggestion.kind == ui::SuggestionKind::Function) {
+                        float pen = appendText(vertices, "@", pathX,
+                                               suggestionBaseline,
+                                               selected ? accentColor : mutedColor);
+                        pen = appendText(vertices, suggestion.path, pen,
+                                         suggestionBaseline,
+                                         selected ? accentColor : primaryColor);
+                        if (!suggestion.detail.empty()) {
+                            const float detailWidth = measureText(suggestion.detail);
+                            const float detailX =
+                                suggestionX1 - suggestionInset - pathPadding -
+                                detailWidth;
+                            if (detailX > pen + 10.0F * contentScale) {
+                                appendText(vertices, suggestion.detail, detailX,
+                                           suggestionBaseline, mutedColor);
+                            }
+                        }
+                    } else if (suggestion.kind == ui::SuggestionKind::CreateFile ||
+                        suggestion.kind == ui::SuggestionKind::CreateDirectory) {
+                        const bool directory =
+                            suggestion.kind == ui::SuggestionKind::CreateDirectory;
+                        if (directory) {
+                            addFolderIcon(suggestionIcons, iconX, iconTop, iconWidth,
+                                          iconHeight, rowAlpha, ui::theme::kAccent,
+                                          noFill);
+                        } else {
+                            addFileIcon(suggestionIcons, iconX, iconTop, iconWidth,
+                                        iconHeight, rowAlpha, ui::theme::kAccent);
+                        }
+                        addPlusBadge(
+                            suggestionIcons, iconX + iconWidth * 0.60F,
+                            iconTop + iconHeight * 0.52F,
+                            8.0F * contentScale, rowAlpha, ui::theme::kAccent);
+                        float pen = appendText(vertices, suggestion.path,
+                                               suggestionTextX, suggestionBaseline,
+                                               accentColor);
+                        if (directory && (suggestion.path.empty() ||
+                                          suggestion.path.back() != '/')) {
+                            appendText(vertices, "/", pen, suggestionBaseline, mutedColor);
+                        }
+                    } else {
+                        const bool project =
+                            suggestion.kind == ui::SuggestionKind::Project;
+                        const bool directory =
+                            suggestion.kind == ui::SuggestionKind::Directory || project;
+                        if (project) {
+                            addProjectIcon(
+                                suggestionIcons, iconX, iconTop, iconWidth,
+                                iconHeight, rowAlpha,
+                                selected ? ui::theme::kAccent : ui::theme::kTextMuted,
+                                ui::theme::kAccent);
+                        } else if (directory) {
+                            addFolderIcon(
+                                suggestionIcons, iconX, iconTop, iconWidth, iconHeight,
+                                rowAlpha,
+                                selected ? ui::theme::kAccent : ui::theme::kTextMuted,
+                                noFill);
+                        } else {
+                            addFileTypeIcon(
+                                suggestionIcons, iconX, iconTop, iconWidth, iconHeight,
+                                rowAlpha,
+                                selected ? ui::theme::kAccent : ui::theme::kTextMuted,
+                                fileIconKind(suggestion.path));
+                        }
+                        float pen = suggestionTextX;
+                        const std::size_t slash = suggestion.path.find_last_of('/');
+                        if (slash != std::string_view::npos) {
+                            pen = appendText(vertices, suggestion.path.substr(0, slash + 1),
+                                             pen, suggestionBaseline, mutedColor);
+                        }
+                        const std::string_view filename =
+                            slash == std::string_view::npos
+                                ? suggestion.path
+                                : suggestion.path.substr(slash + 1);
+                        pen = appendText(vertices, filename, pen, suggestionBaseline,
+                                         selected ? accentColor : primaryColor);
+                        if (directory && !suggestion.path.empty() &&
+                            suggestion.path.back() != '/') {
+                            appendText(vertices, "/", pen, suggestionBaseline, mutedColor);
+                        }
+                    }
+
+                    if (rowAlpha > 0.01F && vertices.size() > rowFirst &&
+                        suggestionRangeCount < suggestionRanges.size() &&
+                        suggestionScissor.extent.width > 0 &&
+                        suggestionScissor.extent.height > 0) {
+                        suggestionRanges[suggestionRangeCount] =
+                            makeRange(rowFirst, suggestionScissor);
+                        suggestionOpacities[suggestionRangeCount] = rowAlpha;
+                        ++suggestionRangeCount;
+                    }
+                }
+            }
+        }
+    }
+
+    if (state.compileTerminalVisible && !state.commandVisible &&
+        !state.compileTerminalTitle.empty()) {
+        const float logicalWidth = viewportWidth / contentScale;
+        const float logicalHeight = viewportHeight / contentScale;
+        const bool standalone = state.compileTerminalStandalone;
+        ui::CompileTerminalLayout layout;
+        if (standalone) {
+            const float titleHeightLogical =
+                ui::theme::kCompileTerminalTitleHeight;
+            const float padding = ui::theme::kCompileTerminalPadding;
+            const float inputHeight = 24.0F;
+            layout.panel =
+                ui::Rect{0.0F, 0.0F, logicalWidth, logicalHeight};
+            layout.titleBar =
+                ui::Rect{0.0F, 0.0F, logicalWidth, titleHeightLogical};
+            layout.output =
+                ui::Rect{padding, titleHeightLogical, logicalWidth - padding,
+                         logicalHeight - padding - inputHeight};
+            layout.input = ui::Rect{padding,
+                                    logicalHeight - padding - inputHeight,
+                                    logicalWidth - padding,
+                                    logicalHeight - padding};
+        } else {
+            const int rows = std::max(
+                1, static_cast<int>(std::floor(
+                       (logicalHeight - ui::theme::kEditorTop -
+                        ui::theme::kEditorBottom) /
+                       std::max(1.0F, ui::theme::kEditorLineHeight))));
+            const int row = std::clamp(
+                state.compileTerminalLine - state.firstLine, 0, rows - 1);
+            const float anchorTop =
+                ui::theme::kEditorTop +
+                static_cast<float>(row) * ui::theme::kEditorLineHeight;
+            layout = ui::compileTerminalLayout(logicalWidth, logicalHeight,
+                                               anchorTop);
+        }
+
+        const float reveal = std::clamp(state.compileTerminalReveal, 0.0F, 1.25F);
+        const float scale = 0.96F + 0.04F * reveal;
+        const float offsetY = (1.0F - reveal) * 12.0F * contentScale;
+
+        const auto toScreen = [contentScale](const ui::Rect& source) {
+            return ui::Rect{source.x0 * contentScale, source.y0 * contentScale,
+                            source.x1 * contentScale, source.y1 * contentScale};
+        };
+
+        ui::Rect panel = toScreen(layout.panel);
+        ui::Rect trafficLights = toScreen(layout.trafficLights);
+        ui::Rect close = toScreen(layout.closeButton);
+        ui::Rect output = toScreen(layout.output);
+        ui::Rect input = toScreen(layout.input);
+        const float centerX = (panel.x0 + panel.x1) * 0.5F;
+        const float bottomY = panel.y1;
+        const auto mapX = [centerX, scale](float x) {
+            return centerX + (x - centerX) * scale;
+        };
+        const auto mapY = [bottomY, scale, offsetY](float y) {
+            return bottomY + (y - bottomY) * scale + offsetY;
+        };
+        const auto mapRect = [&mapX, &mapY](ui::Rect source) {
+            return ui::Rect{mapX(source.x0), mapY(source.y0), mapX(source.x1),
+                            mapY(source.y1)};
+        };
+        panel = mapRect(panel);
+        trafficLights = mapRect(trafficLights);
+        close = mapRect(close);
+        output = mapRect(output);
+        input = mapRect(input);
+        const float terminalOffsetX = state.compileTerminalOffsetX * contentScale;
+        const float terminalOffsetY = state.compileTerminalOffsetY * contentScale;
+        const auto offsetRect = [terminalOffsetX, terminalOffsetY](ui::Rect rect) {
+            return ui::Rect{rect.x0 + terminalOffsetX, rect.y0 + terminalOffsetY,
+                            rect.x1 + terminalOffsetX, rect.y1 + terminalOffsetY};
+        };
+        panel = offsetRect(panel);
+        trafficLights = offsetRect(trafficLights);
+        close = offsetRect(close);
+        output = offsetRect(output);
+        input = offsetRect(input);
+
+        const float opacity = std::clamp(state.compileTerminalOpacity, 0.0F, 1.0F);
+        const float padding = ui::theme::kCompileTerminalPadding * contentScale;
+        const float titleHeight =
+            ui::theme::kCompileTerminalTitleHeight * contentScale;
+        const float terminalLineHeight = lineHeight;
+
+        const float panelRadius =
+            standalone ? 0.0F
+                       : ui::theme::kCompileTerminalRadius * contentScale;
+        if (!standalone) {
+            const ui::theme::Color shadow{0.0F, 0.0F, 0.0F, 1.0F};
+            for (int layer = 3; layer >= 1; --layer) {
+                const float expand =
+                    static_cast<float>(layer) * 5.0F * contentScale;
+                terminalRects.push_back(WelcomeRectSpec{
+                    panel.x0 - expand, panel.y0 - expand + 3.0F * contentScale,
+                    panel.x1 + expand, panel.y1 + expand + 3.0F * contentScale,
+                    panelRadius + expand, 0.0F, 12.0F * contentScale,
+                    opacity * 0.08F, shadow, shadow});
+            }
+        }
+
+        terminalRects.push_back(WelcomeRectSpec{
+            panel.x0, panel.y0, panel.x1, panel.y1, panelRadius,
+            standalone ? 0.0F : 1.0F * contentScale, 0.0F, opacity,
+            ui::theme::kSurface,
+            standalone
+                ? ui::theme::kSurface
+                : (state.compileTerminalFocused ? ui::theme::kPrimary
+                                                : ui::theme::kBorder)});
+        terminalRects.push_back(WelcomeRectSpec{
+            panel.x0 + 1.0F * contentScale, panel.y0 + 1.0F * contentScale,
+            panel.x1 - 1.0F * contentScale, panel.y0 + titleHeight,
+            std::max(0.0F, panelRadius - 1.0F * contentScale), 0.0F, 0.0F,
+            opacity * 0.98F, ui::theme::kSuggestionSurface,
+            ui::theme::kSuggestionSurface});
+        if (!standalone) {
+            terminalRects.push_back(WelcomeRectSpec{
+                panel.x0 + panelRadius, panel.y0, panel.x1 - panelRadius,
+                panel.y0 + 2.0F * contentScale, 1.0F * contentScale, 0.0F,
+                0.0F,
+                opacity * (state.compileTerminalFocused ? 0.95F : 0.55F),
+                ui::theme::kPrimary, ui::theme::kPrimary});
+        }
+        terminalRects.push_back(WelcomeRectSpec{
+            panel.x0 + panelRadius, panel.y0 + titleHeight,
+            panel.x1 - panelRadius,
+            panel.y0 + titleHeight + 1.0F * contentScale, 0.0F, 0.0F, 0.0F,
+            opacity * 0.85F, ui::theme::kBorder, ui::theme::kBorder});
+        terminalRects.push_back(WelcomeRectSpec{
+            panel.x0 + padding, input.y0 - 6.0F * contentScale,
+            panel.x1 - padding, input.y0 - 5.0F * contentScale,
+            0.0F, 0.0F, 0.0F, opacity * 0.7F, ui::theme::kBorder,
+            ui::theme::kBorder});
+
+        if (!standalone) {
+            const float dot = 10.0F * contentScale;
+            const float dotGap = 7.0F * contentScale;
+            const float dotRadius = dot * 0.5F;
+            const float dotY = (trafficLights.y0 + trafficLights.y1) * 0.5F;
+            const std::array<ui::theme::Color, 3> lightColors{
+                ui::theme::Color{0.98431F, 0.37255F, 0.34118F, 1.0F},
+                ui::theme::Color{0.99608F, 0.73725F, 0.18039F, 1.0F},
+                ui::theme::Color{0.15686F, 0.78431F, 0.25098F, 1.0F}};
+            for (std::size_t index = 0; index < lightColors.size(); ++index) {
+                const float dotX = trafficLights.x0 + dotRadius +
+                                   static_cast<float>(index) * (dot + dotGap);
+                const float lightOpacity =
+                    index == 0U && state.compileTerminalCloseHovered
+                        ? opacity
+                        : opacity * 0.92F;
+                terminalRects.push_back(WelcomeRectSpec{
+                    dotX - dotRadius, dotY - dotRadius, dotX + dotRadius,
+                    dotY + dotRadius, dotRadius, 0.0F, 0.0F, lightOpacity,
+                    lightColors[index], lightColors[index]});
+            }
+            if (state.compileTerminalCloseHovered) {
+                terminalRects.push_back(WelcomeRectSpec{
+                    close.x0, close.y0, close.x1, close.y1,
+                    4.0F * contentScale, 1.0F * contentScale, 0.0F,
+                    opacity * 0.35F, ui::theme::kSurface, ui::theme::kError});
+            }
+        }
+
+        const std::size_t terminalFirst = vertices.size();
+        const std::array<float, 4> titleColor =
+            toGpuColor(ui::theme::kSyntaxCompileFunction);
+        const std::array<float, 4> mutedText = toGpuColor(ui::theme::kTextMuted);
+        const std::array<float, 4> normalText = toGpuColor(ui::theme::kText);
+        const std::array<float, 4> accentText = toGpuColor(ui::theme::kAccent);
+        const ui::theme::Color statusSwatch =
+            state.compileTerminalRunning ? ui::theme::kPrimary
+                                         : ui::theme::kTextMuted;
+        const std::array<float, 4> statusColor = toGpuColor(statusSwatch);
+
+        const std::string_view statusText =
+            state.compileTerminalRunning ? "running" : "finished";
+        float statusX0 = panel.x1 - padding;
+        if (!standalone) {
+            const float statusWidth =
+                measureText(statusText) + 26.0F * contentScale;
+            const float statusX1 = panel.x1 - padding;
+            statusX0 = statusX1 - statusWidth;
+            const float pillHeight = 18.0F * contentScale;
+            const float pillY0 =
+                panel.y0 + (titleHeight - pillHeight) * 0.5F;
+            const float pillY1 = pillY0 + pillHeight;
+            terminalRects.push_back(WelcomeRectSpec{
+                statusX0, pillY0, statusX1, pillY1, pillHeight * 0.5F,
+                1.0F * contentScale, 0.0F, opacity * 0.9F,
+                state.compileTerminalRunning ? ui::theme::kSelection
+                                             : ui::theme::kBackground,
+                state.compileTerminalRunning ? ui::theme::kPrimary
+                                             : ui::theme::kBorder});
+            const float statusDotRadius = 2.0F * contentScale;
+            const float statusDotX = statusX0 + 9.0F * contentScale;
+            const float statusDotY = (pillY0 + pillY1) * 0.5F;
+            terminalRects.push_back(WelcomeRectSpec{
+                statusDotX - statusDotRadius, statusDotY - statusDotRadius,
+                statusDotX + statusDotRadius, statusDotY + statusDotRadius,
+                statusDotRadius, 0.0F, 0.0F, opacity * 0.95F, statusSwatch,
+                statusSwatch});
+            appendText(vertices, statusText,
+                       statusDotX + 6.0F * contentScale,
+                       (pillY0 + pillY1) * 0.5F + fontCenter, statusColor);
+        }
+
+        std::string title(state.compileTerminalTitle);
+        const float titleMaxWidth =
+            standalone
+                ? std::max(80.0F * contentScale,
+                           viewportWidth - 160.0F * contentScale)
+                : statusX0 - (trafficLights.x1 + 12.0F * contentScale) -
+                      10.0F * contentScale;
+        while (!title.empty() && measureText(title) > titleMaxWidth) {
+            title.pop_back();
+        }
+        const float titleWidth = measureText(title);
+        const float titleX =
+            standalone ? (viewportWidth - titleWidth) * 0.5F
+                       : trafficLights.x1 + 12.0F * contentScale;
+        appendText(vertices, title, titleX,
+                   panel.y0 + titleHeight * 0.5F + fontCenter, titleColor);
+
+        const std::string_view outputText = state.compileTerminalOutput;
+        std::vector<std::string_view> outputLines;
+        outputLines.reserve(24);
+        std::size_t lineStart = 0;
+        while (lineStart < outputText.size()) {
+            const std::size_t newline = outputText.find('\n', lineStart);
+            if (newline == std::string_view::npos) {
+                outputLines.push_back(outputText.substr(lineStart));
+                break;
+            }
+            outputLines.push_back(outputText.substr(lineStart, newline - lineStart));
+            lineStart = newline + 1;
+        }
+
+        const int maxOutputLines =
+            std::max(1, static_cast<int>((output.y1 - output.y0) / terminalLineHeight));
+        const int firstOutputLine =
+            std::max(0, static_cast<int>(outputLines.size()) - maxOutputLines);
+        const float outputMaxWidth = output.x1 - output.x0;
+        float outputBaseline = output.y0 + fontCenter + 3.0F * contentScale;
+        for (int index = firstOutputLine;
+             index < static_cast<int>(outputLines.size()); ++index) {
+            std::string_view line = outputLines[static_cast<std::size_t>(index)];
+            while (!line.empty() && measureText(line) > outputMaxWidth) {
+                line.remove_suffix(1);
+            }
+            appendText(vertices, line, output.x0, outputBaseline, mutedText);
+            outputBaseline += terminalLineHeight;
+        }
+
+        if (state.compileTerminalRunning) {
+            std::string inputLine = "> ";
+            inputLine += state.compileTerminalInput;
+            if (inputLine.size() > 160) {
+                inputLine = inputLine.substr(inputLine.size() - 160);
+            }
+            const float inputMaxWidth = input.x1 - input.x0;
+            while (inputLine.size() > 2 && measureText(inputLine) > inputMaxWidth) {
+                inputLine.erase(2, 1);
+            }
+            const float promptWidth = measureText("> ");
+            appendText(vertices, "> ", input.x0,
+                       (input.y0 + input.y1) * 0.5F + fontCenter, accentText);
+            appendText(vertices, inputLine.substr(2), input.x0 + promptWidth,
+                       (input.y0 + input.y1) * 0.5F + fontCenter, normalText);
+
+            if (std::fmod(state.timeSeconds, 1.06) < 0.53) {
+                const float caretX =
+                    input.x0 + measureText(std::string_view(inputLine));
+                const float terminalCaretHeight =
+                    (m_font.ascent() - m_font.descent()) * 0.9F;
+                const float terminalCaretTop =
+                    (input.y0 + input.y1) * 0.5F - terminalCaretHeight * 0.5F;
+                terminalRects.push_back(WelcomeRectSpec{
+                    caretX, terminalCaretTop,
+                    caretX + std::max(1.0F, 1.5F * contentScale),
+                    terminalCaretTop + terminalCaretHeight, 0.0F, 0.0F, 0.0F,
+                    opacity, ui::theme::kCaret, ui::theme::kCaret});
+            }
+        } else {
+            appendText(vertices, "Process finished. Click the red light to close.",
+                       input.x0, (input.y0 + input.y1) * 0.5F + fontCenter,
+                       mutedText);
+        }
+
+        if (vertices.size() > terminalFirst) {
+            const int maxX = static_cast<int>(m_extent.width);
+            const int maxY = static_cast<int>(m_extent.height);
+            const float shadowPadding = 24.0F * contentScale;
+            const int left = std::clamp(
+                static_cast<int>(std::floor(panel.x0 - shadowPadding)), 0, maxX);
+            const int top = std::clamp(
+                static_cast<int>(std::floor(panel.y0 - shadowPadding)), 0, maxY);
+            const int right = std::clamp(
+                static_cast<int>(std::ceil(panel.x1 + shadowPadding)), 0, maxX);
+            const int bottom = std::clamp(
+                static_cast<int>(std::ceil(panel.y1 + shadowPadding)), 0, maxY);
+            VkRect2D scissor{};
+            scissor.offset = {left, top};
+            scissor.extent = {
+                static_cast<std::uint32_t>(std::max(0, right - left)),
+                static_cast<std::uint32_t>(std::max(0, bottom - top))};
+            if (scissor.extent.width > 0 && scissor.extent.height > 0) {
+                terminalTextRange = makeRange(terminalFirst, scissor);
+                hasTerminalText = true;
+            }
+        }
+    }
+
+    if (state.settingsPanelVisible) {
+        const float logicalWidth = viewportWidth / contentScale;
+        const float logicalHeight = viewportHeight / contentScale;
+        const ui::SettingsPanelLayout layout =
+            ui::settingsPanelLayout(logicalWidth, logicalHeight);
+        const auto toScreen = [contentScale](const ui::Rect& source) {
+            return ui::Rect{source.x0 * contentScale, source.y0 * contentScale,
+                            source.x1 * contentScale, source.y1 * contentScale};
+        };
+        const auto addPanelRect = [&settingsPanelRects](
+                                      const ui::Rect& rect, float radius,
+                                      float borderWidth, float opacity,
+                                      const ui::theme::Color& fill,
+                                      const ui::theme::Color& border) {
+            settingsPanelRects.push_back(WelcomeRectSpec{
+                rect.x0, rect.y0, rect.x1, rect.y1, radius, borderWidth, 0.0F,
+                opacity, fill, border});
+        };
+        const auto centerBaseline = [fontCenter](const ui::Rect& rect) {
+            return (rect.y0 + rect.y1) * 0.5F + fontCenter;
+        };
+        const auto centeredText = [this, &vertices, fontCenter](std::string_view text,
+                                                          const ui::Rect& rect,
+                                                          const std::array<float, 4>& color) {
+            const float width = measureText(text);
+            appendText(vertices, text, (rect.x0 + rect.x1 - width) * 0.5F,
+                       (rect.y0 + rect.y1) * 0.5F + fontCenter, color);
+        };
+
+        const std::array<float, 4> normalText = toGpuColor(ui::theme::kText);
+        const std::array<float, 4> mutedText = toGpuColor(ui::theme::kTextMuted);
+        const std::array<float, 4> accentText = toGpuColor(ui::theme::kPrimary);
+        const std::array<float, 4> doneText =
+            ui::theme::luminance(ui::theme::kPrimary) > 0.55F
+                ? std::array<float, 4>{0.05F, 0.05F, 0.07F, 1.0F}
+                : std::array<float, 4>{1.0F, 1.0F, 1.0F, 1.0F};
+
+        addPanelRect(ui::Rect{0.0F, 0.0F, viewportWidth, viewportHeight}, 0.0F,
+                     0.0F, 0.46F, ui::theme::kBackground, ui::theme::kBackground);
+
+        const ui::Rect panel = toScreen(layout.panel);
+        addPanelRect(panel, 10.0F * contentScale, 1.0F * contentScale, 0.985F,
+                     ui::theme::kSurface, ui::theme::kBorder);
+
+        const ui::Rect title = toScreen(layout.title);
+        const std::size_t settingsFirst = vertices.size();
+        appendText(vertices, "Settings", title.x0,
+                   centerBaseline(title), normalText);
+
+        const auto sectionLabel = [&](std::string_view text, const ui::Rect& source) {
+            const ui::Rect rect = toScreen(source);
+            appendText(vertices, text, rect.x0, centerBaseline(rect), mutedText);
+        };
+        sectionLabel("THEME", layout.themeLabel);
+        sectionLabel("PRIMARY", layout.primaryLabel);
+        sectionLabel("ANIMATION", layout.speedLabel);
+        sectionLabel("ZOOM", layout.zoomLabel);
+        sectionLabel("EDITOR", layout.editorLabel);
+        sectionLabel("CURSOR", layout.cursorLabel);
+
+        static constexpr std::array<std::string_view, 3> kThemeNames{
+            "Dark", "Graphite", "Light"};
+        static constexpr std::array<std::string_view, 3> kThemeKeys{
+            "lucid-dark", "graphite", "lucid-light"};
+        const std::array<ui::SettingsControl, 3> themeControls{
+            ui::SettingsControl::ThemeLucidDark,
+            ui::SettingsControl::ThemeGraphite,
+            ui::SettingsControl::ThemeLucidLight};
+        for (std::size_t index = 0; index < layout.themeChips.size(); ++index) {
+            ui::theme::Palette chipPalette{};
+            (void)ui::theme::paletteByName(kThemeKeys[index], chipPalette);
+            const bool selected = state.settingsTheme == kThemeKeys[index];
+            const bool hovered = state.settingsHovered == themeControls[index];
+            const ui::Rect chip = toScreen(layout.themeChips[index]);
+            addPanelRect(chip, 5.0F * contentScale, 1.0F * contentScale, 0.98F,
+                         chipPalette.background,
+                         selected ? chipPalette.primary
+                                  : (hovered ? chipPalette.primary
+                                             : chipPalette.border));
+            const float textLuminance = ui::theme::luminance(chipPalette.background);
+            const std::array<float, 4> chipText =
+                textLuminance > 0.55F
+                    ? std::array<float, 4>{0.08F, 0.08F, 0.10F, 1.0F}
+                    : std::array<float, 4>{0.96F, 0.96F, 0.98F, 1.0F};
+            centeredText(kThemeNames[index], chip, chipText);
+            const float accentWidth = 16.0F * contentScale;
+            addPanelRect(
+                ui::Rect{(chip.x0 + chip.x1 - accentWidth) * 0.5F,
+                         chip.y1 - 8.0F * contentScale,
+                         (chip.x0 + chip.x1 + accentWidth) * 0.5F,
+                         chip.y1 - 5.0F * contentScale},
+                1.5F * contentScale, 0.0F, selected ? 1.0F : 0.82F,
+                chipPalette.primary, chipPalette.primary);
+        }
+
+        static constexpr std::array<ui::SettingsControl, 8> kPrimaryControls{
+            ui::SettingsControl::PrimaryColor0, ui::SettingsControl::PrimaryColor1,
+            ui::SettingsControl::PrimaryColor2, ui::SettingsControl::PrimaryColor3,
+            ui::SettingsControl::PrimaryColor4, ui::SettingsControl::PrimaryColor5,
+            ui::SettingsControl::PrimaryColor6, ui::SettingsControl::PrimaryColor7};
+        const auto sameColor = [](const ui::theme::Color& left,
+                                  const ui::theme::Color& right) {
+            return std::abs(left.r - right.r) < 0.01F &&
+                   std::abs(left.g - right.g) < 0.01F &&
+                   std::abs(left.b - right.b) < 0.01F;
+        };
+        for (std::size_t index = 0; index < layout.primarySwatches.size(); ++index) {
+            const bool selected =
+                sameColor(state.settingsPrimary, ui::theme::kPrimarySwatches[index]);
+            const bool hovered = state.settingsHovered == kPrimaryControls[index];
+            const ui::Rect swatch = toScreen(layout.primarySwatches[index]);
+            addPanelRect(swatch, 4.0F * contentScale,
+                         (selected ? 2.0F : 1.0F) * contentScale, 0.98F,
+                         ui::theme::kPrimarySwatches[index],
+                         selected ? ui::theme::kText
+                                  : (hovered ? ui::theme::kPrimary
+                                             : ui::theme::kBorder));
+        }
+
+        static constexpr std::array<std::string_view, 3> kSpeedLabels{"0.5x", "1x",
+                                                                      "2x"};
+        static constexpr std::array<float, 3> kSpeedValues{0.5F, 1.0F, 2.0F};
+        static constexpr std::array<ui::SettingsControl, 3> kSpeedControls{
+            ui::SettingsControl::SpeedHalf, ui::SettingsControl::SpeedNormal,
+            ui::SettingsControl::SpeedDouble};
+        for (std::size_t index = 0; index < layout.speedButtons.size(); ++index) {
+            const bool selected =
+                std::abs(state.settingsAnimationSpeed - kSpeedValues[index]) < 0.01F;
+            const bool hovered = state.settingsHovered == kSpeedControls[index];
+            const ui::Rect button = toScreen(layout.speedButtons[index]);
+            addPanelRect(button, 4.0F * contentScale, 1.0F * contentScale, 0.98F,
+                         selected ? ui::theme::kSelection : ui::theme::kSurface,
+                         selected || hovered ? ui::theme::kPrimary
+                                             : ui::theme::kBorder);
+            centeredText(kSpeedLabels[index], button,
+                         selected ? accentText : mutedText);
+        }
+
+        static constexpr std::array<std::string_view, 4> kZoomLabels{
+            "75%", "100%", "125%", "150%"};
+        static constexpr std::array<float, 4> kZoomValues{0.75F, 1.0F, 1.25F,
+                                                          1.5F};
+        static constexpr std::array<ui::SettingsControl, 4> kZoomControls{
+            ui::SettingsControl::Zoom75, ui::SettingsControl::Zoom100,
+            ui::SettingsControl::Zoom125, ui::SettingsControl::Zoom150};
+        for (std::size_t index = 0; index < layout.zoomButtons.size(); ++index) {
+            const bool selected =
+                std::abs(state.settingsZoomFactor - kZoomValues[index]) < 0.01F;
+            const bool hovered = state.settingsHovered == kZoomControls[index];
+            const ui::Rect button = toScreen(layout.zoomButtons[index]);
+            addPanelRect(button, 4.0F * contentScale, 1.0F * contentScale, 0.98F,
+                         selected ? ui::theme::kSelection : ui::theme::kSurface,
+                         selected || hovered ? ui::theme::kPrimary
+                                             : ui::theme::kBorder);
+            centeredText(kZoomLabels[index], button,
+                         selected ? accentText : mutedText);
+        }
+
+        const auto toggle = [&](const ui::Rect& source, std::string_view label,
+                                bool enabled, ui::SettingsControl control) {
+            const ui::Rect button = toScreen(source);
+            const bool hovered = state.settingsHovered == control;
+            addPanelRect(button, 4.0F * contentScale, 1.0F * contentScale, 0.98F,
+                         hovered ? ui::theme::kSuggestionSelected
+                                 : ui::theme::kSurface,
+                         hovered ? ui::theme::kPrimary : ui::theme::kBorder);
+            const float boxSize = 14.0F * contentScale;
+            const float boxX = button.x0 + 10.0F * contentScale;
+            const float boxY = (button.y0 + button.y1 - boxSize) * 0.5F;
+            addPanelRect(ui::Rect{boxX, boxY, boxX + boxSize, boxY + boxSize},
+                         3.0F * contentScale, 1.0F * contentScale, 0.98F,
+                         enabled ? ui::theme::kPrimary : ui::theme::kSurface,
+                         enabled ? ui::theme::kPrimary : ui::theme::kBorder);
+            if (enabled) {
+                const float inset = 4.0F * contentScale;
+                addPanelRect(ui::Rect{boxX + inset, boxY + inset,
+                                      boxX + boxSize - inset,
+                                      boxY + boxSize - inset},
+                             1.0F * contentScale, 0.0F, 0.98F,
+                             ui::theme::kSurface, ui::theme::kSurface);
+            }
+            appendText(vertices, label, boxX + boxSize + 9.0F * contentScale,
+                       centerBaseline(button), normalText);
+        };
+        toggle(layout.syntaxErrors, "Syntax errors", state.settingsShowSyntaxErrors,
+               ui::SettingsControl::ShowSyntaxErrors);
+        toggle(layout.lineNumbers, "Line numbers", state.settingsShowLineNumbers,
+               ui::SettingsControl::ShowLineNumbers);
+        toggle(layout.highlightCurrentLine, "Current line",
+               state.settingsHighlightCurrentLine,
+               ui::SettingsControl::HighlightCurrentLine);
+        toggle(layout.cursorBlink, "Blinking cursor", state.settingsCursorBlink,
+               ui::SettingsControl::CursorBlink);
+
+        static constexpr std::array<std::string_view, 4> kCursorLabels{
+            "Line", "Block", "Underscore", "Kitty"};
+        static constexpr std::array<editor::CursorStyle, 4> kCursorValues{
+            editor::CursorStyle::Line, editor::CursorStyle::Block,
+            editor::CursorStyle::Underscore, editor::CursorStyle::Kitty};
+        static constexpr std::array<ui::SettingsControl, 4> kCursorControls{
+            ui::SettingsControl::CursorLine, ui::SettingsControl::CursorBlock,
+            ui::SettingsControl::CursorUnderscore, ui::SettingsControl::CursorKitty};
+        for (std::size_t index = 0; index < layout.cursorButtons.size(); ++index) {
+            const bool selected =
+                state.settingsCursorStyle == kCursorValues[index];
+            const bool hovered = state.settingsHovered == kCursorControls[index];
+            const ui::Rect button = toScreen(layout.cursorButtons[index]);
+            addPanelRect(button, 4.0F * contentScale, 1.0F * contentScale, 0.98F,
+                         selected ? ui::theme::kSelection : ui::theme::kSurface,
+                         selected || hovered ? ui::theme::kPrimary
+                                             : ui::theme::kBorder);
+            centeredText(kCursorLabels[index], button,
+                         selected ? accentText : mutedText);
+        }
+
+        if (layout.backgroundMotion.x1 > layout.backgroundMotion.x0) {
+            toggle(layout.backgroundMotion, "Motion", state.settingsBackgroundMotion,
+                   ui::SettingsControl::BackgroundMotion);
+        }
+
+        const ui::Rect openSettingsJson = toScreen(layout.openSettingsJson);
+        const bool openHovered =
+            state.settingsHovered == ui::SettingsControl::OpenSettingsJson;
+        addPanelRect(openSettingsJson, 4.0F * contentScale, 1.0F * contentScale,
+                     state.settingsFileAvailable ? 0.98F : 0.42F,
+                     openHovered ? ui::theme::kSuggestionSelected
+                                 : ui::theme::kSurface,
+                     openHovered ? ui::theme::kPrimary : ui::theme::kBorder);
+        centeredText("Edit settings...", openSettingsJson,
+                     state.settingsFileAvailable
+                         ? (openHovered ? accentText : normalText)
+                         : mutedText);
+
+        const ui::Rect done = toScreen(layout.done);
+        const bool doneHovered = state.settingsHovered == ui::SettingsControl::Done;
+        addPanelRect(done, 4.0F * contentScale, 1.0F * contentScale,
+                     doneHovered ? 1.0F : 0.92F, ui::theme::kPrimary,
+                     ui::theme::kPrimary);
+        centeredText("Done", done, doneText);
+
+        if (vertices.size() > settingsFirst) {
+            settingsPanelTextRange = makeRange(settingsFirst, fullScissor);
+            hasSettingsPanelText = true;
+        }
+    }
+
+    const Buffer& vertexBuffer = m_vertexBuffers[frameIndex % kFramesInFlight];
+    if (!vertices.empty()) {
+        const std::size_t vertexCount =
+            std::min(vertices.size(), static_cast<std::size_t>(kMaxTextVertices));
+        vertexBuffer.upload(vertices.data(),
+                            static_cast<VkDeviceSize>(vertexCount) * sizeof(TextVertex));
+    }
+
+    const auto drawTextRange = [&](const TextRange& range, float rangeBlur,
+                                   float rangeOpacity) {
+        if (range.vertexCount == 0) {
+            return;
+        }
+
+        vkCmdSetScissor(commandBuffer, 0, 1, &range.scissor);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_textPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_textPipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+        TextPushConstants textPushConstants{};
+        textPushConstants.viewport[0] = viewportWidth;
+        textPushConstants.viewport[1] = viewportHeight;
+        textPushConstants.blur = std::min(rangeBlur, 8.0F);
+        textPushConstants.opacity = rangeOpacity;
+        vkCmdPushConstants(commandBuffer, m_textPipelineLayout,
+                           static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_VERTEX_BIT |
+                                                           VK_SHADER_STAGE_FRAGMENT_BIT),
+                           0, sizeof(textPushConstants), &textPushConstants);
+
+        const VkBuffer vertexBuffers[] = {vertexBuffer.handle()};
+        const VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        vkCmdDraw(commandBuffer, range.vertexCount, 1, range.firstVertex, 0);
+    };
+
+    if (hasHighlight) {
+        RectPushConstants highlightPushConstants{};
+        fillRectPushConstants(highlightPushConstants, 0.0F, m_animatedHighlightTop,
+                              viewportWidth, m_animatedHighlightBottom, 0.0F, 0.0F, 0.0F,
+                              0.05F, ui::theme::kPrimary, ui::theme::kPrimary);
+        drawRect(commandBuffer, highlightPushConstants);
+    }
+
+    for (const WelcomeRectSpec& spec : diagnosticRects) {
+        RectPushConstants diagnosticPushConstants{};
+        fillRectPushConstants(diagnosticPushConstants, spec.x0, spec.y0, spec.x1,
+                              spec.y1, spec.radius, spec.borderWidth, spec.blur,
+                              spec.opacity, spec.fill, spec.border);
+        drawRect(commandBuffer, diagnosticPushConstants);
+    }
+
+    for (const std::array<float, 4>& selection : selectionRects) {
+        RectPushConstants selectionPushConstants{};
+        fillRectPushConstants(selectionPushConstants, selection[0], selection[1],
+                              selection[2], selection[3], 0.0F, 0.0F, 0.0F, 1.0F,
+                              ui::theme::kSelection, ui::theme::kSelection);
+        drawRect(commandBuffer, selectionPushConstants);
+    }
+
+    if (hasEditor) {
+        drawTextRange(editorRange, 0.0F, 1.0F);
+    }
+
+    for (const WelcomeRectSpec& spec : compileMarkers) {
+        RectPushConstants markerPushConstants{};
+        fillRectPushConstants(markerPushConstants, spec.x0, spec.y0, spec.x1,
+                              spec.y1, spec.radius, spec.borderWidth, spec.blur,
+                              spec.opacity, spec.fill, spec.border);
+        drawRect(commandBuffer, markerPushConstants);
+    }
+
+    for (const WelcomeRectSpec& spec : editorCaretRects) {
+        RectPushConstants caretPushConstants{};
+        fillRectPushConstants(caretPushConstants, spec.x0, spec.y0, spec.x1,
+                              spec.y1, spec.radius, spec.borderWidth, spec.blur,
+                              spec.opacity, spec.fill, spec.border);
+        drawRect(commandBuffer, caretPushConstants);
+    }
+
+    if (hasWindowTitle && !state.commandVisible) {
+        drawTextRange(windowTitleRange, 0.0F, 1.0F);
+    }
+
+    if (hasRibbon) {
+        drawTextRange(ribbonRange, 0.0F, 1.0F);
+    }
+
+    if (hasDirtyDot) {
+        const float pulse =
+            0.58F + 0.42F *
+                        (0.5F + 0.5F * std::sin(state.animationTime * 4.2F));
+        RectPushConstants dotPushConstants{};
+        fillRectPushConstants(dotPushConstants, dirtyDotX0, dirtyDotY0, dirtyDotX1,
+                              dirtyDotY1, (dirtyDotX1 - dirtyDotX0) * 0.5F, 0.0F, 0.0F,
+                              pulse, ui::theme::kAccent, ui::theme::kAccent);
+        drawRect(commandBuffer, dotPushConstants);
+    }
+
+    if (hasWelcomeBackground && m_welcomePipeline != VK_NULL_HANDLE) {
+        WelcomePushConstants welcomePushConstants{};
+        welcomePushConstants.viewport[0] = viewportWidth;
+        welcomePushConstants.viewport[1] = viewportHeight;
+        welcomePushConstants.time = state.animationTime;
+        welcomePushConstants.opacity = 0.30F - 0.12F * backgroundDim;
+        welcomePushConstants.softness = backgroundDim;
+        welcomePushConstants.dim = 1.0F - 0.45F * backgroundDim;
+        const std::array<float, 4> primary = toGpuColor(ui::theme::kPrimary);
+        const std::array<float, 4> secondary =
+            toGpuColor(ui::theme::kLogoForeground);
+        std::copy(primary.begin(), primary.end(), welcomePushConstants.primary);
+        std::copy(secondary.begin(), secondary.end(),
+                  welcomePushConstants.secondary);
+
+        vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_welcomePipeline);
+        vkCmdPushConstants(commandBuffer, m_welcomePipelineLayout,
+                           static_cast<VkShaderStageFlags>(
+                               VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT),
+                           0, sizeof(welcomePushConstants),
+                           &welcomePushConstants);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
+
+    for (const WelcomeRectSpec& spec : welcomeRects) {
+        RectPushConstants rectPushConstants{};
+        fillRectPushConstants(rectPushConstants, spec.x0, spec.y0, spec.x1, spec.y1,
+                              spec.radius, spec.borderWidth, spec.blur, spec.opacity,
+                              spec.fill, spec.border);
+        drawRect(commandBuffer, rectPushConstants);
+    }
+
+    if (hasWelcomeText) {
+        drawTextRange(welcomeRange, 0.0F, 1.0F);
+    }
+
+    if (state.commandVisible) {
+        RectPushConstants dimPushConstants{};
+        const float dimOpacity = 0.58F * barOpacity;
+        fillRectPushConstants(dimPushConstants, 0.0F, 0.0F, viewportWidth, viewportHeight,
+                              0.0F, 0.0F, 0.0F, dimOpacity,
+                              ui::theme::kBackground, ui::theme::kBackground);
+        drawRect(commandBuffer, dimPushConstants);
+
+        if (hasWindowTitle) {
+            drawTextRange(windowTitleRange, 0.0F, 1.0F);
+        }
+
+        if (hasSuggestionSelection) {
+            RectPushConstants selectionPushConstants{};
+            fillRectPushConstants(selectionPushConstants, suggestionSelectionX0,
+                                  suggestionSelectionY0, suggestionSelectionX1,
+                                  suggestionSelectionY1,
+                                  suggestionSelectionRadius, 0.0F, 0.0F,
+                                  suggestionSelectionOpacity,
+                                  ui::theme::kSuggestionSelected,
+                                  ui::theme::kSuggestionSelected);
+            drawRect(commandBuffer, selectionPushConstants);
+        }
+
+        if (hasSuggestionRail) {
+            RectPushConstants railPushConstants{};
+            fillRectPushConstants(railPushConstants, suggestionRailX0, suggestionRailY0,
+                                  suggestionRailX1, suggestionRailY1,
+                                  ui::theme::kSuggestionRailWidth * contentScale * 0.5F,
+                                  0.0F, 0.0F, suggestionSelectionOpacity,
+                                  ui::theme::kAccent, ui::theme::kAccent);
+            drawRect(commandBuffer, railPushConstants);
+        }
+
+        for (const WelcomeRectSpec& spec : suggestionIcons) {
+            RectPushConstants iconPushConstants{};
+            fillRectPushConstants(iconPushConstants, spec.x0, spec.y0, spec.x1,
+                                  spec.y1, spec.radius, spec.borderWidth, spec.blur,
+                                  spec.opacity, spec.fill, spec.border);
+            drawRect(commandBuffer, iconPushConstants);
+        }
+
+        if (hasCommandText) {
+            drawTextRange(commandTextRange, barBlur, barOpacity);
+        }
+
+        if (hasCommandCaret) {
+            RectPushConstants caretPushConstants{};
+            fillRectPushConstants(caretPushConstants, commandCaretX0, commandCaretY0,
+                                  commandCaretX1, commandCaretY1,
+                                  (commandCaretX1 - commandCaretX0) * 0.5F, 0.0F, barBlur,
+                                  barOpacity, ui::theme::kCaret, ui::theme::kCaret);
+            drawRect(commandBuffer, caretPushConstants);
+        }
+
+        if (hasCommandStatus) {
+            drawTextRange(commandStatusRange, barBlur, barOpacity);
+        }
+
+        for (std::size_t index = 0; index < suggestionRangeCount; ++index) {
+            drawTextRange(suggestionRanges[index], barBlur,
+                          suggestionOpacities[index]);
+        }
+    }
+
+    if (hasStatus) {
+        drawTextRange(statusRange, 0.0F, 1.0F);
+    }
+
+    for (const WelcomeRectSpec& spec : overlayRects) {
+        RectPushConstants rectPushConstants{};
+        fillRectPushConstants(rectPushConstants, spec.x0, spec.y0, spec.x1, spec.y1,
+                              spec.radius, spec.borderWidth, spec.blur, spec.opacity,
+                              spec.fill, spec.border);
+        drawRect(commandBuffer, rectPushConstants);
+    }
+
+    if (hasOverlayText) {
+        drawTextRange(overlayTextRange, 0.0F, 1.0F);
+    }
+
+    for (const WelcomeRectSpec& spec : terminalRects) {
+        RectPushConstants terminalPushConstants{};
+        fillRectPushConstants(terminalPushConstants, spec.x0, spec.y0, spec.x1,
+                              spec.y1, spec.radius, spec.borderWidth, spec.blur,
+                              spec.opacity, spec.fill, spec.border);
+        drawRect(commandBuffer, terminalPushConstants);
+    }
+
+    if (hasTerminalText) {
+        drawTextRange(terminalTextRange, 0.0F, state.compileTerminalOpacity);
+    }
+
+    for (const WelcomeRectSpec& spec : settingsPanelRects) {
+        RectPushConstants settingsPushConstants{};
+        fillRectPushConstants(settingsPushConstants, spec.x0, spec.y0, spec.x1,
+                              spec.y1, spec.radius, spec.borderWidth, spec.blur,
+                              spec.opacity, spec.fill, spec.border);
+        drawRect(commandBuffer, settingsPushConstants);
+    }
+
+    if (hasSettingsPanelText) {
+        drawTextRange(settingsPanelTextRange, 0.0F, 1.0F);
+    }
+}
+
+void UiPass::drawRect(VkCommandBuffer commandBuffer,
+                      const RectPushConstants& pushConstants) const {
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rectPipeline);
+    vkCmdPushConstants(commandBuffer, m_rectPipelineLayout,
+                       static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_VERTEX_BIT |
+                                                       VK_SHADER_STAGE_FRAGMENT_BIT),
+                       0, sizeof(pushConstants), &pushConstants);
+    vkCmdDraw(commandBuffer, 6, 1, 0, 0);
+}
+
+void UiPass::fillRectPushConstants(RectPushConstants& out, float x0, float y0, float x1,
+                                   float y1, float radius, float borderWidth, float blur,
+                                   float opacity, const ui::theme::Color& fill,
+                                   const ui::theme::Color& border) const {
+    out.viewport[0] = static_cast<float>(m_extent.width);
+    out.viewport[1] = static_cast<float>(m_extent.height);
+    out.rectMin[0] = x0;
+    out.rectMin[1] = y0;
+    out.rectMax[0] = x1;
+    out.rectMax[1] = y1;
+    out.radius = radius;
+    out.borderWidth = borderWidth;
+    out.blur = blur;
+    out.opacity = opacity;
+
+    const std::array<float, 4> fillColor = toGpuColor(fill);
+    const std::array<float, 4> borderColor = toGpuColor(border);
+    std::copy(fillColor.begin(), fillColor.end(), out.fillColor);
+    std::copy(borderColor.begin(), borderColor.end(), out.borderColor);
+}
+
+std::array<float, 4> UiPass::toGpuColor(const ui::theme::Color& color) const {
+    const std::array<float, 4> value{color.r, color.g, color.b, color.a};
+    return isSrgbFormat(m_format) ? srgbToLinear(value) : value;
+}
+
+float UiPass::appendText(std::vector<TextVertex>& vertices, std::string_view text, float x,
+                         float baseline, const std::array<float, 4>& color) const {
+    float pen = x;
+    const float tabWidth = m_font.glyph(U' ').advance * 4.0F;
+
+    for (const char character : text) {
+        if (character == '\t') {
+            pen += tabWidth;
+            continue;
+        }
+
+        const text::Glyph& glyph =
+            m_font.glyph(static_cast<char32_t>(static_cast<unsigned char>(character)));
+        if (glyph.hasPixels) {
+            const float left = pen + glyph.x0;
+            const float right = pen + glyph.x1;
+            const float top = baseline + glyph.y0;
+            const float bottom = baseline + glyph.y1;
+
+            vertices.push_back(TextVertex{left, top, glyph.u0, glyph.v0, color[0], color[1],
+                                          color[2], color[3]});
+            vertices.push_back(TextVertex{right, top, glyph.u1, glyph.v0, color[0], color[1],
+                                          color[2], color[3]});
+            vertices.push_back(TextVertex{left, bottom, glyph.u0, glyph.v1, color[0],
+                                          color[1], color[2], color[3]});
+            vertices.push_back(TextVertex{left, bottom, glyph.u0, glyph.v1, color[0],
+                                          color[1], color[2], color[3]});
+            vertices.push_back(TextVertex{right, top, glyph.u1, glyph.v0, color[0], color[1],
+                                          color[2], color[3]});
+            vertices.push_back(TextVertex{right, bottom, glyph.u1, glyph.v1, color[0],
+                                          color[1], color[2], color[3]});
+        }
+        pen += glyph.advance;
+    }
+
+    return pen;
+}
+
+float UiPass::appendText(std::vector<TextVertex>& vertices, std::u32string_view text, float x,
+                         float baseline, const std::array<float, 4>& color) const {
+    float pen = x;
+    const float tabWidth = m_font.glyph(U' ').advance * 4.0F;
+
+    for (const char32_t character : text) {
+        if (character == U'\t') {
+            pen += tabWidth;
+            continue;
+        }
+
+        const text::Glyph& glyph = m_font.glyph(character);
+        if (glyph.hasPixels) {
+            const float left = pen + glyph.x0;
+            const float right = pen + glyph.x1;
+            const float top = baseline + glyph.y0;
+            const float bottom = baseline + glyph.y1;
+
+            vertices.push_back(TextVertex{left, top, glyph.u0, glyph.v0, color[0], color[1],
+                                          color[2], color[3]});
+            vertices.push_back(TextVertex{right, top, glyph.u1, glyph.v0, color[0], color[1],
+                                          color[2], color[3]});
+            vertices.push_back(TextVertex{left, bottom, glyph.u0, glyph.v1, color[0],
+                                          color[1], color[2], color[3]});
+            vertices.push_back(TextVertex{left, bottom, glyph.u0, glyph.v1, color[0],
+                                          color[1], color[2], color[3]});
+            vertices.push_back(TextVertex{right, top, glyph.u1, glyph.v0, color[0], color[1],
+                                          color[2], color[3]});
+            vertices.push_back(TextVertex{right, bottom, glyph.u1, glyph.v1, color[0],
+                                          color[1], color[2], color[3]});
+        }
+        pen += glyph.advance;
+    }
+
+    return pen;
+}
+
+float UiPass::measureText(std::string_view text) const {
+    float width = 0.0F;
+    const float tabWidth = m_font.glyph(U' ').advance * 4.0F;
+
+    for (const char character : text) {
+        if (character == '\t') {
+            width += tabWidth;
+        } else {
+            width += m_font
+                         .glyph(static_cast<char32_t>(static_cast<unsigned char>(character)))
+                         .advance;
+        }
+    }
+    return width;
+}
+
+float UiPass::measureText(std::u32string_view text) const {
+    float width = 0.0F;
+    const float tabWidth = m_font.glyph(U' ').advance * 4.0F;
+
+    for (const char32_t character : text) {
+        if (character == U'\t') {
+            width += tabWidth;
+        } else {
+            width += m_font.glyph(character).advance;
+        }
+    }
+    return width;
+}
+
+} // namespace lucid::vk

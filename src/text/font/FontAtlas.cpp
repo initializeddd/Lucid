@@ -6,6 +6,7 @@
 #include "stb_truetype.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,14 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 namespace lucid::text {
 namespace {
@@ -35,6 +44,36 @@ namespace {
         return {};
     }
     return data;
+}
+
+[[nodiscard]] std::filesystem::path executablePath() {
+#if defined(_WIN32)
+    std::wstring buffer(32768, L'\0');
+    const DWORD length =
+        GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0 || static_cast<std::size_t>(length) >= buffer.size()) {
+        return {};
+    }
+    buffer.resize(length);
+    return std::filesystem::path(buffer);
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buffer(size, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        return {};
+    }
+    if (!buffer.empty() && buffer.back() == '\0') {
+        buffer.pop_back();
+    }
+    std::error_code error;
+    const std::filesystem::path canonical = std::filesystem::canonical(buffer, error);
+    return error ? std::filesystem::path(buffer) : canonical;
+#else
+    std::error_code error;
+    const std::filesystem::path path = std::filesystem::read_symlink("/proc/self/exe", error);
+    return error ? std::filesystem::path() : path;
+#endif
 }
 
 [[nodiscard]] std::vector<std::filesystem::path> fontCandidates() {
@@ -60,6 +99,18 @@ namespace {
     candidates.emplace_back("/usr/share/fonts/TTF/DejaVuSans.ttf");
     candidates.emplace_back("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf");
 #endif
+
+    // Release builds ship a font so systems without installed fonts still work.
+    const std::filesystem::path executable = executablePath();
+    if (!executable.empty()) {
+        const std::filesystem::path directory = executable.parent_path();
+        candidates.emplace_back(directory / "assets" / "fonts" /
+                                "JetBrainsMono-Regular.ttf");
+        candidates.emplace_back(directory / ".." / "Resources" / "assets" / "fonts" /
+                                "JetBrainsMono-Regular.ttf");
+    }
+    candidates.emplace_back(std::filesystem::current_path() / "assets" / "fonts" /
+                            "JetBrainsMono-Regular.ttf");
 
     return candidates;
 }

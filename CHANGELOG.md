@@ -9,8 +9,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Linux release tarballs are now self-contained: `libglfw`, the Vulkan loader and the X11/Wayland
-  runtime libraries are bundled in `lib/` and resolved through an `$ORIGIN/lib` runtime path.
+- Linux release tarballs are now self-contained: `libglfw`, the Vulkan loader and the X11 runtime
+  libraries are bundled in `lib/` and resolved through an `$ORIGIN/lib` runtime path.
   No dependency installation is required beyond a working Vulkan driver.
 
 ## [0.1.0-beta.1] - 2026-11-02

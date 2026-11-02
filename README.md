@@ -76,7 +76,7 @@ Prebuilt beta bundles are attached to the [latest release](https://github.com/in
 | Linux | `Lucid-v0.1.0-beta.2-Linux.tar.gz` | Extract and run `./lucid`; shared libraries are bundled |
 | Windows | `Lucid-v0.1.0-beta.2-Windows.zip` | Extract and run `Lucid.exe`; needs the Vulkan runtime |
 
-The Linux tarball is self-contained: it ships `libglfw`, the Vulkan loader and the X11/Wayland
+The Linux tarball is self-contained: it ships `libglfw`, the Vulkan loader and the X11
 runtime libraries next to the binary, so no development packages are required. A working Vulkan
 driver is still needed to render.
 

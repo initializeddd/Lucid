@@ -540,6 +540,9 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                          static_cast<std::uint32_t>(vertices.size() - first), scissor};
     };
 
+    TextRange completionRange{0, 0, fullScissor};
+    std::vector<WelcomeRectSpec> completionRects;
+    bool hasCompletionText = false;
     TextRange editorRange{0, 0, fullScissor};
     bool hasEditor = false;
     bool hasHighlight = false;
@@ -611,6 +614,9 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                     0.0F, rowTop, viewportWidth, rowTop + lineHeight, 0.0F, 0.0F,
                     0.0F, 0.08F, ui::theme::kError, ui::theme::kError});
             }
+            const bool breakpoint = std::find(state.debugBreakpointLines.begin(), state.debugBreakpointLines.end(), absoluteLine) != state.debugBreakpointLines.end();
+            if (breakpoint) appendText(vertices, "B", 4.0F * contentScale, baseline, toGpuColor(ui::theme::kError));
+            if (absoluteLine == state.debugStoppedLine) appendText(vertices, ">", 16.0F * contentScale, baseline, toGpuColor(ui::theme::kText));
             if (state.showLineNumbers) {
                 appendText(vertices, number, gutterRight - numberWidth, baseline,
                            diagnosticLine ? errorColor
@@ -716,6 +722,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                baseline, plainColor);
                 }
             }
+            if (absoluteLine == state.debugStoppedLine && !state.debugInline.empty() && canAppend(state.debugInline.size() * 6U + 6U)) {
+                const float inlineX = codeLeft + measureText(line.substr(0, lineChars)) + 24.0F * contentScale;
+                if (inlineX < viewportWidth - 30.0F * contentScale)
+                    appendText(vertices, state.debugInline, inlineX, baseline, toGpuColor(ui::theme::kTextMuted));
+            }
             ++drawnLines;
         }
 
@@ -723,6 +734,37 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             editorRange = makeRange(editorFirst, editorScissor);
             hasEditor = true;
         }
+    }
+
+    if (state.completionVisible && state.cursorRow >= 0 &&
+        static_cast<std::size_t>(state.cursorRow) < state.visibleLines.size()) {
+        const auto line = state.visibleLines[static_cast<std::size_t>(state.cursorRow)];
+        const auto col = std::min(line.size(), static_cast<std::size_t>(std::max(0, state.cursorColumn)));
+        const float width = std::min(280.0F * contentScale, viewportWidth);
+        const std::size_t rowCount = std::max<std::size_t>(1, state.completions.size());
+        const float height = lineHeight * static_cast<float>(rowCount) + 8.0F * contentScale;
+        const float x = std::clamp(codeLeft + measureText(line.substr(0, col)), 0.0F,
+                                   std::max(0.0F, viewportWidth - width));
+        float y = editorTop + static_cast<float>(state.cursorRow + 1) * lineHeight;
+        if (y + height > viewportHeight - editorBottom) y = std::max(editorTop, y - height - lineHeight);
+        completionRects.push_back({x, y, x + width, y + height, 5.0F * contentScale,
+                                   contentScale, 0.0F, 1.0F, ui::theme::kSurface, ui::theme::kBorder});
+        const std::size_t first = vertices.size();
+        if (state.completions.empty()) {
+            appendText(vertices, "No matching functions", x + 8.0F * contentScale,
+                       y + 4.0F * contentScale + lineHeight * 0.5F + fontCenter,
+                       toGpuColor(ui::theme::kTextMuted));
+        }
+        for (std::size_t i = 0; i < state.completions.size(); ++i) {
+            const float row = y + 4.0F * contentScale + static_cast<float>(i) * lineHeight;
+            if (static_cast<int>(i) == state.selectedCompletion)
+                completionRects.push_back({x + 2.0F * contentScale, row, x + width - 2.0F * contentScale,
+                    row + lineHeight, 3.0F * contentScale, 0.0F, 0.0F, 1.0F,
+                    ui::theme::kSelection, ui::theme::kSelection});
+            appendText(vertices, state.completions[i], x + 8.0F * contentScale,
+                       row + lineHeight * 0.5F + fontCenter, toGpuColor(ui::theme::kText));
+        }
+        if (vertices.size() > first) { completionRange = makeRange(first, fullScissor); hasCompletionText = true; }
     }
 
     if (state.hasDocument && state.cursorRow >= 0 &&
@@ -915,7 +957,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const std::array<float, 4> statusColor = toGpuColor(ui::theme::kLineNumber);
 
         if (!state.statusText.empty()) {
-            appendText(vertices, state.statusText, margin, baseline,
+            const std::string statusLabel = state.statusIsError ? "Error: " + std::string(state.statusText) : std::string(state.statusText);
+            appendText(vertices, statusLabel, margin, baseline,
                        toGpuColor(state.statusIsError ? ui::theme::kError : ui::theme::kTextMuted));
         }
 
@@ -1387,13 +1430,25 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                           int columns, float left,
                                           bool alignLeft,
                                           const std::array<float, 4>& textColor) {
-        constexpr std::array<WelcomeShortcut, 6> shortcuts{{
-            {true, false, "K", "File"},
-            {true, false, "S", "Save"},
-            {true, true, "R", "Search"},
-            {true, false, "R", "Run"},
-            {true, false, "W", "Close"},
+        constexpr std::array<WelcomeShortcut, 18> shortcuts{{
+            {true, false, "K", "Open file"},
+            {true, false, "E", "Switch file"},
             {true, false, ",", "Settings"},
+            {true, false, "F", "Find"},
+            {true, true, "Space", "Complete"},
+            {true, true, "A", "Ask AI"},
+            {true, true, "L", "Clean code"},
+            {true, true, "T", "Tasks"},
+            {true, true, "G", "Git review"},
+            {true, true, "M", "Modules"},
+            {true, true, "D", "Debugger"},
+            {true, true, "B", "Breakpoint"},
+            {true, true, "Y", "Recovery"},
+            {true, true, "R", "Functions"},
+            {true, false, "R", "Run"},
+            {true, false, "S", "Save"},
+            {true, false, "W", "Close file"},
+            {true, true, "U", "Contrast"},
         }};
 
         const float keyPad = 6.0F * contentScale;
@@ -1439,12 +1494,22 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         tableWidth += chipGap * static_cast<float>(columns - 1);
         const float tableLeft = alignLeft ? left : centerX - tableWidth * 0.5F;
 
+        const int totalRows = (static_cast<int>(shortcuts.size()) + columns - 1) / columns;
+        const int visibleRows = std::max(1, static_cast<int>((viewportHeight - top - 30.0F * contentScale) / rowHeight));
+        const int scroll = std::clamp(state.welcomeShortcutScroll, 0, std::max(0, totalRows - visibleRows));
+        if (visibleRows < totalRows) {
+            const std::string_view hint = "Scroll or use arrow keys for more shortcuts";
+            appendText(vertices, hint, (viewportWidth - measureText(hint)) * 0.5F, viewportHeight - 12.0F * contentScale, hintColor);
+        }
         std::size_t index = 0;
         std::size_t rowIndex = 0;
         while (index < shortcuts.size()) {
             const int rowSize = std::min<int>(
                 columns, static_cast<int>(shortcuts.size() - index));
-            const float rowTop = top + static_cast<float>(rowIndex) * rowHeight;
+            if (static_cast<int>(rowIndex) < scroll || static_cast<int>(rowIndex) >= scroll + visibleRows) {
+                index += static_cast<std::size_t>(rowSize); ++rowIndex; continue;
+            }
+            const float rowTop = top + static_cast<float>(static_cast<int>(rowIndex) - scroll) * rowHeight;
             const float keyTop = rowTop + (rowHeight - keyHeight) * 0.5F;
             const float baseline = keyTop + keyHeight * 0.5F + fontCenter;
             float x = tableLeft;
@@ -1470,9 +1535,9 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             for (int column = 0; column < rowSize; ++column) {
                 const WelcomeShortcut& shortcut =
                     shortcuts[index + static_cast<std::size_t>(column)];
-                if (column > 0) {
-                    x += chipGap;
-                }
+                x = tableLeft;
+                for (int previous = 0; previous < column; ++previous)
+                    x += columnWidths[static_cast<std::size_t>(previous)] + chipGap;
                 if (shortcut.shift) {
                     addKeycap(shiftKeyWidth, useShiftGlyph, kShiftGlyph, "Shift");
                 }
@@ -1482,7 +1547,6 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 }
                 addKeycap(keyWidth(shortcut.key), false, {}, shortcut.key);
                 appendText(vertices, shortcut.label, x, baseline, hintColor);
-                x += columnWidths[static_cast<std::size_t>(column)];
             }
 
             index += static_cast<std::size_t>(rowSize);
@@ -1615,7 +1679,10 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
     } else if (state.hasProject && !state.hasDocument && !state.commandVisible) {
         const std::size_t emptyFirst = vertices.size();
 
-        const float centerY = viewportHeight * 0.44F;
+        const auto emptyLayout = ui::welcomeLayout(viewportWidth, viewportHeight, contentScale);
+        const int shortcutRows = (18 + emptyLayout.hintColumns - 1) / emptyLayout.hintColumns;
+        const float blockHeight = lineHeight * 3.0F + static_cast<float>(shortcutRows) * 24.0F * contentScale;
+        const float centerY = std::max(lineHeight * 2.0F, (viewportHeight - blockHeight) * 0.5F + lineHeight * 2.0F);
         const std::array<float, 4> titleColor =
             toGpuColor(ui::theme::kTextMuted);
         const std::array<float, 4> projectColor = toGpuColor(ui::theme::kText);
@@ -1671,10 +1738,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const float titleWidth = measureText(title);
         appendText(vertices, title, (viewportWidth - titleWidth) * 0.5F,
                    centerY + fontCenter, titleColor);
-        const ui::WelcomeLayout layout =
-            ui::welcomeLayout(viewportWidth, viewportHeight, contentScale);
         drawWelcomeShortcuts(centerY + lineHeight * 1.15F, viewportWidth * 0.5F,
-                             layout.hintColumns, 0.0F, false,
+                             emptyLayout.hintColumns, 0.0F, false,
                              toGpuColor(ui::theme::kTextMuted));
         if (vertices.size() > emptyFirst) {
             welcomeRange = makeRange(emptyFirst, fullScissor);
@@ -1749,8 +1814,17 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             const float baseline = centerY + fontCenter;
             const bool empty = state.commandQuery.empty();
             const std::string_view text =
-                empty ? (state.commandKind == ui::PromptKind::Project
+                empty ? (!state.commandPlaceholder.empty() ? state.commandPlaceholder :
+                         state.commandKind == ui::PromptKind::Project
                              ? std::string_view("Open or create project...")
+                             : state.commandKind == ui::PromptKind::OpenFiles
+                                   ? std::string_view("Switch open file...")
+                             : state.commandKind == ui::PromptKind::Replace
+                                   ? std::string_view("Replace selection with... (empty deletes)")
+                             : state.commandKind == ui::PromptKind::Find
+                                   ? std::string_view("Find in file...")
+                             : state.commandKind == ui::PromptKind::Ai
+                                   ? std::string_view("Ask local AI about the selection...")
                              : state.commandKind == ui::PromptKind::Function
                                    ? std::string_view("Search project functions...")
                                    : std::string_view("Open or create file..."))
@@ -1831,7 +1905,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 const std::size_t commandStatusFirst = vertices.size();
                 const float statusBaseline =
                     suggestionTop + lineHeight * 0.5F + fontCenter;
-                appendText(vertices, state.commandStatus, statusLeft, statusBaseline,
+                const std::string statusLabel = state.commandStatusIsError ? "Error: " + std::string(state.commandStatus) : std::string(state.commandStatus);
+                appendText(vertices, statusLabel, statusLeft, statusBaseline,
                            toGpuColor(state.commandStatusIsError ? ui::theme::kError
                                                                  : ui::theme::kTextMuted));
                 const VkRect2D statusScissor = makeScissorRect(
@@ -1908,10 +1983,12 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                         iconX + iconWidth + 8.0F * contentScale;
                     const std::size_t rowFirst = vertices.size();
 
-                    if (suggestion.kind == ui::SuggestionKind::Function) {
-                        float pen = appendText(vertices, "@", pathX,
-                                               suggestionBaseline,
-                                               selected ? accentColor : mutedColor);
+                    if (suggestion.kind == ui::SuggestionKind::Function ||
+                        suggestion.kind == ui::SuggestionKind::Task) {
+                        float pen = pathX;
+                        if (suggestion.kind == ui::SuggestionKind::Function)
+                            pen = appendText(vertices, "@", pathX, suggestionBaseline,
+                                             selected ? accentColor : mutedColor);
                         pen = appendText(vertices, suggestion.path, pen,
                                          suggestionBaseline,
                                          selected ? accentColor : primaryColor);
@@ -2355,11 +2432,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 : std::array<float, 4>{1.0F, 1.0F, 1.0F, 1.0F};
 
         addPanelRect(ui::Rect{0.0F, 0.0F, viewportWidth, viewportHeight}, 0.0F,
-                     0.0F, 0.46F, ui::theme::kBackground, ui::theme::kBackground);
-
-        const ui::Rect panel = toScreen(layout.panel);
-        addPanelRect(panel, 10.0F * contentScale, 1.0F * contentScale, 0.985F,
-                     ui::theme::kSurface, ui::theme::kBorder);
+                     0.0F, 1.0F, ui::theme::kBackground, ui::theme::kBackground);
 
         const ui::Rect title = toScreen(layout.title);
         const std::size_t settingsFirst = vertices.size();
@@ -2373,7 +2446,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         sectionLabel("THEME", layout.themeLabel);
         sectionLabel("PRIMARY", layout.primaryLabel);
         sectionLabel("ANIMATION", layout.speedLabel);
-        sectionLabel("ZOOM", layout.zoomLabel);
+        sectionLabel("TEXT & UI SIZE", layout.zoomLabel);
         sectionLabel("EDITOR", layout.editorLabel);
         sectionLabel("CURSOR", layout.cursorLabel);
 
@@ -2532,6 +2605,22 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                          selected ? accentText : mutedText);
         }
 
+        if (layout.iconButtons[0].x1 > layout.iconButtons[0].x0) {
+            if (layout.iconLabel.x1 > layout.iconLabel.x0) sectionLabel("APP ICON", layout.iconLabel);
+            static constexpr std::array<std::string_view, 3> names{"Classic", "Accent", "Outline"};
+            static constexpr std::array<std::string_view, 3> keys{"classic", "accent", "outline"};
+            static constexpr std::array<ui::SettingsControl, 3> controls{
+                ui::SettingsControl::IconClassic, ui::SettingsControl::IconAccent, ui::SettingsControl::IconOutline};
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                const bool selected = state.settingsIconTheme == keys[i];
+                const auto button = toScreen(layout.iconButtons[i]);
+                addPanelRect(button, 4.0F * contentScale, 1.0F * contentScale, 0.98F,
+                    selected ? ui::theme::kSelection : ui::theme::kSurface,
+                    selected || state.settingsHovered == controls[i] ? ui::theme::kPrimary : ui::theme::kBorder);
+                centeredText(names[i], button, selected ? accentText : mutedText);
+            }
+        }
+
         if (layout.backgroundMotion.x1 > layout.backgroundMotion.x0) {
             toggle(layout.backgroundMotion, "Motion", state.settingsBackgroundMotion,
                    ui::SettingsControl::BackgroundMotion);
@@ -2549,6 +2638,13 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                      state.settingsFileAvailable
                          ? (openHovered ? accentText : normalText)
                          : mutedText);
+
+        const ui::Rect aiSettings = toScreen(layout.aiSettings);
+        const bool aiHovered = state.settingsHovered == ui::SettingsControl::AiSettings;
+        addPanelRect(aiSettings, 4.0F * contentScale, 1.0F * contentScale, 0.98F,
+                     aiHovered ? ui::theme::kSuggestionSelected : ui::theme::kSurface,
+                     aiHovered ? ui::theme::kPrimary : ui::theme::kBorder);
+        centeredText("AI settings", aiSettings, aiHovered ? accentText : normalText);
 
         const ui::Rect done = toScreen(layout.done);
         const bool doneHovered = state.settingsHovered == ui::SettingsControl::Done;
@@ -2641,6 +2737,15 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                               spec.opacity, spec.fill, spec.border);
         drawRect(commandBuffer, caretPushConstants);
     }
+
+    for (const auto& spec : completionRects) {
+        RectPushConstants constants{};
+        fillRectPushConstants(constants, spec.x0, spec.y0, spec.x1, spec.y1,
+                              spec.radius, spec.borderWidth, spec.blur, spec.opacity,
+                              spec.fill, spec.border);
+        drawRect(commandBuffer, constants);
+    }
+    if (hasCompletionText) drawTextRange(completionRange, 0.0F, 1.0F);
 
     if (hasWindowTitle && !state.commandVisible) {
         drawTextRange(windowTitleRange, 0.0F, 1.0F);

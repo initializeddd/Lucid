@@ -49,6 +49,8 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
     case GLFW_KEY_ENTER:
     case GLFW_KEY_KP_ENTER:
         return input::Key::Enter;
+    case GLFW_KEY_SPACE:
+        return input::Key::Space;
     case GLFW_KEY_TAB:
         return input::Key::Tab;
     case GLFW_KEY_DELETE:
@@ -65,14 +67,28 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
         return input::Key::Home;
     case GLFW_KEY_END:
         return input::Key::End;
+    case GLFW_KEY_B: return input::Key::B;
     case GLFW_KEY_A:
         return input::Key::A;
     case GLFW_KEY_C:
         return input::Key::C;
+    case GLFW_KEY_EQUAL: return input::Key::Equal;
+    case GLFW_KEY_MINUS: return input::Key::Minus;
+    case GLFW_KEY_0: return input::Key::Zero;
+    case GLFW_KEY_U: return input::Key::U;
     case GLFW_KEY_COMMA:
         return input::Key::Comma;
+    case GLFW_KEY_H:
+        return input::Key::H;
+    case GLFW_KEY_E:
+        return input::Key::E;
+    case GLFW_KEY_G: return input::Key::G;
+    case GLFW_KEY_F:
+        return input::Key::F;
     case GLFW_KEY_D:
         return input::Key::D;
+    case GLFW_KEY_M: return input::Key::M;
+    case GLFW_KEY_L: return input::Key::L;
     case GLFW_KEY_K:
         return input::Key::K;
     case GLFW_KEY_N:
@@ -83,6 +99,8 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
         return input::Key::P;
     case GLFW_KEY_R:
         return input::Key::R;
+    case GLFW_KEY_T:
+        return input::Key::T;
     case GLFW_KEY_S:
         return input::Key::S;
     case GLFW_KEY_SLASH:
@@ -163,6 +181,7 @@ Window::Window(const WindowConfig& config) {
     glfwSetMouseButtonCallback(m_window, &Window::mouseButtonCallback);
     glfwSetCursorPosCallback(m_window, &Window::cursorPosCallback);
     glfwSetScrollCallback(m_window, &Window::scrollCallback);
+    glfwSetDropCallback(m_window, &Window::dropCallback);
 
     m_arrowCursor = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
     m_ibeamCursor = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
@@ -346,6 +365,16 @@ void Window::setMouseMoveCallback(MouseMoveCallback callback) {
 
 void Window::setScrollCallback(ScrollCallback callback) {
     m_scrollCallback = std::move(callback);
+}
+
+void Window::setDropCallback(DropCallback callback) { m_dropCallback = std::move(callback); }
+
+void Window::dropCallback(GLFWwindow* window, int count, const char** paths) {
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    if (!self || !self->m_dropCallback || count <= 0) return;
+    std::vector<std::string> files;
+    for (int i = 0; i < count; ++i) if (paths[i]) files.emplace_back(paths[i]);
+    self->m_dropCallback(std::move(files));
 }
 
 VkSurfaceKHR Window::createSurface(VkInstance instance) const {

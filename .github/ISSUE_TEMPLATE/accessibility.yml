@@ -1,0 +1,34 @@
+name: Accessibility report
+description: Report a barrier using Lucid with a keyboard or assistive technology.
+title: "[Accessibility]: "
+labels: ["accessibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the barrier and the outcome you expected. Do not include private code or personal information in logs.
+  - type: textarea
+    id: barrier
+    attributes:
+      label: What barrier did you encounter?
+      description: Explain what you tried to do and what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Lucid version, operating system, and assistive technology
+      placeholder: "Version or commit; OS version; screen reader and version, if applicable"
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Relevant settings, screenshots, recordings, or suggested behavior.

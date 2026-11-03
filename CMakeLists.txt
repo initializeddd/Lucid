@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(Lucid
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "A minimal, GPU-accelerated code editor."
     LANGUAGES CXX)
 
@@ -10,7 +10,7 @@ if(APPLE)
     if(CMAKE_OSX_DEPLOYMENT_TARGET)
         set(LUCID_MACOS_MIN_VERSION "${CMAKE_OSX_DEPLOYMENT_TARGET}")
     else()
-        set(LUCID_MACOS_MIN_VERSION "${CMAKE_SYSTEM_VERSION}")
+        set(LUCID_MACOS_MIN_VERSION "14.0")
     endif()
 endif()
 

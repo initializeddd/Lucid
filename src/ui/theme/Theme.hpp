@@ -52,6 +52,7 @@ struct Palette {
 [[nodiscard]] Color selectionTint(const Color& background,
                                   const Color& primary) noexcept;
 void applyPalette(const Palette& palette) noexcept;
+[[nodiscard]] Palette highContrastPalette(const Palette& source) noexcept;
 
 // Colors available from the settings panel. Any #RRGGBB value is valid in settings.json.
 inline constexpr std::array<Color, 8> kPrimarySwatches{

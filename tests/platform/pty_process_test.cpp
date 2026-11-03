@@ -11,20 +11,20 @@ int main() {
 #else
     lucid::platform::PtyProcess process;
     std::string error;
-    if (!process.start(".", {"printf 'hello\\n'", "printf 'world\\n'"}, error)) {
+    if (!process.start(".", {"printf 'hello\\n'", "false", "printf 'world\\n'"}, error)) {
         return 1;
     }
 
     for (int attempt = 0; attempt < 600; ++attempt) {
         process.update();
-        if (process.output().find("hello") != std::string::npos &&
-            process.output().find("world") != std::string::npos) {
+        if (process.commandsDone()) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     const std::string output(process.output());
+    const auto exitCodes = process.exitCodes();
     process.close();
 
     if (output.find("hello") == std::string::npos) {
@@ -41,6 +41,7 @@ int main() {
         return 5;
     }
 
+    if (exitCodes != std::vector<int>{0, 1, 0}) return 6;
     return 0;
 #endif
 }

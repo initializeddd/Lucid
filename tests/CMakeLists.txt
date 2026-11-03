@@ -105,3 +105,106 @@ lucid_set_warnings(lucid_pty_process_tests)
 
 add_test(NAME editor.compile_script COMMAND lucid_compile_script_tests)
 add_test(NAME platform.pty_process COMMAND lucid_pty_process_tests)
+
+add_executable(lucid_ai_tests ai/model_test.cpp)
+target_link_libraries(lucid_ai_tests PRIVATE lucid_core)
+add_test(NAME ai.model COMMAND lucid_ai_tests)
+
+add_executable(lucid_completion_tests editor/completion_test.cpp)
+target_link_libraries(lucid_completion_tests PRIVATE lucid_core)
+add_test(NAME editor.completion COMMAND lucid_completion_tests)
+
+# This test opens a native Vulkan window and is run explicitly on a desktop.
+add_executable(lucid_interaction_tests EXCLUDE_FROM_ALL app/interaction_test.cpp)
+target_link_libraries(lucid_interaction_tests PRIVATE lucid_core)
+if(APPLE)
+    target_sources(lucid_interaction_tests PRIVATE app/macos_menu_test.mm)
+endif()
+
+add_executable(lucid_text_search_tests editor/text_search_test.cpp)
+target_link_libraries(lucid_text_search_tests PRIVATE lucid_core)
+add_test(NAME editor.text_search COMMAND lucid_text_search_tests)
+
+add_executable(lucid_app_icon_tests platform/app_icon_test.cpp)
+target_link_libraries(lucid_app_icon_tests PRIVATE lucid_core)
+add_test(NAME platform.app_icon COMMAND lucid_app_icon_tests)
+
+add_executable(lucid_tasks_tests workspace/tasks_test.cpp)
+target_link_libraries(lucid_tasks_tests PRIVATE lucid_core)
+add_test(NAME workspace.tasks COMMAND lucid_tasks_tests)
+
+add_executable(lucid_git_review_tests workspace/git_review_test.cpp)
+target_link_libraries(lucid_git_review_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_git_review_tests)
+add_test(NAME workspace.git_review COMMAND lucid_git_review_tests)
+
+add_executable(lucid_shared_document_tests workspace/shared_document_test.cpp)
+target_link_libraries(lucid_shared_document_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_shared_document_tests)
+add_test(NAME workspace.shared_document COMMAND lucid_shared_document_tests)
+
+add_executable(lucid_modules_tests workspace/modules_test.cpp)
+target_link_libraries(lucid_modules_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_modules_tests)
+add_test(NAME workspace.modules COMMAND lucid_modules_tests)
+
+add_executable(lucid_recovery_tests workspace/recovery_test.cpp)
+target_link_libraries(lucid_recovery_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_recovery_tests)
+add_test(NAME workspace.recovery COMMAND lucid_recovery_tests)
+
+add_executable(lucid_debug_protocol_tests editor/debug_protocol_test.cpp)
+target_link_libraries(lucid_debug_protocol_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_debug_protocol_tests)
+add_test(NAME debug.protocol COMMAND lucid_debug_protocol_tests)
+
+add_executable(lucid_debug_session_tests editor/debug_session_test.cpp)
+target_link_libraries(lucid_debug_session_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_debug_session_tests)
+add_test(NAME debug.session COMMAND lucid_debug_session_tests)
+
+add_executable(lucid_debug_transport_fixture editor/debug_transport_fixture.cpp)
+add_executable(lucid_debug_transport_tests editor/debug_transport_test.cpp)
+target_link_libraries(lucid_debug_transport_tests PRIVATE lucid_core)
+add_test(NAME debug.transport COMMAND lucid_debug_transport_tests $<TARGET_FILE:lucid_debug_transport_fixture>)
+add_executable(lucid_debug_fixture editor/debug_fixture.cpp editor/debug_fixture_helper.cpp)
+if(MSVC)
+    target_compile_options(lucid_debug_fixture PRIVATE /Od /Zi)
+    target_link_options(lucid_debug_fixture PRIVATE /DEBUG /INCREMENTAL:NO)
+else()
+    target_compile_options(lucid_debug_fixture PRIVATE -g -O0)
+endif()
+add_executable(lucid_debug_lldb_tests editor/debug_lldb_test.cpp)
+target_link_libraries(lucid_debug_lldb_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_debug_lldb_tests)
+add_test(NAME debug.lldb_optional COMMAND lucid_debug_lldb_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/editor/debug_fixture.cpp" $<TARGET_FILE:lucid_debug_fixture> "${CMAKE_CURRENT_SOURCE_DIR}/editor/debug_fixture_helper.cpp")
+
+add_executable(lucid_share_link_tests workspace/share_link_test.cpp)
+target_link_libraries(lucid_share_link_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_share_link_tests)
+add_test(NAME workspace.share_link COMMAND lucid_share_link_tests)
+
+add_executable(lucid_shared_project_tests workspace/shared_project_test.cpp)
+target_link_libraries(lucid_shared_project_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_shared_project_tests)
+add_test(NAME workspace.shared_project COMMAND lucid_shared_project_tests)
+
+add_executable(lucid_host_session_tests workspace/host_session_test.cpp)
+target_link_libraries(lucid_host_session_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_host_session_tests)
+add_test(NAME workspace.host_session COMMAND lucid_host_session_tests)
+
+add_executable(lucid_host_server_tests workspace/host_server_test.cpp)
+target_link_libraries(lucid_host_server_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_host_server_tests)
+add_test(NAME workspace.host_server COMMAND lucid_host_server_tests)
+
+add_executable(lucid_replica_tests workspace/replica_test.cpp)
+target_link_libraries(lucid_replica_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_replica_tests)
+add_test(NAME workspace.replica COMMAND lucid_replica_tests)
+
+if(UNIX)
+    add_test(NAME packaging.installer COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/packaging/installer_test.sh" "${PROJECT_SOURCE_DIR}/packaging/linux/install.sh")
+endif()

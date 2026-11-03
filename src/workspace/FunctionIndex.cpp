@@ -83,6 +83,10 @@ struct FunctionCache {
         return "windows";
     case editor::CompilePlatform::Linux:
         return "linux";
+    case editor::CompilePlatform::FreeBSD:
+        return "freebsd";
+    case editor::CompilePlatform::OpenBSD:
+        return "openbsd";
     case editor::CompilePlatform::Any:
     default:
         return "any";
@@ -100,6 +104,8 @@ struct FunctionCache {
     if (lower == "linux") {
         return editor::CompilePlatform::Linux;
     }
+    if (lower == "freebsd") return editor::CompilePlatform::FreeBSD;
+    if (lower == "openbsd") return editor::CompilePlatform::OpenBSD;
     return editor::CompilePlatform::Any;
 }
 
@@ -361,6 +367,10 @@ std::string_view functionPlatformName(editor::CompilePlatform platform) noexcept
         return "Windows";
     case editor::CompilePlatform::Linux:
         return "Linux";
+    case editor::CompilePlatform::FreeBSD:
+        return "FreeBSD";
+    case editor::CompilePlatform::OpenBSD:
+        return "OpenBSD";
     case editor::CompilePlatform::Any:
     default:
         return {};

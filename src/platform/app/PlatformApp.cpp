@@ -61,6 +61,9 @@ bool openBinaryFile(std::string_view path) {
 
 
 #if !defined(__APPLE__)
+void updateAccessibility(void*, std::string_view, std::string_view, std::size_t, std::size_t) {}
+void prepareOpenFiles() {}
+void setOpenFileHandler(std::function<void(std::string)> /*handler*/) {}
 void installApplicationMenu(const MenuActions& /*actions*/) {}
 #endif
 

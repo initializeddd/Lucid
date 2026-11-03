@@ -63,6 +63,17 @@ namespace {
     return true;
 }
 
+[[nodiscard]] std::string escapeJsonString(std::string_view value) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string escaped;
+    for (const unsigned char c : value) {
+        if (c == '"' || c == '\\') { escaped += '\\'; escaped += static_cast<char>(c); }
+        else if (c < 32) { escaped += "\\u00"; escaped += digits[c >> 4]; escaped += digits[c & 15]; }
+        else escaped += static_cast<char>(c);
+    }
+    return escaped;
+}
+
 [[nodiscard]] std::string colorToHex(const ui::theme::Color& color) {
     const auto channel = [](float value) {
         const int clamped =
@@ -159,6 +170,9 @@ SettingsResult parseSettings(std::string_view text) {
                 return result;
             }
             settings.backgroundMotion = member.boolValue;
+        } else if (member.key == "highContrast") {
+            if (member.type != editor::JsonType::Bool) { result.error = "highContrast must be true or false"; return result; }
+            settings.highContrast = member.boolValue;
         } else if (member.key == "zoomFactor") {
             if (member.type != editor::JsonType::Number) {
                 result.error = "zoomFactor must be a number";
@@ -170,6 +184,27 @@ SettingsResult parseSettings(std::string_view text) {
                 return result;
             }
             settings.zoomFactor = static_cast<float>(zoom);
+        } else if (member.key == "taskIdentity") {
+            if (member.type != editor::JsonType::String || member.stringValue.size() > 128) {
+                result.error = "taskIdentity must be a name of at most 128 bytes";
+                return result;
+            }
+            settings.taskIdentity = member.stringValue;
+        } else if (member.key == "aiAskProvider" || member.key == "aiCleanupProvider" || member.key == "aiDebugProvider") {
+            if (member.type != editor::JsonType::String || (member.stringValue != "local" && member.stringValue != "openrouter")) { result.error = member.key + " must be local or openrouter"; return result; }
+            auto* target = member.key == "aiAskProvider" ? &settings.aiAskProvider : member.key == "aiCleanupProvider" ? &settings.aiCleanupProvider : &settings.aiDebugProvider;
+            *target = member.stringValue;
+        } else if (member.key == "aiAskModel" || member.key == "aiCleanupModel" || member.key == "aiDebugModel") {
+            if (member.type != editor::JsonType::String || member.stringValue.size() > 200 || std::any_of(member.stringValue.begin(), member.stringValue.end(), [](unsigned char c) { return c < 33 || c > 126; })) { result.error = member.key + " must be a model ID of at most 200 printable characters"; return result; }
+            auto* target = member.key == "aiAskModel" ? &settings.aiAskModel : member.key == "aiCleanupModel" ? &settings.aiCleanupModel : &settings.aiDebugModel;
+            *target = member.stringValue;
+        } else if (member.key == "iconTheme") {
+            if (member.type != editor::JsonType::String ||
+                (member.stringValue != "classic" && member.stringValue != "accent" && member.stringValue != "outline")) {
+                result.error = "iconTheme must be classic, accent, or outline";
+                return result;
+            }
+            settings.iconTheme = member.stringValue;
         } else if (member.key == "theme") {
             if (member.type != editor::JsonType::String) {
                 result.error = "theme must be a string";
@@ -246,7 +281,9 @@ std::string defaultSettingsJson() {
            "    \"cursorBlink\": true,\n"
            "    \"cursorStyle\": \"line\",\n"
            "    \"backgroundMotion\": true,\n"
+           "    \"highContrast\": false,\n"
            "    \"zoomFactor\": 1.0,\n"
+           "    \"iconTheme\": \"classic\",\n"
            "    \"theme\": \"lucid-dark\"\n"
            "}\n";
 }
@@ -268,8 +305,17 @@ std::string serializeSettings(const EditorSettings& settings) {
            << "\",\n";
     stream << "    \"backgroundMotion\": "
            << (settings.backgroundMotion ? "true" : "false") << ",\n";
+    stream << "    \"highContrast\": " << (settings.highContrast ? "true" : "false") << ",\n";
     stream << "    \"zoomFactor\": " << std::fixed << std::setprecision(2)
            << settings.zoomFactor << ",\n";
+    stream << "    \"iconTheme\": \"" << settings.iconTheme << "\",\n";
+    stream << "    \"taskIdentity\": \"" << escapeJsonString(settings.taskIdentity) << "\",\n";
+    stream << "    \"aiAskProvider\": \"" << settings.aiAskProvider << "\",\n";
+    stream << "    \"aiCleanupProvider\": \"" << settings.aiCleanupProvider << "\",\n";
+    stream << "    \"aiDebugProvider\": \"" << settings.aiDebugProvider << "\",\n";
+    stream << "    \"aiAskModel\": \"" << escapeJsonString(settings.aiAskModel) << "\",\n";
+    stream << "    \"aiCleanupModel\": \"" << escapeJsonString(settings.aiCleanupModel) << "\",\n";
+    stream << "    \"aiDebugModel\": \"" << escapeJsonString(settings.aiDebugModel) << "\",\n";
     stream << "    \"theme\": \"" << settings.theme.name << "\"";
     if (settings.theme.primary.has_value()) {
         stream << ",\n    \"primary\": \""

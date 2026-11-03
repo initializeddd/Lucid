@@ -36,6 +36,7 @@ public:
     using CharCallback = std::function<void(char32_t)>;
     using MouseButtonCallback = std::function<void(const input::MouseButtonEvent&)>;
     using MouseMoveCallback = std::function<void(const input::MouseMoveEvent&)>;
+    using DropCallback = std::function<void(std::vector<std::string>)>;
     using ScrollCallback = std::function<void(const input::ScrollEvent&)>;
 
     explicit Window(const WindowConfig& config);
@@ -71,6 +72,7 @@ public:
     void setMouseButtonCallback(MouseButtonCallback callback);
     void setMouseMoveCallback(MouseMoveCallback callback);
     void setScrollCallback(ScrollCallback callback);
+    void setDropCallback(DropCallback callback);
 
     [[nodiscard]] VkSurfaceKHR createSurface(VkInstance instance) const;
     [[nodiscard]] static std::vector<const char*> requiredVulkanInstanceExtensions();
@@ -80,6 +82,7 @@ private:
     static void charCallback(GLFWwindow* window, unsigned int codepoint);
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
     static void cursorPosCallback(GLFWwindow* window, double x, double y);
+    static void dropCallback(GLFWwindow* window, int count, const char** paths);
     static void scrollCallback(GLFWwindow* window, double xOffset, double yOffset);
 
     GLFWwindow* m_window = nullptr;
@@ -97,6 +100,7 @@ private:
     MouseButtonCallback m_mouseButtonCallback;
     MouseMoveCallback m_mouseMoveCallback;
     ScrollCallback m_scrollCallback;
+    DropCallback m_dropCallback;
 };
 
 } // namespace lucid

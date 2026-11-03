@@ -99,8 +99,8 @@ int main() {
     }
 
     const auto panel = settingsPanelLayout(1200.0F, 800.0F);
-    if (!near(panel.panel.x0, 390.0F) || !near(panel.panel.x1, 810.0F) ||
-        !near(panel.panel.y0, 185.0F) || !near(panel.panel.y1, 615.0F)) {
+    if (!near(panel.panel.x0, 290.0F) || !near(panel.panel.x1, 910.0F) ||
+        !near(panel.panel.y0, 150.0F) || !near(panel.panel.y1, 650.0F)) {
         return 9;
     }
     if (!near(panel.themeChips[0].x0, panel.panel.x0 + 16.0F) ||
@@ -155,6 +155,8 @@ int main() {
         panel.backgroundMotion.x1 >= panel.done.x0) {
         return 19;
     }
+    if (panel.iconButtons[2].y1 >= panel.done.y0 ||
+        settingsControlAt(panel, panel.iconButtons[2].x0 + 1.0, panel.iconButtons[2].y0 + 1.0) != SettingsControl::IconOutline) return 26;
     if (settingsControlAt(panel, 0.0, 0.0) != SettingsControl::None) {
         return 20;
     }
@@ -171,6 +173,8 @@ int main() {
         !near(compactPanel.panel.x1, 410.0F) ||
         !near(compactPanel.panel.y1, 250.0F) ||
         compactPanel.cursorBlink.y1 >= compactPanel.done.y0 ||
+        settingsControlAt(compactPanel, compactPanel.iconButtons[1].x0 + 1.0,
+                          compactPanel.iconButtons[1].y0 + 1.0) != SettingsControl::IconAccent ||
         compactPanel.cursorButtons[3].y1 >= compactPanel.done.y0 ||
         settingsControlAt(compactPanel, compactPanel.cursorBlink.x0 + 1.0,
                           compactPanel.cursorBlink.y0 + 1.0) !=

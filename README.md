@@ -19,7 +19,7 @@ Keyboard-first. Path-native. Drawn entirely on the GPU.
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-787EFF)](#platform-support)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-787EFF)](https://en.cppreference.com/w/cpp/20)
 
-[Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Building](docs/building.md) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md)
+[Download](#downloads) · [Getting started](docs/getting-started.md) · [Build from source](#build-from-source) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -32,27 +32,31 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Status:** public beta (`0.1.0-beta.4`). The core editing loop is usable and the test suite runs
-> on all three platforms, but APIs and file formats may still change. The beta channel is shown in
-> the window title, the status bar and the About panel.
+> **Beta software.** The latest published build is `v0.1.0-beta.4`. This working tree targets
+> `v0.2.0-beta.1` and includes unreleased features described below; they are not in that download.
+> File formats and behavior may change. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
-## Highlights
+## At a glance
 
-- **Path-native workspace** — no file tree. Open, create and navigate projects by typing a path;
-  folders are inferred and created automatically.
-- **GPU-rendered surface** — Vulkan swapchain, shader-compiled UI, glyph atlas, and a separable
-  Gaussian blur behind the Path Lens.
-- **Keyboard-first** — a single command surface, on-screen keycaps, and native menu equivalents.
-- **Fast, quiet UI** — low-overshoot spring animations, a restrained brand palette, and an aurora
-  that fades behind text so the page stays readable.
-- **Real editing** — UTF-8 documents, selection, undo/redo, clipboard, auto-save, syntax
-  highlighting and live C/C++ and JSON diagnostics.
-- **Inline compile functions** — declare build commands in a C/C++ comment block, run them with
-  `Ctrl+R`, and watch a movable PTY terminal stream output beside the definition.
-- **Project-wide function search** — `Ctrl+Shift+R` lists compile functions from every text file, backed by
-  a cache at `.lucid/cache/functions.json`.
-- **File-backed settings** — a modal panel, three theme presets, a custom accent color and live
-  JSON validation.
+- **A focused workspace** — open projects and files by path, and switch between open files without a permanent tab bar.
+- **A GPU-rendered interface** — Vulkan on Windows and Linux, and MoltenVK on macOS.
+- **Everyday editing** — UTF-8 text, undo/redo, find and replace, syntax highlighting, and C/C++ and JSON diagnostics.
+- **Comment-driven builds** — define and run project commands alongside the code that describes them.
+- **Optional local AI** — review a suggestion before applying it; the model is downloaded and verified on first use.
+- **Work in context** — task workspaces, Git review, recovery snapshots, and declarative text modules bring project work into temporary surfaces.
+
+### Feature maturity
+
+| Area | Status in this working tree |
+| --- | --- |
+| Editing, open-file switcher, settings | Available; keyboard-first workflows are still evolving |
+| Local AI and code cleanup | Preview; small selections, local inference and explicit acceptance |
+| Git review | File-level stage/unstage and local commits; no pull-request integration |
+| Task workspaces and recovery | Local previews; recovery has [known limits](#recovery-snapshots) |
+| Modules | Declarative text commands only; no arbitrary-code runtime |
+| Debugger | LLDB-based C/C++ workflow; macOS tested, Linux and Windows require platform validation |
+| Multiplayer | Not yet available |
+| Screen readers | Initial macOS bridge; broader accessibility work remains |
 
 ## Platform support
 
@@ -68,7 +72,7 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-Prebuilt beta bundles are attached to the [latest release](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.4):
+The currently published beta bundles are attached to [v0.1.0-beta.4](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.4):
 
 | Platform | Artifact | Notes |
 | --- | --- | --- |
@@ -83,6 +87,22 @@ driver is still needed to render.
 Beta builds are not notarized or code-signed for distribution. macOS Gatekeeper and Windows
 SmartScreen may warn on first launch; build from source below if you prefer.
 
+### Installer builds for the next release
+
+The unreleased workflow is configured to build a themed macOS DMG and a Windows MSI alongside the
+standalone archives, plus a per-user Linux installer. These packages are not available in the
+current published release. After a compatible release is published, its Linux installer can be run with:
+
+```sh
+curl -fsSL https://github.com/initializeddd/Lucid/releases/download/v0.2.0-beta.1/install.sh | sh
+```
+
+The command will work after that beta is published and requires a publicly accessible release; a private repository needs an
+authenticated download. The script checks the release checksum and installs into `~/.local` (or the corresponding XDG
+locations); a working Vulkan driver is still required. Installers register Lucid as an **Open With**
+option for supported text and source files without changing the default application. macOS and
+Windows packages are not notarized or signed by a distribution certificate.
+
 ## Requirements
 
 | Requirement | Minimum | Notes |
@@ -92,6 +112,22 @@ SmartScreen may warn on first launch; build from source below if you prefer.
 | GLFW | 3.3 | Fetched automatically when missing |
 | Vulkan | 1.2 | Headers, loader and a working ICD |
 | `glslangValidator` | — | Ships with the Vulkan SDK |
+
+### FreeBSD and OpenBSD (work in progress)
+
+Native x86-64 BSD build, test, and release jobs are configured but have not yet
+been run. Do not treat the BSD archives or installers as available until those
+jobs pass and a release containing them is published. When available, the same
+version-specific installer command above selects the appropriate BSD archive.
+The archive can also be extracted and run directly with `./lucid`.
+
+BSD builds use system libraries rather than the Linux library bundle. Install
+GLFW, the Vulkan loader and a suitable Vulkan driver through the operating
+system's package manager. Local compilation additionally needs CMake, Ninja,
+Git, Vulkan headers, glslang, and an SSL development library. Use the native
+`pkg` on FreeBSD and `pkg_add` on OpenBSD. Secure OpenRouter key storage requires
+`secret-tool` and an unlocked desktop Secret Service keyring. Native BSD packages
+and full desktop, GPU, debugger, and installer validation are still outstanding.
 
 ## Build from source
 
@@ -223,7 +259,7 @@ See [Building](docs/building.md) for signing, packaging, icon regeneration and v
 
 ## Settings
 
-`Ctrl+,` opens the settings panel. **Edit settings...** opens the `Settings` project; the file lives at:
+`Ctrl+,` opens the settings page. **Edit settings...** opens the `Settings` project; the file lives at:
 
 | Platform | Path |
 | --- | --- |
@@ -240,7 +276,9 @@ See [Building](docs/building.md) for signing, packaging, icon regeneration and v
     "cursorBlink": true,
     "cursorStyle": "line",
     "backgroundMotion": true,
+    "highContrast": false,
     "zoomFactor": 1.0,
+    "iconTheme": "classic",
     "theme": "lucid-dark",
     "primary": "#787eff"
 }
@@ -253,7 +291,10 @@ darker and more diffuse so text stays readable. `zoomFactor` accepts `0.5` throu
 the whole interface, including text, layout and mouse hit testing. `theme` accepts `lucid-dark`,
 `graphite` or `lucid-light`. `primary` accepts any `#RRGGBB` color and overrides the theme accent and
 selection tint; omit it to use the theme default. The settings panel includes primary color swatches
-for quick changes.
+for quick changes. In settings, use Tab or arrow keys to move between controls and Enter or Space
+to activate them. `iconTheme` accepts `classic`, `accent` or `outline`; the running application's
+Dock or window icon uses the active primary color. The installed file icon remains the bundled
+icon. The size control scales both text and the rest of the interface.
 
 Settings apply live while the file is edited; `Ctrl+S` persists them. Invalid settings leave the last
 valid configuration active and show a red error in the top-right corner; click it to reopen
@@ -273,7 +314,17 @@ in place of `Alt`:
 | --- | --- |
 | Open or create a project | `Ctrl+P` / `Ctrl+O` |
 | Open or create a file by path | `Ctrl+K` / `Ctrl+N` |
+| Switch between open files | `Ctrl+E` |
 | Complete the selected suggestion | `Tab` |
+| Find in the current file | `Ctrl+F` |
+| Replace a match | `Ctrl+H` (macOS: `Command+Option+F`) |
+| Show function suggestions at the cursor | `Ctrl+Shift+Space` |
+| Ask local AI about selected code | `Ctrl+Shift+A` |
+| Clean up selected code with local AI | `Ctrl+Shift+L` |
+| Open task workspaces / Git review / modules | `Ctrl+Shift+T` / `Ctrl+Shift+G` / `Ctrl+Shift+M` |
+| Review recovery snapshots | `Ctrl+Shift+Y` |
+| Increase / decrease / reset UI and text size | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
+| Toggle high contrast | `Ctrl+Shift+U` |
 | Create the typed folder and keep the prompt open | `Ctrl+Enter` |
 | Dismiss the Path Lens | `Escape` |
 | Save | `Ctrl+S` |
@@ -291,6 +342,29 @@ in place of `Alt`:
 | Duplicate line | `Ctrl+D` |
 | Delete file / project | `Ctrl+Shift+Backspace` / `Ctrl+Shift+Alt+Backspace` |
 
+Use `Ctrl+E` (Command+E on macOS) to open a temporary list of open files. Opening another
+file saves the current file as before; returning to an unchanged file restores its cursor, scroll
+position and undo history. If the file changed on disk while inactive, Lucid reloads it.
+Closing the current file returns to the most recently active open file.
+
+Find searches case-sensitive text in the open file; Enter and Shift+Enter move through matches.
+Replace opens a find prompt, then Enter opens the replacement prompt. Enter replaces the selected
+match (an empty replacement deletes it), and returns to the find prompt. Escape closes the prompt;
+replacements can be undone normally.
+
+The cursor completion menu suggests function-like names found in the current file and a bounded scan of project files. Use Up/Down
+and Enter or Tab to select one; Escape dismisses it. This is a lightweight text-based suggestion,
+not a language server, so it cannot resolve every function in scope.
+
+Local AI runs inside Lucid without a separate model server. On its first request Lucid downloads
+approximately 491 MB from Hugging Face and verifies the pinned model's SHA-256 before loading it.
+Select code, press `Ctrl+Shift+A`, and describe a small task. The current diagnostic is included
+when available. Scroll the response with Up/Down, press Enter to replace the selection with it,
+or Escape to dismiss it. AI output is a suggestion and may contain mistakes or Markdown; review it
+before inserting. Requests and selected code run locally. The bundled inference engine is
+[llama.cpp](https://github.com/ggml-org/llama.cpp), and the model is
+[Qwen2.5-Coder-0.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF).
+
 Arrows, `Home` and `End` move the caret; hold `Shift` to extend the selection. Click a line to place
 the caret, drag to select, and `Shift`-click to extend. Scroll to move the viewport. Click anywhere
 outside the Path Lens to dismiss it.
@@ -298,6 +372,131 @@ outside the Path Lens to dismiss it.
 Suggestions ending in `/` are folders: press `Enter` or `Tab` to step into one. A trailing slash also
 creates a folder, so `src/components/` followed by `Enter` makes the directory. Creating
 `src/components/Button.cpp` creates both folders automatically.
+
+## Accessibility
+
+Use **Command/Ctrl + =** and **Command/Ctrl + -** to change the interface and
+text size, or **Command/Ctrl + 0** to reset it. **Command/Ctrl + Shift + U**
+toggles a monochrome high-contrast mode. These settings persist locally. Errors
+also carry a text label. The settings page and temporary command views support
+keyboard navigation.
+
+On macOS, the editor exposes its text and selection, and command views expose
+their visible options, through the native accessibility API. This is an initial
+bridge: full VoiceOver editing and navigation, complete semantic controls, and
+Windows and Linux screen-reader integration are not implemented yet.
+
+## Recovery snapshots
+
+While a project and file are open, Lucid keeps a local recovery snapshot about
+once per second. It contains the open file's text, its last known disk version,
+cursor position, and the other open file paths and cursor positions. After an
+unclean exit, open the same project to review snapshots, or use **Run > Recovery**
+on macOS / **Command+Shift+Y** (Ctrl+Shift+Y on Windows/Linux). The review view
+shows file names and snapshot text before restoring. Restoration opens the saved
+text in the editor; it does not write the recovered text to disk automatically.
+
+If the disk file has changed or disappeared since the snapshot, Lucid blocks a
+normal save and keeps the recovered text open so you can copy it. Recovery records
+are stored locally in Lucid's `Recovery` directory, contain plain text, and remain
+until explicitly deleted in the recovery view. A clean exit removes the current
+session's snapshot. Snapshots are periodic, limited to 10 MiB per file, and do
+not preserve undo history; edits made after the last successful snapshot may be
+lost. Concurrent changes between the disk check and the write are not prevented.
+
+## Modules
+
+Lucid's module preview supports declarative text commands in a temporary,
+keyboard-accessible manager. Modules list their requested access and start
+disabled; requests for project files, network, processes, or settings cannot be
+enabled yet. See the [module guide](docs/modules.md) for the format and setup.
+
+## AI settings
+
+Open **Settings > AI settings** to choose **Local** or **OpenRouter** independently
+for Ask AI, code cleanup, and debugger explanations. Local uses the bundled
+Qwen2.5 Coder 0.5B integration and downloads the model on first use. For each
+OpenRouter workflow, enter its model ID (for example `provider/model`) and use
+**Set or change OpenRouter API key**. The key is stored in macOS Keychain,
+Windows Credential Manager, or the Linux desktop keyring through `secret-tool`;
+Linux and BSD require the helper and an unlocked Secret Service keyring. The key is
+not written to the settings file. You can remove it in the same menu.
+
+OpenRouter requests send the prompt and relevant selected code, surrounding
+context, diagnostics, or debugger state to the provider. Lucid identifies this
+before you press Enter. OpenRouter and model providers may charge for usage.
+
+## Clean up code with AI
+
+Select a short section of code, then choose **Edit > Clean Up Selection with
+AI** on macOS or press **Command+Shift+L** (Ctrl+Shift+L on Windows/Linux).
+Press Enter to generate a rewrite, inspect the preview, and press Enter to apply
+it or Escape to discard it. Lucid includes nearby lines as style references and
+asks the model to preserve behavior. With the local provider, the model is downloaded on first use and code is processed on the device. The selection is limited to 1200 bytes, and
+long or incomplete responses are rejected. Review the result and run your tests:
+the model cannot guarantee behavior is unchanged.
+
+## Git review
+
+With a Git project open, choose **Run > Git Review** on macOS or press
+**Command+Shift+G** (Ctrl+Shift+G on Windows/Linux). Lucid lists changed and
+untracked files and marks merge conflicts. Select a file to view its staged and
+working-tree diffs, stage or unstage it, or open it for editing. Select a diff
+line to jump to its source; Git blame identifies committed and uncommitted lines.
+
+To resolve a conflict, edit the file, remove the conflict markers, then choose
+**Mark resolved and stage**. From the file list, choose **Review staged changes
+and commit** to inspect the staged paths and enter a message. Lucid creates a
+local commit; it does not push. If the index or HEAD changes during review, Lucid
+asks you to review again. When a subfolder is open as the project, committing is
+blocked if the index includes paths outside it; open the repository root instead.
+
+Git must be installed locally. Git hooks and configured signing run as they do
+for a normal commit and may reject it. The open file is saved before review, and
+Git output is limited to 2 MiB. Staging individual hunks, branch management,
+remote pull-request metadata, and push/pull are not implemented. The Windows
+implementation requires validation on Windows.
+
+## Task workspaces
+
+Open **Run > Tasks** on macOS or press **Command+Shift+T** (Ctrl+Shift+T on
+other platforms) with a project open. Set a display name, create a task, and choose
+one of three tiers: optional polish, quality-of-life work, or urgent bugs and security.
+The task menu supports subtasks, assignment, working status, completion, a written
+solution, and an activity history. Open a task workspace to restore its recorded
+files and cursor positions. Use the page controls in the menu to reach more actions.
+
+Tasks are stored in `.lucid/tasks.json` in the project. Names are user-entered
+labels, not verified identities. The task file detects changes made since it was
+loaded, but it is not a live collaboration service or a substitute for conflict
+resolution. Save and coordinate changes when sharing the project. The active task
+stores its selected debug executable, source and breakpoints, and records debug starts.
+
+## Debugging
+
+For C/C++ programs on macOS, build the executable with debug symbols (for example,
+`-g -O0`), open its source file, and use **Command+Shift+B** to toggle a
+breakpoint on the current line. Open **Run > Debugger** with **Command+Shift+D**,
+choose **Start debugging**, and enter the executable's path relative to the
+project. The executable must already exist and contain debug information. On macOS,
+Lucid uses `xcrun lldb-dap` from the Xcode toolchain. On Linux, install LLVM's
+`lldb-dap` (versioned executable names are also searched). On Windows, install
+LLVM with `lldb-dap.exe` on `PATH` or in `Program Files/LLVM/bin`. Lucid does
+not install the adapter automatically. Linux and Windows need native validation.
+
+While stopped, the debugger menu offers continue, step over, step into, step out,
+a call stack, expandable variables, and output. A `B` marks a breakpoint, `>`
+marks the stopped line, and an asterisk marks a variable that changed after a
+step. Selecting a stack frame changes the displayed variables. The current
+implementation can send breakpoints for multiple source files during a session.
+Task workspaces currently persist only one source file's breakpoints. The debugger
+does not yet provide launch arguments, attach, or full thread selection. Breakpoints are line-based and do not automatically
+move with edits. Stop the debugger before switching tasks or projects.
+
+**Explain paused state with AI** uses the debugger provider selected in AI
+settings and shows a read-only explanation. If OpenRouter is selected, Lucid
+sends stack and variable values only after you press Enter. OpenRouter connectivity
+has not been tested with a live key.
 
 ## Compile functions
 
@@ -313,7 +512,7 @@ $cmake --build %project%/build
 */
 ```
 
-Use zero or more platform suffixes: `:macOS`, `:windows` or `:linux`. Unqualified functions run on
+Use zero or more platform suffixes: `:macOS`, `:windows`, `:linux`, `:freebsd` or `:openbsd`. Unqualified functions run on
 every platform. Variables are expanded before execution:
 
 | Variable | Value |
@@ -328,11 +527,9 @@ every platform. Variables are expanded before execution:
 | `%platform%` | `macOS`, `windows` or `linux` |
 
 Run a function with `Ctrl+R` anywhere inside its block, click its highlighted `@name`, or use
-**Run > Run Compile Function** on macOS. The file is saved first. A terminal panel opens beside the
-function line, streams output and accepts keyboard input while the process is running. It is 50%
-opaque until clicked, then becomes fully opaque and receives focus. Its red traffic light closes the
-panel and terminates the process. Drag the terminal title bar to move the panel; drag a diagnostic
-card by its body.
+**Run > Run Compile Function** on macOS. The file is saved first. A dedicated compile window
+streams output and accepts input while the process is running. Close it or press Escape to stop the
+process. Compile functions are currently available on macOS and Linux.
 
 Press `Ctrl+Shift+R` or choose **Run > Search Project Functions…** to list
 functions from every text file in the project. Type part of a name, then press `Enter` to open the
@@ -344,26 +541,21 @@ invalidated when a file is saved or deleted.
 
 ```text
 Lucid/
-├── assets/          Runtime assets: themes, fonts, icons and shaders
-├── cmake/           Reusable CMake modules and options
-├── docs/            Architecture, build notes and roadmap
-├── packaging/       macOS bundle, Windows resources and Linux desktop files
-├── scripts/         Icon and packaging helpers
-├── src/app/         Application lifecycle
-├── src/core/        Fundamental types, version, assertions
-├── src/editor/      Document, buffer, cursor, selection, syntax
-├── src/events/      Event queue and dispatch
-├── src/fs/          Filesystem abstraction
-├── src/input/       Input mapping and key codes
-├── src/logging/     Small thread-safe logger
-├── src/platform/    Window, native menus, PTY processes and platform integration
-├── src/renderer/    Renderer facade and Vulkan backend
-├── src/text/        Font, shaping, layout and glyph atlas
-├── src/ui/          Widgets, panels, layout and theming
-├── src/workspace/   Projects, sessions and workspace state
-├── tests/           Unit and smoke tests
-├── third_party/     Vendored dependencies (`stb_truetype`)
-└── tools/           Development tooling
+├── assets/          Fonts, themes, shaders and branding
+├── cmake/           Build configuration and dependency helpers
+├── docs/            Guides, architecture and roadmap
+├── packaging/       Platform installers and integration
+├── scripts/         Development and packaging helpers
+├── src/ai/          Local model download and inference
+├── src/app/         Application lifecycle and editor actions
+├── src/editor/      Document model, completion, syntax and diagnostics
+├── src/modules/     Declarative module preview
+├── src/platform/    Windows, input, native menus and processes
+├── src/renderer/    Vulkan renderer
+├── src/ui/          Layout, themes and temporary surfaces
+├── src/workspace/   Projects, Git review, tasks and recovery
+├── tests/           Unit and interaction tests
+└── third_party/     Vendored dependencies
 ```
 
 See [Architecture](docs/architecture.md) for the design of each layer and
@@ -374,7 +566,7 @@ See [Architecture](docs/architecture.md) for the design of each layer and
 Format the C++ sources with the committed [`.clang-format`](.clang-format):
 
 ```sh
-clang-format -i $(git ls-files '*.cpp' '*.hpp' '*.mm')
+clang-format -i path/to/changed_file.cpp
 ```
 
 Run the full test suite:
@@ -389,13 +581,15 @@ renderer logs a warning and continues if it is missing.
 
 ## Contributing
 
-Bug reports, feature ideas and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
-before opening a PR, and use the issue templates when reporting a problem. Please report security
-issues privately as described in [SECURITY.md](SECURITY.md).
+Use [issues](https://github.com/initializeddd/Lucid/issues) for reproducible bugs and scoped feature
+requests, and [Discussions](https://github.com/initializeddd/Lucid/discussions) for questions and
+early ideas. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For security
+reports, follow [SECURITY.md](SECURITY.md); do not post sensitive details in an issue.
 
 ## License
 
 Lucid is released under the [MIT License](LICENSE).
 
 The bundled JetBrains Mono font is licensed under the
-[SIL Open Font License 1.1](assets/fonts/JetBrainsMono-OFL.txt).
+[SIL Open Font License 1.1](assets/fonts/JetBrainsMono-OFL.txt). Third-party notices for the
+local AI stack are in [assets/licenses](assets/licenses/).

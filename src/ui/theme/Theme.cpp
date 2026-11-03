@@ -139,6 +139,21 @@ Color selectionTint(const Color& background, const Color& primary) noexcept {
                  background.a};
 }
 
+Palette highContrastPalette(const Palette& source) noexcept {
+    Palette p = source;
+    const bool light = luminance(source.background) > 0.5F;
+    const Color ink = light ? rgb(0, 0, 0) : rgb(255, 255, 255);
+    p.background = light ? rgb(255, 255, 255) : rgb(0, 0, 0);
+    p.surface = p.background; p.border = ink; p.text = ink; p.textMuted = ink;
+    p.lineNumber = ink; p.caret = ink; p.selection = light ? rgb(210, 210, 210) : rgb(65, 65, 65);
+    p.primary = ink; p.error = ink; p.warning = ink;
+    p.syntaxKeyword = ink; p.syntaxType = ink; p.syntaxString = ink; p.syntaxNumber = ink;
+    p.syntaxComment = ink; p.syntaxPreprocessor = ink; p.syntaxFunction = ink; p.syntaxPunctuation = ink;
+    p.syntaxCompileComment = ink; p.syntaxCompileDirective = ink; p.syntaxCompileFunction = ink;
+    p.syntaxCompileCommand = ink; p.syntaxCompileVariable = ink;
+    return p;
+}
+
 void applyPalette(const Palette& palette) noexcept {
     kBackground = palette.background;
     kSurface = palette.surface;

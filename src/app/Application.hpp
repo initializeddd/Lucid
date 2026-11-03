@@ -1,6 +1,8 @@
 #pragma once
 
 #include "app/Settings.hpp"
+#include "debug/Session.hpp"
+#include "debug/AdapterProcess.hpp"
 #include "editor/compile/CompileScript.hpp"
 #include "editor/diagnostics/CompilerDiagnostics.hpp"
 #include "editor/diagnostics/Diagnostics.hpp"
@@ -16,7 +18,12 @@
 #include "ui/search/SearchBar.hpp"
 #include "workspace/FunctionIndex.hpp"
 #include "workspace/Project.hpp"
+#include "workspace/tasks/Tasks.hpp"
+#include "workspace/recovery/Snapshot.hpp"
+#include "workspace/git/GitReview.hpp"
+#include "modules/Modules.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -31,6 +38,7 @@ namespace lucid {
 struct ApplicationConfig {
     WindowConfig window{};
     RendererConfig renderer{};
+    std::string initialPath;
 };
 
 class Application {
@@ -46,6 +54,7 @@ public:
     void run();
 
 private:
+    friend struct ApplicationInteractionTest;
     void handleKey(const input::KeyEvent& event);
     void handleCommandKey(const input::KeyEvent& event, bool commandDown);
     void handleEditorKey(const input::KeyEvent& event, bool commandDown);
@@ -61,11 +70,48 @@ private:
     void handleScroll(const input::ScrollEvent& event);
 
     void openFilePrompt();
+    void openDocumentSwitcher();
+    void openTasks();
+    void openDebugger();
+    void toggleBreakpoint();
+    void pollDebugger();
+    void stopDebugger();
+    void refreshDebugSuggestions();
+    void applyDebugCommand();
+    void checkpointRecovery();
+    void openRecovery();
+    void refreshRecoverySuggestions();
+    void applyRecovery();
+    void openModules();
+    void refreshModuleSuggestions();
+    void applyModuleCommand();
+    void openGitReview();
+    void refreshGitSuggestions();
+    void applyGitReview();
+    void showTaskView(ui::PromptKind view);
+    void refreshTaskSuggestions();
+    void applyTaskCommand();
+    void captureTaskContext(workspace::Task& task) const;
+    [[nodiscard]] bool saveActiveTaskContext();
+    [[nodiscard]] bool activateTask(std::string_view id);
+    [[nodiscard]] bool commitTaskBoard(workspace::TaskBoard board);
     void openProjectPrompt();
     void openFunctionPrompt();
+    void openAiSettings();
+    void applyAiSettings();
+    void openAiPrompt();
+    void openAiCleanup();
+    void openFind();
+    void openReplace();
+    void applyReplacement();
+    void findInDocument(bool advance, bool backwards = false);
+    void pollAi();
+    void openCompletion();
+    void refreshCompletions();
     void applyCommand(bool forceFolder);
     void createFolder(const std::string& path);
     void openProject(const std::string& path);
+    void openExternalPath(const std::string& path);
     void openFile(const std::string& path);
     [[nodiscard]] bool saveDocument();
     void closeDocument();
@@ -84,14 +130,19 @@ private:
     void updateActiveDiagnostic();
     void resetDiagnostics();
     void initializeSettings();
+    void syncAccessibility(const ui::FrameState& frame);
     void openSettings();
+    void changeZoom(float delta);
+    void toggleHighContrast();
     void openSettingsJson();
     void closeSettingsPanel();
     void handleSettingsPanelClick(double x, double y);
+    void activateSettingsControl(ui::SettingsControl control);
+    void moveSettingsFocus(int direction);
     void updateSettingsPanelHover(double x, double y);
     void applySettings(const EditorSettings& settings);
     void applyTheme(const ThemeSettings& theme);
-    void persistSettings();
+    bool persistSettings();
     void refreshSettings();
     void loadSettingsFromDisk();
     void ensureSettingsFile();
@@ -149,6 +200,7 @@ private:
     void setCommandStatus(std::string message, bool error);
     void setStatus(std::string message, bool error);
 
+    std::string m_accessibilityKey;
     ApplicationConfig m_config;
     ui::SearchBar m_searchBar;
     Window m_window;
@@ -160,13 +212,78 @@ private:
     bool m_hasProject = false;
     std::string m_projectName;
 
+    enum class TaskChoiceKind { NewTask, Identity, SelectTask, OpenWorkspace, LeaveWorkspace, AddSubtask,
+        ViewSubtasks, Assign, ToggleWorking, ToggleDone, History, Solution,
+        PreviousPage, NextPage, ToggleSubtask, Tier1, Tier2, Tier3, Label };
+    struct TaskChoice { TaskChoiceKind kind; std::string id; };
+    enum class TaskInputKind { Identity, Title, Subtask, Assignee, Solution };
+    std::filesystem::path m_recoveryFile;
+    std::vector<std::filesystem::path> m_recoveryFiles;
+    workspace::recovery::Snapshot m_recoveryPreview;
+    std::size_t m_recoverySelected = 0, m_recoveryPage = 0;
+    std::vector<int> m_recoveryChoices;
+    double m_recoveryLastTime = 0.0;
+    std::filesystem::path m_moduleRoot;
+    std::vector<modules::Module> m_modules;
+    std::vector<int> m_moduleChoices;
+    std::size_t m_moduleSelected = 0;
+    std::size_t m_modulePage = 0;
+    debug::AdapterProcess m_debugAdapter;
+    debug::Session m_debugSession;
+    std::map<std::string, std::vector<int>> m_debugBreakpoints;
+    std::string m_debugSource, m_debugInline, m_debugLastWarning, m_debugLastMessage;
+    std::vector<int> m_debugChoices;
+    std::size_t m_debugPage = 0;
+    bool m_debugClosing = false;
+    double m_debugCloseDeadline = 0.0;
+    debug::State m_debugLastState = debug::State::Idle;
+    std::vector<workspace::GitChange> m_gitChanges;
+    workspace::GitReview m_gitReview;
+    workspace::GitCommitPreview m_gitCommitPreview;
+    std::size_t m_gitSelectedFile = 0;
+    std::size_t m_gitPage = 0;
+    std::vector<int> m_gitChoices;
+    workspace::TaskBoard m_taskBoard;
+    std::string m_activeTaskId;
+    std::string m_selectedTaskId;
+    std::string m_taskDraftTitle;
+    std::vector<TaskChoice> m_taskChoices;
+    std::size_t m_taskPage = 0;
+    TaskInputKind m_taskInputKind = TaskInputKind::Identity;
+
+    struct OpenDocument {
+        std::string path;
+        editor::Document document;
+        int firstLine = 0;
+        std::string diskContents;
+    };
+    std::vector<OpenDocument> m_inactiveDocuments;
     editor::Document m_document;
     bool m_hasDocument = false;
     std::string m_filePath;
+    std::string m_diskContents;
     int m_firstLine = 0;
     bool m_followCursor = true;
     bool m_welcomeActionHovered = false;
+    int m_welcomeShortcutScroll = 0;
+    editor::TextPosition m_findAnchor{};
+    bool m_replacePending = false;
+    std::string m_replaceQuery;
+    std::string m_replaceFile;
+    std::uint64_t m_replaceRevision = 0;
+    bool m_completionOpen = false;
+    int m_completionSelected = 0;
+    std::size_t m_completionStart = 0;
+    std::vector<std::string> m_completions;
+    std::set<std::string> m_projectCompletionNames;
     bool m_mouseSelecting = false;
+    bool m_wordSelecting = false;
+    editor::TextPosition m_wordSelectionStart{};
+    editor::TextPosition m_wordSelectionEnd{};
+    int m_clickCount = 0;
+    double m_lastClickTime = -1.0;
+    double m_lastClickX = 0.0;
+    double m_lastClickY = 0.0;
     float m_charAdvance = 7.0F;
 
     float m_animationSpeed = 1.0F;
@@ -244,6 +361,23 @@ private:
     float m_diagnosticOffsetX = 0.0F;
     float m_diagnosticOffsetY = 0.0F;
 
+    struct AiResult { std::string output; std::string error; };
+    std::future<AiResult> m_aiFuture;
+    std::shared_ptr<std::atomic_bool> m_aiCancel;
+    std::string m_aiResponse;
+    std::vector<std::string> m_aiLines;
+    std::size_t m_aiScroll = 0;
+    std::string m_aiFile;
+    std::uint64_t m_aiRevision = 0;
+    editor::TextPosition m_aiStart{};
+    editor::TextPosition m_aiEnd{};
+    bool m_aiReady = false;
+    bool m_aiCleanup = false;
+    bool m_aiDebugExplanation = false;
+    bool m_aiDebugOpenRouter = false;
+    int m_aiSettingsWorkflow = 0;
+    std::string m_aiSecret;
+    std::string m_aiDebugContext;
     std::future<editor::CompilerResult> m_compilerFuture;
     bool m_compilerRunning = false;
     std::uint64_t m_compilerRunningRevision = 0;

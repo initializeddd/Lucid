@@ -1,8 +1,15 @@
+#include "ai/CodeCleanup.hpp"
+#include "ai/OpenRouter.hpp"
+#include "platform/security/Credentials.hpp"
 #include "app/Application.hpp"
+#include "ai/LocalModel.hpp"
+#include "ai/ModelDownload.hpp"
 
 #include "core/Version.hpp"
 #include "editor/compile/CompileScript.hpp"
+#include "editor/completion/Completion.hpp"
 #include "editor/diagnostics/Diagnostics.hpp"
+#include "editor/search/TextSearch.hpp"
 #include "editor/json/Json.hpp"
 #include "logging/Log.hpp"
 #include "ui/Overlay.hpp"
@@ -11,18 +18,27 @@
 #include "workspace/PathSearch.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
 namespace lucid {
 namespace {
+
+[[nodiscard]] bool isTaskPrompt(ui::PromptKind kind) {
+    return kind == ui::PromptKind::TaskList || kind == ui::PromptKind::TaskActions ||
+        kind == ui::PromptKind::TaskSubtasks || kind == ui::PromptKind::TaskHistory ||
+        kind == ui::PromptKind::TaskTier || kind == ui::PromptKind::TaskInput;
+}
 
 constexpr std::size_t kIndentWidth = 4;
 constexpr std::size_t kMaxTerminalInput = 512;
@@ -253,6 +269,10 @@ Application::Application(ApplicationConfig config)
     m_window.setScrollCallback(
         [this](const input::ScrollEvent& event) { handleScroll(event); });
 
+    m_window.setDropCallback([this](std::vector<std::string> paths) {
+        if (!paths.empty()) openExternalPath(paths.front());
+    });
+
     platform::configureApplicationWindow(m_window.handle(), m_config.window.title);
     platform::installApplicationMenu({
         .openProject = [this]() { openProjectPrompt(); },
@@ -271,6 +291,22 @@ Application::Application(ApplicationConfig config)
         .copy = [this]() { copySelection(); },
         .paste = [this]() { pasteClipboard(); },
         .selectAll = [this]() { selectAllText(); },
+        .complete = [this]() { openCompletion(); },
+        .askAi = [this]() { if (m_hasDocument && !m_searchBar.visible()) openAiPrompt(); },
+        .find = [this]() { openFind(); },
+        .replace = [this]() { openReplace(); },
+        .switchFile = [this]() { openDocumentSwitcher(); },
+        .tasks = [this]() { openTasks(); },
+        .gitReview = [this]() { openGitReview(); },
+        .aiCleanup = [this]() { openAiCleanup(); },
+        .modules = [this]() { openModules(); },
+        .recovery = [this]() { openRecovery(); },
+        .zoomIn = [this]() { changeZoom(0.1F); },
+        .zoomOut = [this]() { changeZoom(-0.1F); },
+        .zoomReset = [this]() { changeZoom(0.0F); },
+        .contrast = [this]() { toggleHighContrast(); },
+        .debugger = [this]() { openDebugger(); },
+        .breakpoint = [this]() { toggleBreakpoint(); },
     });
 
     m_renderer = std::make_unique<Renderer>(m_window, m_config.renderer);
@@ -278,13 +314,28 @@ Application::Application(ApplicationConfig config)
     m_renderer->setUiZoom(m_uiZoom);
     m_charAdvance = m_renderer->logicalCharacterAdvance();
 
+    platform::prepareOpenFiles();
+    platform::setOpenFileHandler([this](std::string path) { openExternalPath(path); });
+    if (!m_config.initialPath.empty()) openExternalPath(m_config.initialPath);
     if (const char* demoProject = std::getenv("LUCID_DEMO_MENU")) {
         openProject(demoProject);
         openFilePrompt();
     }
 }
 
-Application::~Application() = default;
+Application::~Application() {
+    if (m_debugAdapter.alive()) {
+        stopDebugger();
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (m_debugAdapter.alive() && std::chrono::steady_clock::now() < until) {
+            pollDebugger();
+            if (m_debugAdapter.alive()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        m_debugAdapter.close();
+    }
+    platform::setOpenFileHandler({});
+    if (m_aiCancel) m_aiCancel->store(true);
+}
 
 void Application::run() {
     while (!m_window.shouldClose()) {
@@ -293,7 +344,11 @@ void Application::run() {
         const double timeSeconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                 .count();
-        m_renderer->drawFrame(makeFrameState(timeSeconds));
+        pollDebugger();
+        if (timeSeconds - m_recoveryLastTime >= 1.0) { checkpointRecovery(); m_recoveryLastTime = timeSeconds; }
+        const auto frame = makeFrameState(timeSeconds);
+        syncAccessibility(frame);
+        m_renderer->drawFrame(frame);
 
         if (m_compileTerminalCloseRequested) {
             m_compileTerminalCloseRequested = false;
@@ -316,7 +371,13 @@ void Application::run() {
     }
 
     if (!saveDocument()) {
-        log::error("Could not save the open document before exit.");
+        checkpointRecovery();
+        log::error("Could not save the open document before exit; recovery snapshot retained.");
+    } else if (!saveActiveTaskContext()) {
+        checkpointRecovery();
+        log::error("Could not save the task workspace before exit; recovery snapshot retained.");
+    } else if (!m_recoveryFile.empty()) {
+        std::error_code ec; std::filesystem::remove(m_recoveryFile, ec);
     }
 
     m_renderer->waitIdle();
@@ -330,6 +391,12 @@ void Application::handleKey(const input::KeyEvent& event) {
     const bool commandDown = event.control;
 #endif
 
+    if (event.action == input::KeyAction::Press && commandDown) {
+        if (event.key == input::Key::Equal) { changeZoom(0.1F); return; }
+        if (event.key == input::Key::Minus) { changeZoom(-0.1F); return; }
+        if (event.key == input::Key::Zero) { changeZoom(0.0F); return; }
+        if (event.key == input::Key::U && event.shift) { toggleHighContrast(); return; }
+    }
     if (m_settingsPanelVisible) {
         if (event.action == input::KeyAction::Press &&
             event.key == input::Key::Escape) {
@@ -341,11 +408,88 @@ void Application::handleKey(const input::KeyEvent& event) {
             closeSettingsPanel();
             return;
         }
+        if (event.action == input::KeyAction::Press || event.action == input::KeyAction::Repeat) {
+            if (event.key == input::Key::Tab || event.key == input::Key::Down || event.key == input::Key::Right) {
+                moveSettingsFocus(event.key == input::Key::Tab && event.shift ? -1 : 1);
+            } else if (event.key == input::Key::Up || event.key == input::Key::Left) {
+                moveSettingsFocus(-1);
+            } else if (event.key == input::Key::Enter || event.key == input::Key::Space) {
+                activateSettingsControl(m_settingsHovered);
+            }
+        }
         return;
     }
 
+    if (event.action == input::KeyAction::Press && commandDown && event.shift &&
+        event.key == input::Key::Space && m_hasDocument && !m_searchBar.visible() &&
+        !m_compileTerminalFocused) {
+        openCompletion();
+        return;
+    }
+    if (m_completionOpen && event.action != input::KeyAction::Release) {
+        if (event.key == input::Key::Escape) { m_completionOpen = false; return; }
+        if (event.key == input::Key::Up || event.key == input::Key::Down) {
+            if (!m_completions.empty()) m_completionSelected = std::clamp(
+                m_completionSelected + (event.key == input::Key::Down ? 1 : -1),
+                0, static_cast<int>(m_completions.size()) - 1);
+            return;
+        }
+        if ((event.key == input::Key::Enter || event.key == input::Key::Tab) && !m_completions.empty()) {
+            const auto line = m_document.cursorLine();
+            const auto end = m_document.cursorColumn();
+            const std::string chosen = m_completions[static_cast<std::size_t>(m_completionSelected)];
+            m_document.setCursor(line, m_completionStart);
+            m_document.extendSelectionTo(line, end);
+            m_document.pasteUtf8(chosen);
+            m_completionOpen = false;
+            return;
+        }
+        if (commandDown || event.alt || event.key == input::Key::Left ||
+            event.key == input::Key::Right || event.key == input::Key::Home ||
+            event.key == input::Key::End || event.key == input::Key::Delete ||
+            event.key == input::Key::Enter || event.key == input::Key::Tab)
+            m_completionOpen = false;
+    }
+
+    if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::AiKeyInput && commandDown && event.key != input::Key::V) return;
+    if (m_searchBar.isOpen() && (m_searchBar.kind() == ui::PromptKind::AiKeyInput || m_searchBar.kind() == ui::PromptKind::AiModelInput) && commandDown && event.key == input::Key::V && event.action == input::KeyAction::Press) {
+        if (m_searchBar.kind() == ui::PromptKind::AiKeyInput) handleCommandKey(event, commandDown);
+        else { auto value = std::string(m_searchBar.query()) + m_window.clipboardText(); m_searchBar.setQuery(std::move(value)); }
+        return;
+    }
     if (event.action == input::KeyAction::Press && commandDown) {
         switch (event.key) {
+        case input::Key::E:
+            openDocumentSwitcher();
+            return;
+        case input::Key::B:
+            if (event.shift) toggleBreakpoint();
+            return;
+        case input::Key::M:
+            if (event.shift) openModules();
+            return;
+        case input::Key::L:
+            if (event.shift) openAiCleanup();
+            return;
+        case input::Key::G:
+            if (event.shift) openGitReview();
+            return;
+        case input::Key::T:
+            if (event.shift) openTasks();
+            return;
+        case input::Key::F:
+#if defined(__APPLE__)
+            if (event.alt) openReplace();
+            else openFind();
+#else
+            openFind();
+#endif
+            return;
+#if !defined(__APPLE__)
+        case input::Key::H:
+            openReplace();
+            return;
+#endif
         case input::Key::K:
             if (event.shift && m_hasDocument && !m_searchBar.visible()) {
                 m_document.deleteLine();
@@ -362,12 +506,14 @@ void Application::handleKey(const input::KeyEvent& event) {
             openProjectPrompt();
             return;
         case input::Key::A:
-            selectAllText();
+            if (event.shift && m_hasDocument && !m_searchBar.visible()) openAiPrompt();
+            else selectAllText();
             return;
         case input::Key::C:
             copySelection();
             return;
         case input::Key::D:
+            if (event.shift) { openDebugger(); return; }
             if (m_hasDocument && !m_searchBar.visible()) {
                 m_document.duplicateLine();
                 m_followCursor = true;
@@ -384,6 +530,7 @@ void Application::handleKey(const input::KeyEvent& event) {
             }
             return;
         case input::Key::Y:
+            if (event.shift) { openRecovery(); return; }
             redoDocument();
             return;
         case input::Key::V:
@@ -446,6 +593,9 @@ void Application::handleKey(const input::KeyEvent& event) {
         return;
     }
 
+    if (!m_hasDocument && event.action != input::KeyAction::Release && (event.key == input::Key::Up || event.key == input::Key::Down)) {
+        m_welcomeShortcutScroll = std::clamp(m_welcomeShortcutScroll + (event.key == input::Key::Down ? 1 : -1), 0, 17); return;
+    }
     if (m_compileTerminalFocused && m_compileTerminalVisible) {
         if (event.action == input::KeyAction::Release) {
             return;
@@ -503,11 +653,44 @@ void Application::handleKey(const input::KeyEvent& event) {
 
     if (m_hasDocument) {
         handleEditorKey(event, commandDown);
+        if (m_completionOpen) refreshCompletions();
     }
 }
 
 void Application::handleCommandKey(const input::KeyEvent& event, bool commandDown) {
     if (event.action == input::KeyAction::Press && event.key == input::Key::Escape) {
+        if (m_searchBar.kind() == ui::PromptKind::Ai && m_aiCancel) m_aiCancel->store(true);
+        const auto kind = m_searchBar.kind();
+        if (kind == ui::PromptKind::AiKeyInput || kind == ui::PromptKind::AiModelInput) {
+            std::fill(m_aiSecret.begin(), m_aiSecret.end(), '\0'); m_aiSecret.clear(); openAiSettings(); return;
+        }
+        if (kind == ui::PromptKind::DebugStack || kind == ui::PromptKind::DebugVariables || kind == ui::PromptKind::DebugOutput || kind == ui::PromptKind::DebugInput) { m_debugPage = 0; m_searchBar.open(ui::PromptKind::DebugMenu); clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::RecoveryDetail) { m_recoveryPage = 0; m_searchBar.open(ui::PromptKind::RecoveryList); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleCommands) { m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleActions); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleActions) { m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::GitDiff) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitFile); clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::GitFile || kind == ui::PromptKind::GitCommitReview) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitChanges); clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::GitCommitInput) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitCommitReview); clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::TaskSubtasks || kind == ui::PromptKind::TaskHistory) {
+            showTaskView(ui::PromptKind::TaskActions);
+            return;
+        }
+        if (kind == ui::PromptKind::TaskInput) {
+            if (m_taskInputKind == TaskInputKind::Identity && m_settings.taskIdentity.empty()) {
+                m_searchBar.close();
+            } else if (m_taskInputKind == TaskInputKind::Subtask) {
+                showTaskView(ui::PromptKind::TaskSubtasks);
+            } else if (m_taskInputKind == TaskInputKind::Assignee || m_taskInputKind == TaskInputKind::Solution) {
+                showTaskView(ui::PromptKind::TaskActions);
+            } else {
+                showTaskView(ui::PromptKind::TaskList);
+            }
+            return;
+        }
+        if (kind == ui::PromptKind::TaskActions || kind == ui::PromptKind::TaskTier) {
+            showTaskView(ui::PromptKind::TaskList);
+            return;
+        }
         m_searchBar.close();
         return;
     }
@@ -516,14 +699,61 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
         return;
     }
 
+    if (m_searchBar.kind() == ui::PromptKind::AiKeyInput) {
+        if (event.action == input::KeyAction::Press && commandDown && event.key == input::Key::V) {
+            std::string pasted = m_window.clipboardText();
+            if (m_aiSecret.size() + pasted.size() <= 1024 && std::all_of(pasted.begin(), pasted.end(), [](unsigned char c) { return c >= 33 && c <= 126; })) m_aiSecret += pasted;
+            else setCommandStatus("Key must contain only printable characters and fit within 1024 bytes", true);
+            std::fill(pasted.begin(), pasted.end(), '\0');
+            m_searchBar.setQuery(std::string(m_aiSecret.size(), '*')); return;
+        }
+        if ((event.action == input::KeyAction::Press || event.action == input::KeyAction::Repeat) && event.key == input::Key::Backspace) {
+            if (!m_aiSecret.empty()) { m_aiSecret.back() = '\0'; m_aiSecret.pop_back(); }
+            m_searchBar.setQuery(std::string(m_aiSecret.size(), '*')); return;
+        }
+    }
+    if (m_searchBar.kind() == ui::PromptKind::Ai && m_aiReady &&
+        event.action != input::KeyAction::Release) {
+        if (event.key == input::Key::Up && m_aiScroll > 0) --m_aiScroll;
+        if (event.key == input::Key::Down && m_aiScroll + 1 < m_aiLines.size()) ++m_aiScroll;
+        if (event.key == input::Key::Up || event.key == input::Key::Down) { refreshSuggestions(); return; }
+        if (event.key == input::Key::Tab) return;
+        refreshSuggestions();
+    }
     refreshSuggestions();
 
     if (event.action == input::KeyAction::Press && event.key == input::Key::Enter) {
+        if (m_searchBar.kind() == ui::PromptKind::Find) {
+            if (m_replacePending && !event.shift) {
+                if (m_searchBar.query().empty() || !m_document.hasSelection()) {
+                    setCommandStatus("Find a match before replacing", true);
+                    return;
+                }
+                m_replaceQuery = m_searchBar.query();
+                m_replaceFile = m_filePath;
+                m_replaceRevision = m_document.revision();
+                m_searchBar.open(ui::PromptKind::Replace);
+                clearCommandFeedback();
+                setCommandStatus("Enter: replace this match  Escape: cancel", false);
+            } else {
+                findInDocument(true, event.shift);
+            }
+            return;
+        }
+        if (m_searchBar.kind() == ui::PromptKind::Replace) {
+            applyReplacement();
+            return;
+        }
         applyCommand(commandDown);
         return;
     }
 
     if (event.action == input::KeyAction::Press && event.key == input::Key::Tab) {
+        if (m_searchBar.kind() == ui::PromptKind::AiSettings) { moveSuggestion(event.shift ? -1 : 1); return; }
+        if (isTaskPrompt(m_searchBar.kind()) || m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugInput || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput || m_searchBar.kind() == ui::PromptKind::RecoveryList || m_searchBar.kind() == ui::PromptKind::RecoveryDetail || m_searchBar.kind() == ui::PromptKind::ModuleList || m_searchBar.kind() == ui::PromptKind::ModuleActions || m_searchBar.kind() == ui::PromptKind::ModuleCommands || m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput) {
+            if (m_searchBar.kind() != ui::PromptKind::TaskInput && m_searchBar.kind() != ui::PromptKind::GitCommitInput && m_searchBar.kind() != ui::PromptKind::DebugInput) moveSuggestion(event.shift ? -1 : 1);
+            return;
+        }
         acceptSuggestion();
         return;
     }
@@ -539,6 +769,7 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
         return;
     }
     if (repeatable && event.key == input::Key::Backspace) {
+        if (m_searchBar.kind() == ui::PromptKind::Ai && m_aiReady) return;
         m_searchBar.backspace();
         onCommandQueryChanged();
     }
@@ -560,6 +791,16 @@ void Application::handleEditorKey(const input::KeyEvent& event, bool commandDown
         return;
     }
 
+#if defined(__APPLE__)
+    const bool wordModifier = event.alt && !commandDown;
+#else
+    const bool wordModifier = commandDown && !event.alt;
+#endif
+    if (wordModifier && (event.key == input::Key::Left || event.key == input::Key::Right)) {
+        if (event.key == input::Key::Left) m_document.moveWordLeft(event.shift);
+        else m_document.moveWordRight(event.shift);
+        return;
+    }
     if (commandDown) {
         if (event.key == input::Key::Left) {
             m_document.moveHome(event.shift);
@@ -629,7 +870,12 @@ void Application::handleChar(char32_t codepoint) {
     }
 
     if (m_searchBar.visible()) {
-        if (m_searchBar.isOpen()) {
+        if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::AiKeyInput) {
+            if (codepoint >= 33 && codepoint <= 126 && m_aiSecret.size() < 1024) { m_aiSecret.push_back(static_cast<char>(codepoint)); m_searchBar.setQuery(std::string(m_aiSecret.size(), '*')); }
+            return;
+        }
+        if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::AiSettings) return;
+        if (m_searchBar.isOpen() && !(m_searchBar.kind() == ui::PromptKind::Ai && m_aiReady)) {
             m_searchBar.append(codepoint);
             onCommandQueryChanged();
         }
@@ -657,6 +903,7 @@ void Application::handleChar(char32_t codepoint) {
         m_document.insert(codepoint);
         m_followCursor = true;
     }
+    if (m_completionOpen) refreshCompletions();
 }
 
 void Application::undoDocument() {
@@ -720,9 +967,11 @@ void Application::selectAllText() {
 }
 
 void Application::handleMouseButton(const input::MouseButtonEvent& event) {
+    if (event.action == input::KeyAction::Press) m_completionOpen = false;
     if (event.button == input::MouseButton::Left &&
         event.action == input::KeyAction::Release) {
         m_mouseSelecting = false;
+        m_wordSelecting = false;
         m_window.endWindowDrag();
         endDrag();
         return;
@@ -745,8 +994,6 @@ void Application::handleMouseButton(const input::MouseButtonEvent& event) {
         const ui::SettingsPanelLayout layout = settingsPanelLayout();
         if (layout.panel.contains(event.x, event.y)) {
             handleSettingsPanelClick(event.x, event.y);
-        } else {
-            closeSettingsPanel();
         }
         return;
     }
@@ -798,14 +1045,19 @@ void Application::handleMouseButton(const input::MouseButtonEvent& event) {
             refreshSuggestions();
             const int index = suggestionIndexAt(event.x, event.y);
             if (index >= 0) {
-                m_selectedSuggestion = index;
-                applyCommand(false);
+                // AI preview rows are response text, not actionable suggestions.
+                // Insertion must only happen through the explicit Enter action.
+                if (m_searchBar.kind() != ui::PromptKind::Ai) {
+                    m_selectedSuggestion = index;
+                    applyCommand(false);
+                }
                 return;
             }
             if (commandRegionContains(event.x, event.y)) {
                 return;
             }
         }
+        if (m_searchBar.kind() == ui::PromptKind::AiKeyInput) { std::fill(m_aiSecret.begin(), m_aiSecret.end(), '\0'); m_aiSecret.clear(); }
         m_searchBar.close();
         return;
     }
@@ -826,6 +1078,26 @@ void Application::handleMouseButton(const input::MouseButtonEvent& event) {
     }
 
     m_mouseSelecting = placeCaretAt(event.x, event.y, event.shift);
+    if (m_mouseSelecting && !event.shift) {
+        const double now = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - m_lastClickTime < 0.4 && std::abs(event.x - m_lastClickX) < 5.0 &&
+            std::abs(event.y - m_lastClickY) < 5.0) {
+            m_clickCount = std::min(m_clickCount + 1, 4);
+        } else {
+            m_clickCount = 1;
+        }
+        m_lastClickTime = now;
+        m_lastClickX = event.x;
+        m_lastClickY = event.y;
+        m_wordSelecting = m_clickCount == 2;
+        if (m_wordSelecting) {
+            m_document.selectWord();
+            m_wordSelectionStart = m_document.selectionStart();
+            m_wordSelectionEnd = m_document.selectionEnd();
+        }
+        if (m_clickCount >= 3) m_document.selectLine();
+    }
 }
 
 void Application::handleMouseMove(const input::MouseMoveEvent& event) {
@@ -849,7 +1121,24 @@ void Application::handleMouseMove(const input::MouseMoveEvent& event) {
     }
 
     if (m_mouseSelecting && m_hasDocument && !m_searchBar.visible()) {
-        (void)placeCaretAt(event.x, event.y, true);
+        if (m_wordSelecting && placeCaretAt(event.x, event.y, false)) {
+            const auto line = m_document.cursorLine();
+            const auto column = m_document.cursorColumn();
+            m_document.selectWord();
+            const auto start = m_document.selectionStart();
+            const auto end = m_document.selectionEnd();
+            const bool before = line < m_wordSelectionStart.line ||
+                (line == m_wordSelectionStart.line && column < m_wordSelectionStart.column);
+            if (before) {
+                m_document.setCursor(m_wordSelectionEnd.line, m_wordSelectionEnd.column);
+                m_document.extendSelectionTo(start.line, start.column);
+            } else {
+                m_document.setCursor(m_wordSelectionStart.line, m_wordSelectionStart.column);
+                m_document.extendSelectionTo(end.line, end.column);
+            }
+        } else if (!m_wordSelecting) {
+            (void)placeCaretAt(event.x, event.y, true);
+        }
     }
 
     if (m_searchBar.visible() && m_searchBar.isOpen()) {
@@ -890,6 +1179,7 @@ void Application::handleScroll(const input::ScrollEvent& event) {
     }
 
     if (!m_hasDocument) {
+        m_welcomeShortcutScroll = std::clamp(m_welcomeShortcutScroll + (event.yOffset < 0.0 ? 1 : -1), 0, 17);
         return;
     }
 
@@ -1159,6 +1449,789 @@ void Application::openFilePrompt() {
     refreshSuggestions();
 }
 
+void Application::captureTaskContext(workspace::Task& task) const {
+    task.files.clear();
+    if (m_hasDocument) task.files.push_back({m_filePath, m_document.cursorLine(), m_document.cursorColumn(), m_firstLine});
+    for (const auto& file : m_inactiveDocuments)
+        task.files.push_back({file.path, file.document.cursorLine(), file.document.cursorColumn(), file.firstLine});
+}
+
+bool Application::commitTaskBoard(workspace::TaskBoard board) {
+    std::string error;
+    if (!workspace::saveTasks(m_project, board, error)) {
+        setCommandStatus(error, true);
+        setStatus(error, true);
+        return false;
+    }
+    m_taskBoard = std::move(board);
+    return true;
+}
+
+bool Application::saveActiveTaskContext() {
+    if (m_activeTaskId.empty()) return true;
+    if (!saveDocument()) return false;
+    auto board = m_taskBoard;
+    auto* task = workspace::findTask(board, m_activeTaskId);
+    if (!task) { setStatus("Active task no longer exists", true); return false; }
+    captureTaskContext(*task);
+    return commitTaskBoard(std::move(board));
+}
+
+bool Application::activateTask(std::string_view id) {
+    if (m_debugAdapter.alive()) { setCommandStatus("Stop the debugger before switching tasks", true); return false; }
+    if (!saveDocument()) return false;
+    auto board = m_taskBoard;
+    const std::string targetId(id);
+    if (!m_activeTaskId.empty()) {
+        auto* previous = workspace::findTask(board, m_activeTaskId);
+        if (!previous) { setCommandStatus("Active task no longer exists", true); return false; }
+        captureTaskContext(*previous);
+        if (m_activeTaskId != targetId) (void)workspace::setTaskWorking(*previous, false, m_settings.taskIdentity);
+    }
+    auto* target = workspace::findTask(board, targetId);
+    if (!target) { setCommandStatus("Task no longer exists", true); return false; }
+    (void)workspace::setTaskWorking(*target, true, m_settings.taskIdentity);
+    const auto files = target->files;
+    const std::string title = target->title;
+    if (!commitTaskBoard(std::move(board))) return false;
+    m_activeTaskId = targetId;
+    m_debugBreakpoints.clear();
+    if (const auto* active = workspace::findTask(m_taskBoard, targetId); active && !active->debugSource.empty())
+        m_debugBreakpoints[active->debugSource] = active->debugBreakpoints;
+    m_inactiveDocuments.clear();
+    m_hasDocument = false;
+    m_filePath.clear();
+    m_document = editor::Document{};
+    m_firstLine = 0;
+    closeCompileTerminal();
+    resetDiagnostics();
+    m_syntaxValid = false;
+    m_compileScriptValid = false;
+    std::size_t missing = 0;
+    for (auto it = files.rbegin(); it != files.rend(); ++it) {
+        if (!m_project.exists(it->path) || m_project.isDirectory(it->path)) { ++missing; continue; }
+        openFile(it->path);
+        if (!m_hasDocument || m_filePath != it->path) { ++missing; continue; }
+        m_document.setCursor(it->line, it->column);
+        m_firstLine = it->firstLine;
+        m_followCursor = false;
+    }
+    m_searchBar.close();
+    setStatus("Task: " + title + (missing ? " (some files could not be opened)" : ""), missing != 0);
+    return true;
+}
+
+void Application::checkpointRecovery() {
+    if (!m_hasProject || !m_hasDocument || m_settingsRoot.empty()) return;
+    if (m_recoveryFile.empty()) m_recoveryFile = std::filesystem::path(m_settingsRoot).parent_path() / "Recovery" / (workspace::newTaskId() + ".json");
+    workspace::recovery::Snapshot snapshot;
+    snapshot.project = m_project.root().generic_string(); snapshot.file = m_filePath;
+    snapshot.baseline = m_diskContents; snapshot.contents = m_document.toUtf8();
+    snapshot.line = m_document.cursorLine(); snapshot.column = m_document.cursorColumn(); snapshot.firstLine = m_firstLine;
+    for (const auto& file : m_inactiveDocuments)
+        snapshot.openFiles.push_back({file.path, file.document.cursorLine(), file.document.cursorColumn(), file.firstLine});
+    std::string error;
+    if (!workspace::recovery::write(m_recoveryFile, snapshot, error)) setStatus("Recovery: " + error, true);
+}
+void Application::openRecovery() {
+    if (!m_hasProject || m_settingsRoot.empty() || m_settingsPanelVisible || m_compileTerminalFocused) { setStatus("Open a project to review recovery snapshots", true); return; }
+    const auto root = std::filesystem::path(m_settingsRoot).parent_path() / "Recovery";
+    m_recoveryFiles.clear(); std::error_code ec;
+    if (std::filesystem::exists(root, ec)) {
+        std::filesystem::directory_iterator it(root, ec), end;
+        for (; !ec && it != end; it.increment(ec)) {
+            if (it->path() == m_recoveryFile || it->path().extension() != ".json" || it->is_symlink(ec)) continue;
+            workspace::recovery::Snapshot snapshot; std::string error;
+            if (workspace::recovery::read(it->path(), snapshot, error) && snapshot.project == m_project.root().generic_string()) m_recoveryFiles.push_back(it->path());
+        }
+    }
+    if (ec) { setStatus("Could not list recovery snapshots", true); return; }
+    std::sort(m_recoveryFiles.begin(), m_recoveryFiles.end()); m_recoveryPage = 0;
+    m_searchBar.open(ui::PromptKind::RecoveryList); clearCommandFeedback();
+    if (m_recoveryFiles.empty()) setCommandStatus("No recovery snapshots for this project", false);
+    refreshSuggestions();
+}
+void Application::refreshRecoverySuggestions() {
+    struct Entry { std::string label, detail; int choice; }; std::vector<Entry> entries;
+    const auto add = [&entries](std::string label, std::string detail, int choice) { entries.push_back({std::move(label), std::move(detail), choice}); };
+    if (m_searchBar.kind() == ui::PromptKind::RecoveryList) {
+        for (std::size_t i = 0; i < m_recoveryFiles.size(); ++i) {
+            workspace::recovery::Snapshot s; std::string error;
+            if (workspace::recovery::read(m_recoveryFiles[i], s, error))
+                add(s.file, (s.contents == s.baseline ? "Saved content" : "Unsaved changes") + std::string("; ") + std::to_string(s.openFiles.size() + 1) + " open files", static_cast<int>(i));
+        }
+    } else {
+        add("Restore this snapshot", "Opens a copy; does not overwrite disk", 0);
+        add("Delete this snapshot", "", 1);
+        add("File: " + m_recoveryPreview.file, "", 2);
+        add("Cursor: " + std::to_string(m_recoveryPreview.line + 1) + ":" + std::to_string(m_recoveryPreview.column + 1), "Scroll line " + std::to_string(m_recoveryPreview.firstLine + 1), 2);
+        add("Text: " + std::to_string(m_recoveryPreview.contents.size()) + " bytes", !m_recoveryPreview.contents.empty() && m_recoveryPreview.contents.back() == '\n' ? "Ends in newline" : "No trailing newline", 2);
+        add("Open files to restore: " + std::to_string(m_recoveryPreview.openFiles.size() + 1), "", 2);
+        for (const auto& file : m_recoveryPreview.openFiles) add("Open: " + file.path, "Cursor " + std::to_string(file.line + 1) + ":" + std::to_string(file.column + 1), 2);
+        std::istringstream lines(m_recoveryPreview.contents); std::string line; std::size_t count = 0;
+        while (std::getline(lines, line) && count++ < 10000) add(std::to_string(count) + ": " + line, "Snapshot content", 2);
+        if (count >= 10000) add("Preview limited to 10000 lines", "", 2);
+    }
+    constexpr std::size_t pageSize = 6;
+    const auto pages = std::max<std::size_t>(1, (entries.size() + pageSize - 1) / pageSize);
+    m_recoveryPage = std::min(m_recoveryPage, pages - 1); m_recoveryChoices.clear();
+    const auto append = [this](const Entry& e) {
+        m_suggestionPaths.push_back(e.label); m_suggestionDetails.push_back(e.detail);
+        m_suggestions.push_back({m_suggestionPaths.back(), ui::SuggestionKind::Task, m_suggestionDetails.back()}); m_recoveryChoices.push_back(e.choice);
+    };
+    for (std::size_t i = m_recoveryPage * pageSize; i < std::min(entries.size(), (m_recoveryPage + 1) * pageSize); ++i) append(entries[i]);
+    if (m_recoveryPage) append({"< Previous page", "", -1});
+    if (m_recoveryPage + 1 < pages) append({"Next page >", "", -2});
+    if (m_selectedSuggestion >= static_cast<int>(m_recoveryChoices.size())) m_selectedSuggestion = -1;
+}
+void Application::applyRecovery() {
+    refreshSuggestions(); if (m_recoveryChoices.empty()) return;
+    const auto index = m_selectedSuggestion >= 0 && m_selectedSuggestion < static_cast<int>(m_recoveryChoices.size()) ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
+    const int choice = m_recoveryChoices[index];
+    if (choice < 0) { if (choice == -1 && m_recoveryPage) --m_recoveryPage; else if (choice == -2) ++m_recoveryPage; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::RecoveryList) {
+        m_recoverySelected = static_cast<std::size_t>(choice); std::string error;
+        if (m_recoverySelected >= m_recoveryFiles.size() || !workspace::recovery::read(m_recoveryFiles[m_recoverySelected], m_recoveryPreview, error)) { setCommandStatus(error, true); return; }
+        m_recoveryPage = 0; m_searchBar.open(ui::PromptKind::RecoveryDetail); clearCommandFeedback(); refreshSuggestions(); return;
+    }
+    if (choice == 2 || m_recoverySelected >= m_recoveryFiles.size()) return;
+    if (choice == 1) {
+        if (!platform::confirmDestructiveAction("Delete recovery snapshot", "Permanently delete this recovery snapshot?", "Delete")) return;
+        std::error_code ec; std::filesystem::remove(m_recoveryFiles[m_recoverySelected], ec);
+        if (ec) { setCommandStatus("Could not delete snapshot: " + ec.message(), true); return; }
+        openRecovery(); return;
+    }
+    workspace::recovery::Snapshot snapshot; std::string error;
+    if (!workspace::recovery::read(m_recoveryFiles[m_recoverySelected], snapshot, error) || snapshot != m_recoveryPreview || snapshot.project != m_project.root().generic_string()) { setCommandStatus("Snapshot changed or is unavailable; reopen recovery", true); return; }
+    std::string resolveError;
+    if (m_project.resolve(snapshot.file, resolveError).empty() || m_project.isDirectory(snapshot.file)) { setCommandStatus("Invalid recovery file path", true); return; }
+    if (!saveDocument()) return;
+    for (auto it = snapshot.openFiles.rbegin(); it != snapshot.openFiles.rend(); ++it) {
+        if (!m_project.exists(it->path) || m_project.isDirectory(it->path)) continue;
+        openFile(it->path);
+        if (m_hasDocument && m_filePath == it->path) { m_document.setCursor(it->line, it->column); m_firstLine = it->firstLine; }
+    }
+    const bool fileExists = m_project.exists(snapshot.file);
+    std::string currentDisk;
+    if (fileExists && !m_project.readFile(snapshot.file, currentDisk, error)) { setCommandStatus(error, true); return; }
+    if (fileExists) {
+        openFile(snapshot.file);
+        if (!m_hasDocument || m_filePath != snapshot.file) return;
+    } else {
+        if (m_hasDocument) m_inactiveDocuments.insert(m_inactiveDocuments.begin(), OpenDocument{m_filePath, std::move(m_document), m_firstLine, m_diskContents});
+        m_hasDocument = true; m_filePath = snapshot.file; m_diskContents.clear();
+    }
+    const bool sameAsDisk = fileExists && currentDisk == snapshot.contents;
+    m_document = editor::Document::fromUtf8(snapshot.contents);
+    m_accessibilityKey.clear();
+    if (!sameAsDisk) m_document.markRecovered();
+    m_diskContents = sameAsDisk ? snapshot.contents : snapshot.baseline;
+    m_document.setCursor(snapshot.line, snapshot.column); m_firstLine = snapshot.firstLine; m_followCursor = false;
+    m_searchBar.close(); m_syntaxValid = false; m_compileScriptValid = false; resetDiagnostics();
+    setStatus(fileExists ? "Recovery opened; review changes before saving" : "Recovery opened; original file is missing, copy the recovered text", !fileExists);
+}
+
+void Application::openModules() {
+    if (m_settingsPanelVisible || m_compileTerminalFocused) return;
+    if (m_settingsRoot.empty()) { setStatus("Module storage unavailable", true); return; }
+    m_moduleRoot = std::filesystem::path(m_settingsRoot).parent_path() / "Modules";
+    std::string error;
+    if (!modules::list(m_moduleRoot, m_modules, error)) { setStatus(error, true); return; }
+    m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); clearCommandFeedback();
+    if (m_modules.empty()) setCommandStatus("No modules installed; see the module guide", false);
+    refreshSuggestions();
+}
+void Application::refreshModuleSuggestions() {
+    struct Entry { std::string label, detail; int choice; };
+    std::vector<Entry> entries;
+    auto add = [&entries](std::string name, std::string detail, int choice) { entries.push_back({std::move(name), std::move(detail), choice}); };
+    const auto kind = m_searchBar.kind();
+    if (kind == ui::PromptKind::ModuleList) {
+        for (std::size_t i = 0; i < m_modules.size(); ++i) {
+            const auto& m = m_modules[i];
+            add(m.name, !m.error.empty() ? m.error : (m.enabled ? "Enabled" : "Disabled"), static_cast<int>(i));
+        }
+    } else if (m_moduleSelected < m_modules.size()) {
+        const auto& m = m_modules[m_moduleSelected];
+        if (kind == ui::PromptKind::ModuleActions) {
+            add(m.enabled ? "Disable module" : "Enable module", m.error, 0);
+            if (m.enabled) add("Run a text command", "", 1);
+            add("Remove module", "Deletes its module folder", 2);
+            add("Project files", m.project ? "Requested - unavailable" : "No access", 3);
+            add("Network", m.network ? "Requested - unavailable" : "No access", 3);
+            add("Processes", m.processes ? "Requested - unavailable" : "No access", 3);
+            add("Settings", m.settings ? "Requested - unavailable" : "No access", 3);
+        } else if (m.enabled) {
+            for (std::size_t i = 0; i < m.commands.size(); ++i) add(m.commands[i].title, "Insert text", static_cast<int>(i));
+        }
+    }
+    constexpr std::size_t pageSize = 6;
+    const auto pages = std::max<std::size_t>(1, (entries.size() + pageSize - 1) / pageSize);
+    m_modulePage = std::min(m_modulePage, pages - 1); m_moduleChoices.clear();
+    auto append = [this](const Entry& e) {
+        m_suggestionPaths.push_back(e.label); m_suggestionDetails.push_back(e.detail);
+        m_suggestions.push_back({m_suggestionPaths.back(), ui::SuggestionKind::Task, m_suggestionDetails.back()});
+        m_moduleChoices.push_back(e.choice);
+    };
+    const auto start = m_modulePage * pageSize;
+    for (std::size_t i = start; i < std::min(entries.size(), start + pageSize); ++i) append(entries[i]);
+    if (m_modulePage) append({"< Previous page", "", -1});
+    if (m_modulePage + 1 < pages) append({"Next page >", "", -2});
+    if (m_selectedSuggestion >= static_cast<int>(m_moduleChoices.size())) m_selectedSuggestion = -1;
+}
+void Application::applyModuleCommand() {
+    refreshSuggestions(); if (m_moduleChoices.empty()) return;
+    const auto index = m_selectedSuggestion >= 0 && m_selectedSuggestion < static_cast<int>(m_moduleChoices.size()) ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
+    const int choice = m_moduleChoices[index];
+    if (choice < 0) { if (choice == -1 && m_modulePage) --m_modulePage; else if (choice == -2) ++m_modulePage; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleList) {
+        m_moduleSelected = static_cast<std::size_t>(choice); m_modulePage = 0;
+        m_searchBar.open(ui::PromptKind::ModuleActions); clearCommandFeedback(); refreshSuggestions(); return;
+    }
+    if (m_moduleSelected >= m_modules.size()) return;
+    const auto current = m_modules[m_moduleSelected];
+    if (m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        // Re-read the manifest and enabled state at the time of use.
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&current](const auto& m) { return m.id == current.id; });
+        if (found == fresh.end() || !found->enabled || static_cast<std::size_t>(choice) >= found->commands.size() ||
+            found->commands[static_cast<std::size_t>(choice)].title != current.commands[static_cast<std::size_t>(choice)].title ||
+            found->commands[static_cast<std::size_t>(choice)].insert != current.commands[static_cast<std::size_t>(choice)].insert) {
+            setCommandStatus("Module changed or was disabled; reopen Modules", true); return;
+        }
+        if (!m_hasDocument) { setCommandStatus("Open a file before inserting text", true); return; }
+        m_document.pasteUtf8(found->commands[static_cast<std::size_t>(choice)].insert);
+        m_searchBar.close(); m_followCursor = true; setStatus("Inserted text from " + current.name, false); return;
+    }
+    if (choice == 1) { m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleCommands); clearCommandFeedback(); refreshSuggestions(); return; }
+    if (choice == 3) return;
+    std::string error;
+    if (choice == 2 && !platform::confirmDestructiveAction("Remove module", "Remove " + current.name + " and its module folder?", "Remove")) return;
+    const bool ok = choice == 2 ? modules::remove(m_moduleRoot, current.id, error) : modules::setEnabled(m_moduleRoot, current.id, !current.enabled, error);
+    if (!ok) { setCommandStatus(error, true); return; }
+    if (!modules::list(m_moduleRoot, m_modules, error)) { setCommandStatus(error, true); return; }
+    m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); clearCommandFeedback(); refreshSuggestions();
+}
+
+void Application::openDebugger() {
+    if (!m_hasProject || m_settingsPanelVisible || m_compileTerminalFocused) { setStatus("Open a project to use the debugger", true); return; }
+    m_debugPage = 0; m_searchBar.open(ui::PromptKind::DebugMenu); clearCommandFeedback();
+    setCommandStatus(m_debugAdapter.alive() ? m_debugSession.message() : "Select a source file and set breakpoints", false);
+    refreshSuggestions();
+}
+void Application::toggleBreakpoint() {
+    if (!m_hasProject || !m_hasDocument || m_settingsPanelVisible || m_compileTerminalFocused) { setStatus("Open a source file to set a breakpoint", true); return; }
+    auto lines = m_debugBreakpoints[m_filePath]; const int line = static_cast<int>(m_document.cursorLine()) + 1;
+    const auto found = std::find(lines.begin(), lines.end(), line);
+    const bool added = found == lines.end(); if (added) lines.push_back(line); else lines.erase(found);
+    std::sort(lines.begin(), lines.end());
+    if (!m_activeTaskId.empty()) {
+        auto board = m_taskBoard; auto* task = workspace::findTask(board, m_activeTaskId);
+        if (!task || m_settings.taskIdentity.empty()) { setStatus("Active task is unavailable", true); return; }
+        task->debugSource = m_filePath; task->debugBreakpoints = lines;
+        workspace::recordTaskActivity(*task, m_settings.taskIdentity, added ? "added breakpoint" : "removed breakpoint", m_filePath + ":" + std::to_string(line));
+        if (!commitTaskBoard(std::move(board))) return;
+    }
+    m_debugBreakpoints[m_filePath] = lines;
+    if (m_debugAdapter.alive()) { std::string error; const auto source = m_project.resolve(m_filePath, error); if (!error.empty() || !m_debugSession.setBreakpoints(source.string(), lines, error)) { setStatus(error, true); return; } }
+    setStatus(std::string(added ? "Breakpoint set at line " : "Breakpoint removed from line ") + std::to_string(line), false);
+}
+void Application::stopDebugger() {
+    if (!m_debugAdapter.alive()) return;
+    m_debugSession.disconnect(); std::string error;
+    const auto bytes = m_debugSession.takeOutbound();
+    if (!m_debugAdapter.send(bytes, error)) { m_debugAdapter.close(); setStatus(error, true); return; }
+    m_debugClosing = true;
+    m_debugCloseDeadline = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() + 2.0;
+    setStatus("Stopping debug session", false);
+}
+void Application::pollDebugger() {
+    if (!m_debugAdapter.alive()) return;
+    std::string error, output; const auto outgoing = m_debugSession.takeOutbound();
+    if ((!outgoing.empty() && !m_debugAdapter.send(outgoing, error)) || !m_debugAdapter.poll(output, error)) {
+        m_debugAdapter.close();
+        if (!m_debugClosing && m_debugSession.state() != debug::State::Ended) {
+            const bool starting = m_debugSession.state() == debug::State::Initializing || m_debugSession.state() == debug::State::Launching;
+            setStatus(starting ? "Debugger exited while starting; check that lldb-dap is installed and the program can launch" : "Debugger: " + error, true);
+        } else setStatus("Debug session ended", false);
+        m_debugClosing = false; return;
+    }
+    if (!output.empty() && !m_debugSession.receive(output, error)) { m_debugAdapter.close(); m_debugClosing = false; setStatus("Debugger: " + error, true); return; }
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (m_debugClosing && (m_debugSession.state() == debug::State::Ended || now >= m_debugCloseDeadline)) {
+        m_debugAdapter.close(); m_debugClosing = false; setStatus("Debug session ended", false); return;
+    }
+    if (m_debugSession.state() != m_debugLastState || m_debugLastWarning != m_debugSession.breakpointWarning() || m_debugLastMessage != m_debugSession.message()) {
+        m_debugLastState = m_debugSession.state(); m_debugLastWarning = m_debugSession.breakpointWarning(); m_debugLastMessage = m_debugSession.message();
+        setStatus(m_debugSession.breakpointWarning().empty() ? m_debugSession.message() : m_debugSession.breakpointWarning(), m_debugLastState == debug::State::Failed || !m_debugSession.breakpointWarning().empty());
+        if (m_debugLastState == debug::State::Failed) m_debugAdapter.close();
+    }
+    if (m_searchBar.isOpen() && (m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput)) refreshSuggestions();
+}
+void Application::refreshDebugSuggestions() {
+    m_debugChoices.clear(); const auto kind = m_searchBar.kind(); if (kind == ui::PromptKind::DebugInput) return;
+    struct Entry { std::string label, detail; int choice; }; std::vector<Entry> entries;
+    const auto add = [&entries](std::string label, std::string detail, int choice) { entries.push_back({std::move(label), std::move(detail), choice}); };
+    if (kind == ui::PromptKind::DebugMenu) {
+        if (!m_debugAdapter.alive()) add("Start debugging", "Choose an executable", -10);
+        if (m_hasDocument) add("Toggle breakpoint at cursor", "", -11);
+        if (m_debugAdapter.alive() && m_debugSession.state() == debug::State::Stopped) {
+            add("Continue", "", -12); add("Step over", "", -13); add("Step into", "", -14); add("Step out", "", -15);
+            add("Call stack", std::to_string(m_debugSession.stack().size()), -16);
+            add("Variables", std::to_string(m_debugSession.variables().size()), -17);
+            add("Explain paused state with AI", m_settings.aiDebugProvider == "local" ? "Local model" : "OpenRouter sends stack and variables online", -21);
+        }
+        if (m_debugAdapter.alive()) { add("Debug output", "", -18); add("Stop debugger", "Terminates the debuggee", -19); }
+    } else if (kind == ui::PromptKind::DebugStack) {
+        for (std::size_t i = 0; i < m_debugSession.stack().size(); ++i) { const auto& f = m_debugSession.stack()[i]; add(f.name, f.path + ":" + std::to_string(f.line), static_cast<int>(i)); }
+    } else if (kind == ui::PromptKind::DebugVariables) {
+        if (m_debugSession.expandedVariables()) add("Back to frame variables", "", -23);
+        for (std::size_t i = 0; i < m_debugSession.variables().size(); ++i) {
+            const auto& v = m_debugSession.variables()[i];
+            add(std::string(v.changed ? "* " : "") + v.name + " = " + v.value, v.reference > 0 ? "Expand " + v.type : v.type, static_cast<int>(i));
+        }
+    } else if (kind == ui::PromptKind::DebugOutput) {
+        std::istringstream input(m_debugSession.output()); std::string line; while (std::getline(input, line)) add(line, "", -20);
+    }
+    constexpr std::size_t pageSize = 6; const auto pages = std::max<std::size_t>(1, (entries.size() + pageSize - 1) / pageSize);
+    m_debugPage = std::min(m_debugPage, pages - 1);
+    const auto append = [this](const Entry& e) { m_suggestionPaths.push_back(e.label); m_suggestionDetails.push_back(e.detail); m_suggestions.push_back({m_suggestionPaths.back(), ui::SuggestionKind::Task, m_suggestionDetails.back()}); m_debugChoices.push_back(e.choice); };
+    for (std::size_t i = m_debugPage * pageSize; i < std::min(entries.size(), (m_debugPage + 1) * pageSize); ++i) append(entries[i]);
+    if (m_debugPage) append({"< Previous page", "", -1});
+    if (m_debugPage + 1 < pages) append({"Next page >", "", -2});
+    if (m_selectedSuggestion >= static_cast<int>(m_debugChoices.size())) m_selectedSuggestion = -1;
+}
+void Application::applyDebugCommand() {
+    const auto kind = m_searchBar.kind();
+    if (kind == ui::PromptKind::DebugInput) {
+        if (!m_hasDocument || !m_hasProject) { setCommandStatus("Open the source file first", true); return; }
+        const std::string program(m_searchBar.query()); std::string error;
+        const auto binary = m_project.resolve(program, error); std::error_code fileError;
+        if (!error.empty() || !std::filesystem::is_regular_file(binary, fileError) || fileError) { setCommandStatus("Enter an existing executable path inside the project", true); return; }
+        const auto source = m_project.resolve(m_filePath, error);
+        if (!error.empty() || !saveDocument()) { setCommandStatus(error.empty() ? "Could not save source" : error, true); return; }
+        if (!m_debugAdapter.startDefault(error)) { setCommandStatus(error, true); return; }
+        if (!m_activeTaskId.empty()) {
+            auto board = m_taskBoard; auto* task = workspace::findTask(board, m_activeTaskId);
+            if (!task || m_settings.taskIdentity.empty()) { m_debugAdapter.close(); setCommandStatus("Active task is unavailable", true); return; }
+            (void)workspace::setTaskDebugFunction(*task, program, m_settings.taskIdentity);
+            task->debugSource = m_filePath; task->debugBreakpoints = m_debugBreakpoints[m_filePath];
+            workspace::recordTaskActivity(*task, m_settings.taskIdentity, "started debugging", program);
+            if (!commitTaskBoard(std::move(board))) { m_debugAdapter.close(); return; }
+        }
+        m_debugSource = m_filePath; m_debugClosing = false; m_debugLastState = debug::State::Idle; m_debugLastWarning.clear(); m_debugLastMessage.clear();
+        std::map<std::string, std::vector<int>> breakpoints;
+        for (const auto& [path, lines] : m_debugBreakpoints) {
+            std::string pathError; const auto resolved = m_project.resolve(path, pathError);
+            if (pathError.empty()) breakpoints.emplace(resolved.string(), lines);
+        }
+        m_debugSession.start(binary.string(), m_project.root().string(), std::move(breakpoints));
+        m_searchBar.close(); setStatus("Starting debugger", false); return;
+    }
+    refreshSuggestions(); if (m_debugChoices.empty()) return;
+    const auto selected = m_selectedSuggestion >= 0 && m_selectedSuggestion < static_cast<int>(m_debugChoices.size()) ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
+    const int choice = m_debugChoices[selected];
+    if (choice == -1 || choice == -2) { if (choice == -1 && m_debugPage) --m_debugPage; else if (choice == -2) ++m_debugPage; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (kind == ui::PromptKind::DebugStack && choice >= 0 && static_cast<std::size_t>(choice) < m_debugSession.stack().size()) {
+        const auto frame = m_debugSession.stack()[static_cast<std::size_t>(choice)];
+        std::string selectError;
+        if (!m_debugSession.selectFrame(static_cast<std::size_t>(choice), selectError)) { setCommandStatus(selectError, true); return; }
+        const auto relative = std::filesystem::path(frame.path).lexically_relative(m_project.root());
+        if (relative.empty() || *relative.begin() == ".." || !m_project.exists(relative.generic_string())) { setCommandStatus("Source is outside the project or unavailable", true); return; }
+        openFile(relative.generic_string()); if (m_hasDocument && m_filePath == relative.generic_string()) { m_document.setCursor(static_cast<std::size_t>(std::max(0, frame.line - 1)), static_cast<std::size_t>(std::max(0, frame.column - 1))); m_followCursor = true; }
+        return;
+    }
+    if (kind == ui::PromptKind::DebugVariables) {
+        std::string error;
+        const bool ok = choice == -23 ? m_debugSession.selectFrame(m_debugSession.selectedFrame(), error) :
+                        choice >= 0 && m_debugSession.expandVariable(static_cast<std::size_t>(choice), error);
+        if (!ok && !error.empty()) setCommandStatus(error, true); else if (ok) { m_debugPage = 0; setCommandStatus("Loading variables...", false); refreshSuggestions(); }
+        return;
+    }
+    if (kind != ui::PromptKind::DebugMenu) return;
+    if (choice == -10) {
+        if (!m_hasDocument) { setCommandStatus("Open a source file first", true); return; }
+        m_searchBar.open(ui::PromptKind::DebugInput); clearCommandFeedback();
+        if (auto* task = workspace::findTask(m_taskBoard, m_activeTaskId); task && !task->debugFunction.empty()) m_searchBar.setQuery(task->debugFunction);
+        setCommandStatus("Program must already be built with debug symbols", false); return;
+    }
+    if (choice == -21 || choice == -22) {
+        const bool remote = m_settings.aiDebugProvider == "openrouter";
+        std::string context = "Reason: " + m_debugSession.message();
+        const auto appendBounded = [&context](std::string_view part, std::size_t limit) {
+            if (context.size() >= limit) return;
+            auto count = std::min(part.size(), limit - context.size());
+            while (count > 0 && count < part.size() && (static_cast<unsigned char>(part[count]) & 0xc0U) == 0x80U) --count;
+            context.append(part.substr(0, count));
+        };
+        for (const auto& frame : m_debugSession.stack()) { appendBounded("\n" + frame.name + " " + frame.path + ":" + std::to_string(frame.line), 600); if (context.size() >= 600) break; }
+        for (const auto& variable : m_debugSession.variables()) { appendBounded("\n" + variable.name + " = " + variable.value, 1200); if (context.size() >= 1200) break; }
+        openAiPrompt();
+        if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::Ai && !m_aiFuture.valid()) {
+            m_aiDebugExplanation = true; m_aiDebugOpenRouter = remote; m_aiDebugContext = std::move(context);
+            m_searchBar.setQuery("Explain this paused program state in at most three sentences. Identify uncertainty.");
+            setCommandStatus(remote ? "OpenRouter receives stack and variable values; Enter sends, Esc cancels" : "Local model sees stack and variable values; Enter explains, Esc cancels", false);
+        }
+        return;
+    }
+    if (choice == -11) { toggleBreakpoint(); m_searchBar.close(); return; }
+    if (choice == -19) { stopDebugger(); m_searchBar.close(); return; }
+    if (choice >= -15 && choice <= -12) {
+        const char* command = choice == -12 ? "continue" : choice == -13 ? "next" : choice == -14 ? "stepIn" : "stepOut";
+        std::string error; if (!m_debugSession.resume(command, error)) { setCommandStatus(error, true); return; }
+        m_searchBar.close(); setStatus("Running", false); return;
+    }
+    if (choice == -16 || choice == -17 || choice == -18) {
+        m_debugPage = 0; m_searchBar.open(choice == -16 ? ui::PromptKind::DebugStack : choice == -17 ? ui::PromptKind::DebugVariables : ui::PromptKind::DebugOutput); clearCommandFeedback(); refreshSuggestions();
+    }
+}
+
+void Application::openGitReview() {
+    if (!m_hasProject || m_settingsPanelVisible || m_compileTerminalFocused) {
+        setStatus("Open a project to review Git changes", true); return;
+    }
+    if (m_hasDocument && !saveDocument()) return;
+    std::string error;
+    if (!workspace::gitChanges(m_project.root(), m_gitChanges, error)) {
+        setStatus("Git review: " + error, true); return;
+    }
+    m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitChanges); clearCommandFeedback();
+    if (m_gitChanges.empty()) setCommandStatus("No changed files", false);
+    refreshSuggestions();
+}
+
+void Application::refreshGitSuggestions() {
+    m_gitChoices.clear();
+    const auto kind = m_searchBar.kind();
+    if (kind == ui::PromptKind::GitCommitInput) return;
+    struct Entry { std::string label, detail; int choice; };
+    std::vector<Entry> entries;
+    auto add = [&entries](std::string label, std::string detail, int choice) { entries.push_back({std::move(label), std::move(detail), choice}); };
+    if (kind == ui::PromptKind::GitChanges) {
+        add("Review staged changes and commit", "Local commit", -10);
+        for (std::size_t i = 0; i < m_gitChanges.size(); ++i) {
+            const auto& item = m_gitChanges[i]; add(item.path, item.conflict ? "Merge conflict" : "Git " + item.status, static_cast<int>(i));
+        }
+    } else if (kind == ui::PromptKind::GitFile && m_gitSelectedFile < m_gitChanges.size()) {
+        const auto& item = m_gitChanges[m_gitSelectedFile];
+        add("View diff", item.path, -11);
+        if (item.conflict || item.status == "??" || (item.status.size() == 2 && item.status[1] != ' ' && item.status[1] != '?'))
+            add(item.conflict ? "Mark resolved and stage" : "Stage file", "Stages current file contents", -12);
+        if (!item.conflict && item.status.size() == 2 && item.status[0] != ' ' && item.status[0] != '?') add("Unstage file", "Keeps working file", -13);
+        if (m_project.exists(item.path) && !m_project.isDirectory(item.path)) add("Open file", "", -14);
+    } else if (kind == ui::PromptKind::GitDiff) {
+        for (std::size_t i = 0; i < m_gitReview.lines.size(); ++i) {
+            const auto& line = m_gitReview.lines[i]; add(line.text, line.line > 0 ? "Line " + std::to_string(line.line) : "", static_cast<int>(i));
+        }
+    } else if (kind == ui::PromptKind::GitCommitReview) {
+        add("Write commit message", "Enter creates a local commit", -15);
+        for (const auto& path : m_gitCommitPreview.paths) add(path, "Staged", -16);
+    }
+    constexpr std::size_t pageSize = 6;
+    const auto pages = std::max<std::size_t>(1, (entries.size() + pageSize - 1) / pageSize);
+    m_gitPage = std::min(m_gitPage, pages - 1);
+    auto append = [this](const Entry& item) {
+        m_suggestionPaths.push_back(item.label); m_suggestionDetails.push_back(item.detail);
+        m_suggestions.push_back({m_suggestionPaths.back(), ui::SuggestionKind::Task, m_suggestionDetails.back()}); m_gitChoices.push_back(item.choice);
+    };
+    for (std::size_t i = m_gitPage * pageSize; i < std::min(entries.size(), (m_gitPage + 1) * pageSize); ++i) append(entries[i]);
+    if (m_gitPage) append({"< Previous page", "", -1});
+    if (m_gitPage + 1 < pages) append({"Next page >", "", -2});
+    if (m_selectedSuggestion >= static_cast<int>(m_gitChoices.size())) m_selectedSuggestion = -1;
+}
+
+void Application::applyGitReview() {
+    const auto kind = m_searchBar.kind();
+    if (kind == ui::PromptKind::GitCommitInput) {
+        const std::string message(m_searchBar.query()); std::string output, error;
+        if (!workspace::gitCommit(m_project.root(), m_gitCommitPreview, message, output, error)) { setCommandStatus(error, true); return; }
+        openGitReview(); setCommandStatus("Commit created locally", false); setStatus("Commit created locally", false); return;
+    }
+    refreshSuggestions(); if (m_gitChoices.empty()) return;
+    const auto selected = m_selectedSuggestion >= 0 && m_selectedSuggestion < static_cast<int>(m_gitChoices.size()) ? m_selectedSuggestion : 0;
+    const int choice = m_gitChoices[static_cast<std::size_t>(selected)];
+    if (choice == -1 || choice == -2) { if (choice == -1 && m_gitPage) --m_gitPage; else if (choice == -2) ++m_gitPage; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (kind == ui::PromptKind::GitChanges) {
+        if (choice == -10) {
+            std::string error;
+            if (!workspace::gitCommitPreview(m_project.root(), m_gitCommitPreview, error)) { setCommandStatus(error, true); return; }
+            m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitCommitReview); clearCommandFeedback(); refreshSuggestions(); return;
+        }
+        if (choice < 0 || static_cast<std::size_t>(choice) >= m_gitChanges.size()) return;
+        m_gitSelectedFile = static_cast<std::size_t>(choice); m_gitPage = 0;
+        m_searchBar.open(ui::PromptKind::GitFile); clearCommandFeedback(); refreshSuggestions(); return;
+    }
+    if (kind == ui::PromptKind::GitCommitReview) {
+        if (choice == -15) { m_searchBar.open(ui::PromptKind::GitCommitInput); clearCommandFeedback(); setCommandStatus("Enter a commit message; Enter commits all reviewed staged files", false); }
+        return;
+    }
+    if (m_gitSelectedFile >= m_gitChanges.size()) return;
+    if (kind == ui::PromptKind::GitFile) {
+        const auto file = m_gitChanges[m_gitSelectedFile]; std::string error;
+        if (choice == -11) {
+            if (!workspace::gitReview(m_project.root(), file, m_gitReview, error)) { setCommandStatus(error, true); return; }
+            m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitDiff); clearCommandFeedback(); refreshSuggestions(); return;
+        }
+        if (choice == -14) { openFile(file.path); return; }
+        if (choice != -12 && choice != -13) return;
+        std::vector<workspace::GitChange> current;
+        if (!workspace::gitChanges(m_project.root(), current, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(current.begin(), current.end(), [&file](const auto& item) { return item.path == file.path && item.status == file.status && item.oldPath == file.oldPath; });
+        if (found == current.end()) { setCommandStatus("Git status changed; reopen review", true); return; }
+        if (!(choice == -12 ? workspace::gitStage(m_project.root(), *found, error) : workspace::gitUnstage(m_project.root(), *found, error))) { setCommandStatus(error, true); return; }
+        openGitReview(); setCommandStatus(choice == -12 ? "File staged" : "File unstaged", false); return;
+    }
+    if (kind != ui::PromptKind::GitDiff || choice < 0 || static_cast<std::size_t>(choice) >= m_gitReview.lines.size()) return;
+    const auto& line = m_gitReview.lines[static_cast<std::size_t>(choice)]; if (line.line <= 0) return;
+    const std::string path = m_gitChanges[m_gitSelectedFile].path; const int lineNumber = line.line;
+    if (!m_project.exists(path)) { setCommandStatus("This file is deleted", true); return; }
+    openFile(path); if (!m_hasDocument || m_filePath != path) return;
+    m_document.setCursor(static_cast<std::size_t>(lineNumber - 1), 0); m_followCursor = true;
+    std::string author, error;
+    if (workspace::gitBlame(m_project.root(), path, lineNumber, author, error)) setStatus("Git blame: " + author, false);
+    else setStatus("Opened change at line " + std::to_string(lineNumber), false);
+}
+
+void Application::openTasks() {
+    if (!m_hasProject || m_settingsPanelVisible || m_compileTerminalFocused) {
+        setStatus("Open a project to use tasks", true);
+        return;
+    }
+    if (!saveActiveTaskContext()) return;
+    workspace::TaskBoard board;
+    std::string error;
+    if (!workspace::loadTasks(m_project, board, error)) { setStatus(error, true); return; }
+    m_taskBoard = std::move(board);
+    if (!m_activeTaskId.empty() && !workspace::findTask(m_taskBoard, m_activeTaskId)) m_activeTaskId.clear();
+    if (m_settings.taskIdentity.empty()) {
+        m_taskInputKind = TaskInputKind::Identity;
+        showTaskView(ui::PromptKind::TaskInput);
+        setCommandStatus("Set a display name to record your task activity", false);
+    } else showTaskView(ui::PromptKind::TaskList);
+}
+
+void Application::showTaskView(ui::PromptKind view) {
+    m_taskPage = 0;
+    m_completionOpen = false;
+    m_searchBar.open(view);
+    clearCommandFeedback();
+    refreshSuggestions();
+}
+
+void Application::refreshTaskSuggestions() {
+    struct Entry { std::string label; std::string detail; TaskChoice choice; };
+    std::vector<Entry> entries;
+    const auto add = [&entries](std::string label, std::string detail, TaskChoiceKind kind, std::string id = {}) {
+        entries.push_back({std::move(label), std::move(detail), {kind, std::move(id)}});
+    };
+    const auto view = m_searchBar.kind();
+    auto* task = workspace::findTask(m_taskBoard, m_selectedTaskId);
+    if (view == ui::PromptKind::TaskInput) return;
+    if (view == ui::PromptKind::TaskList) {
+        if (m_searchBar.query().empty()) {
+            add("+ New task", "", TaskChoiceKind::NewTask);
+            add("Your name: " + m_settings.taskIdentity, "Change", TaskChoiceKind::Identity);
+            if (!m_activeTaskId.empty()) add("Leave task workspace", "", TaskChoiceKind::LeaveWorkspace);
+        }
+        std::vector<const workspace::Task*> ordered;
+        for (const auto& item : m_taskBoard.tasks) ordered.push_back(&item);
+        std::stable_sort(ordered.begin(), ordered.end(), [](const auto* a, const auto* b) {
+            if (a->done != b->done) return !a->done;
+            return a->tier > b->tier;
+        });
+        std::string query(m_searchBar.query());
+        std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        for (const auto* item : ordered) {
+            std::string name = item->title;
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (!query.empty() && name.find(query) == std::string::npos) continue;
+            const std::string label = "[T" + std::to_string(item->tier) + (item->done ? " done] " : "] ") + item->title;
+            add(label, item->id == m_activeTaskId ? "Active" : "By " + item->createdBy, TaskChoiceKind::SelectTask, item->id);
+        }
+    } else if (view == ui::PromptKind::TaskTier) {
+        add("Tier 1 - Optional features and polish", "", TaskChoiceKind::Tier1);
+        add("Tier 2 - Quality of life", "", TaskChoiceKind::Tier2);
+        add("Tier 3 - Urgent bugs and security", "", TaskChoiceKind::Tier3);
+    } else if (task && view == ui::PromptKind::TaskActions) {
+        add("Open task workspace", "", TaskChoiceKind::OpenWorkspace);
+        add("Add subtask", "", TaskChoiceKind::AddSubtask);
+        add("View subtasks", std::to_string(task->subtasks.size()), TaskChoiceKind::ViewSubtasks);
+        add("Assign task", "", TaskChoiceKind::Assign);
+        const bool workingHere = std::find(task->workingBy.begin(), task->workingBy.end(), m_settings.taskIdentity) != task->workingBy.end();
+        add(workingHere ? "Stop working on this" : "I'm working on this", "", TaskChoiceKind::ToggleWorking);
+        add(task->done ? "Reopen task" : "Mark task done", "", TaskChoiceKind::ToggleDone);
+        add("Record how it was solved", "", TaskChoiceKind::Solution);
+        add("View activity", "", TaskChoiceKind::History);
+        add("Created by: " + task->createdBy, "", TaskChoiceKind::Label);
+        add("Assigned: " + (task->assignedTo.empty() ? std::string("Unassigned") : task->assignedTo), "", TaskChoiceKind::Label);
+        std::string working;
+        for (const auto& name : task->workingBy) { if (!working.empty()) working += ", "; working += name; }
+        add("Working: " + (working.empty() ? std::string("Nobody") : working), "", TaskChoiceKind::Label);
+        add(task->done ? "Completed by: " + task->doneBy : "Status: Open", "", TaskChoiceKind::Label);
+    } else if (task && view == ui::PromptKind::TaskSubtasks) {
+        add("+ Add subtask", "", TaskChoiceKind::AddSubtask);
+        for (const auto& sub : task->subtasks) {
+            const std::string label = std::string(sub.done ? "[x] " : "[ ] ") + sub.title;
+            add(label, sub.done ? "Done by " + sub.doneBy : "By " + sub.createdBy, TaskChoiceKind::ToggleSubtask, sub.id);
+        }
+    } else if (task && view == ui::PromptKind::TaskHistory) {
+        for (auto it = task->history.rbegin(); it != task->history.rend(); ++it) {
+            std::string label = it->actor + " - " + it->action;
+            if (!it->subject.empty()) label += ": " + it->subject;
+            add(label, it->time, TaskChoiceKind::Label);
+        }
+    }
+    constexpr std::size_t pageSize = 6;
+    const std::size_t pages = std::max<std::size_t>(1, (entries.size() + pageSize - 1) / pageSize);
+    m_taskPage = std::min(m_taskPage, pages - 1);
+    m_taskChoices.clear();
+    const auto append = [this](const Entry& entry) {
+        m_suggestionPaths.push_back(entry.label);
+        m_suggestionDetails.push_back(entry.detail);
+        m_suggestions.push_back(ui::PathSuggestion{m_suggestionPaths.back(), ui::SuggestionKind::Task, m_suggestionDetails.back()});
+        m_taskChoices.push_back(entry.choice);
+    };
+    const auto start = m_taskPage * pageSize;
+    for (std::size_t i = start; i < std::min(entries.size(), start + pageSize); ++i) append(entries[i]);
+    if (m_taskPage > 0) append({"< Previous page", "", {TaskChoiceKind::PreviousPage, {}}});
+    if (m_taskPage + 1 < pages) append({"Next page >", "", {TaskChoiceKind::NextPage, {}}});
+    if (m_selectedSuggestion >= static_cast<int>(m_suggestions.size())) m_selectedSuggestion = -1;
+}
+
+void Application::applyTaskCommand() {
+    const auto view = m_searchBar.kind();
+    if (view == ui::PromptKind::TaskInput) {
+        std::string value(m_searchBar.query());
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) value.clear();
+        else value = value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+        if (m_taskInputKind == TaskInputKind::Identity) {
+            if (value.empty() || value.size() > 128) { setCommandStatus("Enter a name of at most 128 bytes", true); return; }
+            const std::string previous = m_settings.taskIdentity;
+            m_settings.taskIdentity = value;
+            if (!persistSettings()) {
+                m_settings.taskIdentity = previous;
+                setCommandStatus("Could not save your name in settings", true);
+                return;
+            }
+            showTaskView(ui::PromptKind::TaskList);
+            return;
+        }
+        if (m_taskInputKind == TaskInputKind::Title) {
+            if (value.empty()) { setCommandStatus("Enter a task title", true); return; }
+            m_taskDraftTitle = std::move(value);
+            showTaskView(ui::PromptKind::TaskTier);
+            return;
+        }
+        auto board = m_taskBoard;
+        auto* task = workspace::findTask(board, m_selectedTaskId);
+        if (!task) { setCommandStatus("Task no longer exists", true); return; }
+        bool changed = false;
+        if (m_taskInputKind == TaskInputKind::Subtask) {
+            if (value.empty()) { setCommandStatus("Enter a subtask title", true); return; }
+            changed = workspace::addSubtask(*task, value, m_settings.taskIdentity);
+        } else if (m_taskInputKind == TaskInputKind::Assignee) {
+            changed = workspace::setTaskAssignee(*task, value, m_settings.taskIdentity);
+        } else if (m_taskInputKind == TaskInputKind::Solution) {
+            changed = workspace::setTaskSolution(*task, value, m_settings.taskIdentity);
+        }
+        if (changed && !commitTaskBoard(std::move(board))) return;
+        showTaskView(m_taskInputKind == TaskInputKind::Subtask ? ui::PromptKind::TaskSubtasks : ui::PromptKind::TaskActions);
+        return;
+    }
+    refreshSuggestions();
+    if (m_taskChoices.empty()) { setCommandStatus("No matching tasks", false); return; }
+    const auto index = m_selectedSuggestion >= 0 && m_selectedSuggestion < static_cast<int>(m_taskChoices.size())
+        ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
+    const TaskChoice choice = m_taskChoices[index];
+    if (choice.kind == TaskChoiceKind::PreviousPage || choice.kind == TaskChoiceKind::NextPage) {
+        if (choice.kind == TaskChoiceKind::PreviousPage && m_taskPage > 0) --m_taskPage;
+        if (choice.kind == TaskChoiceKind::NextPage) ++m_taskPage;
+        m_selectedSuggestion = -1;
+        refreshSuggestions();
+        return;
+    }
+    switch (choice.kind) {
+    case TaskChoiceKind::NewTask:
+        m_taskInputKind = TaskInputKind::Title; showTaskView(ui::PromptKind::TaskInput); return;
+    case TaskChoiceKind::Identity:
+        m_taskInputKind = TaskInputKind::Identity; showTaskView(ui::PromptKind::TaskInput); return;
+    case TaskChoiceKind::SelectTask:
+        m_selectedTaskId = choice.id; showTaskView(ui::PromptKind::TaskActions); return;
+    case TaskChoiceKind::Tier1:
+    case TaskChoiceKind::Tier2:
+    case TaskChoiceKind::Tier3: {
+        const int tier = choice.kind == TaskChoiceKind::Tier1 ? 1 : choice.kind == TaskChoiceKind::Tier2 ? 2 : 3;
+        auto board = m_taskBoard; std::string id;
+        if (!workspace::createTask(board, m_taskDraftTitle, tier, m_settings.taskIdentity, id)) {
+            setCommandStatus("Could not create task", true); return;
+        }
+        captureTaskContext(*workspace::findTask(board, id));
+        if (!commitTaskBoard(std::move(board))) return;
+        m_selectedTaskId = std::move(id); showTaskView(ui::PromptKind::TaskActions); return;
+    }
+    case TaskChoiceKind::OpenWorkspace:
+        (void)activateTask(m_selectedTaskId); return;
+    case TaskChoiceKind::LeaveWorkspace: {
+        if (m_debugAdapter.alive()) { setCommandStatus("Stop the debugger before leaving this task", true); return; }
+        if (!saveDocument()) return;
+        auto board = m_taskBoard;
+        auto* task = workspace::findTask(board, m_activeTaskId);
+        if (!task) { setCommandStatus("Active task no longer exists", true); return; }
+        captureTaskContext(*task);
+        (void)workspace::setTaskWorking(*task, false, m_settings.taskIdentity);
+        if (!commitTaskBoard(std::move(board))) return;
+        m_activeTaskId.clear(); showTaskView(ui::PromptKind::TaskList); return;
+    }
+    case TaskChoiceKind::AddSubtask:
+        m_taskInputKind = TaskInputKind::Subtask; showTaskView(ui::PromptKind::TaskInput); return;
+    case TaskChoiceKind::ViewSubtasks:
+        showTaskView(ui::PromptKind::TaskSubtasks); return;
+    case TaskChoiceKind::Assign:
+        m_taskInputKind = TaskInputKind::Assignee; showTaskView(ui::PromptKind::TaskInput); return;
+    case TaskChoiceKind::History:
+        showTaskView(ui::PromptKind::TaskHistory); return;
+    case TaskChoiceKind::Solution:
+        m_taskInputKind = TaskInputKind::Solution; showTaskView(ui::PromptKind::TaskInput); return;
+    case TaskChoiceKind::ToggleWorking:
+    case TaskChoiceKind::ToggleDone:
+    case TaskChoiceKind::ToggleSubtask: {
+        auto board = m_taskBoard;
+        auto* task = workspace::findTask(board, m_selectedTaskId);
+        if (!task) { setCommandStatus("Task no longer exists", true); return; }
+        bool changed = false;
+        if (choice.kind == TaskChoiceKind::ToggleWorking) {
+            const bool working = std::find(task->workingBy.begin(), task->workingBy.end(), m_settings.taskIdentity) != task->workingBy.end();
+            changed = workspace::setTaskWorking(*task, !working, m_settings.taskIdentity);
+        } else if (choice.kind == TaskChoiceKind::ToggleDone) {
+            changed = workspace::setTaskDone(*task, !task->done, m_settings.taskIdentity);
+        } else {
+            const auto found = std::find_if(task->subtasks.begin(), task->subtasks.end(),
+                [&choice](const workspace::Subtask& sub) { return sub.id == choice.id; });
+            if (found != task->subtasks.end()) changed = workspace::setSubtaskDone(*task, choice.id, !found->done, m_settings.taskIdentity);
+        }
+        if (changed && !commitTaskBoard(std::move(board))) return;
+        showTaskView(choice.kind == TaskChoiceKind::ToggleSubtask ? ui::PromptKind::TaskSubtasks : ui::PromptKind::TaskActions);
+        return;
+    }
+    case TaskChoiceKind::Label:
+        return;
+    case TaskChoiceKind::PreviousPage:
+    case TaskChoiceKind::NextPage:
+        return;
+    }
+}
+
+void Application::openDocumentSwitcher() {
+    if ((!m_hasDocument && m_inactiveDocuments.empty()) || m_settingsPanelVisible || m_compileTerminalFocused) return;
+    m_completionOpen = false;
+    m_searchBar.open(ui::PromptKind::OpenFiles);
+    clearCommandFeedback();
+    refreshSuggestions();
+    if (!m_inactiveDocuments.empty()) m_selectedSuggestion = m_hasDocument ? 1 : 0;
+}
+
 void Application::openProjectPrompt() {
     if (m_searchBar.visible() && m_searchBar.isOpen() &&
         m_searchBar.kind() == ui::PromptKind::Project) {
@@ -1190,8 +2263,287 @@ void Application::openFunctionPrompt() {
     refreshSuggestions();
 }
 
+void Application::openFind() {
+    if (!m_hasDocument || m_settingsPanelVisible || m_compileTerminalFocused) return;
+    m_completionOpen = false;
+    m_replacePending = false;
+    m_findAnchor = {m_document.cursorLine(), m_document.cursorColumn()};
+    m_searchBar.open(ui::PromptKind::Find);
+    clearCommandFeedback();
+    setCommandStatus("Enter: next  Shift+Enter: previous", false);
+}
+
+void Application::openReplace() {
+    if (!m_hasDocument || m_settingsPanelVisible || m_compileTerminalFocused) return;
+    if (!(m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::Find)) openFind();
+    m_replacePending = true;
+    setCommandStatus("Find text; Enter: replacement  Shift+Enter: previous", false);
+}
+
+void Application::applyReplacement() {
+    if (!m_hasDocument || m_filePath != m_replaceFile ||
+        m_document.revision() != m_replaceRevision || !m_document.hasSelection() ||
+        m_document.selectionUtf8() != m_replaceQuery) {
+        setCommandStatus("Selection changed; search again", true);
+        return;
+    }
+    const std::string replacement(m_searchBar.query());
+    if (replacement.empty()) m_document.deleteSelection();
+    else m_document.pasteUtf8(replacement);
+    m_findAnchor = {m_document.cursorLine(), m_document.cursorColumn()};
+    m_searchBar.open(ui::PromptKind::Find);
+    m_searchBar.setQuery(m_replaceQuery);
+    m_replacePending = true;
+    findInDocument(false);
+    m_followCursor = true;
+}
+
+void Application::findInDocument(bool advance, bool backwards) {
+    if (!m_hasDocument || m_searchBar.query().empty()) {
+        m_document.clearSelection();
+        m_document.setCursor(m_findAnchor.line, m_findAnchor.column);
+        setCommandStatus(m_replacePending ? "Find text; Enter: replacement  Shift+Enter: previous" :
+                         "Enter: next  Shift+Enter: previous", false);
+        return;
+    }
+    const auto queryDocument = editor::Document::fromUtf8(m_searchBar.query());
+    const auto& query = queryDocument.line(0);
+    const auto start = advance && m_document.hasSelection()
+        ? (backwards ? m_document.selectionStart() : m_document.selectionEnd())
+        : m_findAnchor;
+    const auto match = editor::findText(m_document.lines(), query, start, backwards);
+    if (!match) {
+        m_document.clearSelection();
+        setCommandStatus("No matches", false);
+        return;
+    }
+    m_document.setCursor(match->line, match->column);
+    m_document.extendSelectionTo(match->line, match->column + query.size());
+    m_followCursor = true;
+    setCommandStatus(m_replacePending ? "Enter: replacement  Shift+Enter: previous" :
+                     "Enter: next  Shift+Enter: previous", false);
+}
+
+void Application::openCompletion() {
+    if (!m_hasDocument || m_searchBar.visible() || m_settingsPanelVisible ||
+        m_compileTerminalFocused) return;
+    m_completionOpen = true;
+    m_completionSelected = 0;
+    m_projectCompletionNames.clear();
+    std::size_t scanned = 0;
+    for (const auto& path : m_project.files()) {
+        if (path == m_filePath || scanned >= 128) continue;
+        const auto extension = std::filesystem::path(path).extension().string();
+        if (extension != ".c" && extension != ".cpp" && extension != ".h" &&
+            extension != ".hpp" && extension != ".py" && extension != ".js" &&
+            extension != ".ts" && extension != ".rs" && extension != ".go") continue;
+        std::error_code ec;
+        std::string resolveError;
+        const auto full = m_project.resolve(path, resolveError);
+        if (full.empty() || std::filesystem::file_size(full, ec) > 262144 || ec) continue;
+        std::string content, error;
+        if (!m_project.readFile(path, content, error)) continue;
+        ++scanned;
+        const auto doc = editor::Document::fromUtf8(content);
+        for (const auto& line : doc.lines()) {
+            editor::collectFunctionNames(line, m_projectCompletionNames);
+        }
+    }
+    refreshCompletions();
+}
+
+void Application::refreshCompletions() {
+    m_completions.clear();
+    if (!m_hasDocument) { m_completionOpen = false; return; }
+    const auto& line = m_document.line(m_document.cursorLine());
+    const std::size_t column = m_document.cursorColumn();
+    const auto isIdentifier = [](char32_t c) {
+        return (c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z') ||
+               (c >= U'0' && c <= U'9') || c == U'_';
+    };
+    m_completionStart = column;
+    while (m_completionStart > 0 && isIdentifier(line[m_completionStart - 1])) --m_completionStart;
+    std::string prefix;
+    for (std::size_t i = m_completionStart; i < column; ++i) prefix.push_back(static_cast<char>(line[i]));
+    auto names = m_projectCompletionNames;
+    for (const auto& text : m_document.lines()) editor::collectFunctionNames(text, names);
+    for (const auto& name : names) {
+        if (name.starts_with(prefix)) m_completions.push_back(name);
+        if (m_completions.size() == 8) break;
+    }
+    m_completionSelected = std::clamp(m_completionSelected, 0, std::max(0, static_cast<int>(m_completions.size()) - 1));
+}
+
+void Application::openAiSettings() {
+    m_searchBar.open(ui::PromptKind::AiSettings); m_selectedSuggestion = -1; clearCommandFeedback();
+    setCommandStatus("Local: Qwen2.5 Coder 0.5B. OpenRouter sends context online and may incur costs.", false);
+    refreshSuggestions();
+}
+
+void Application::applyAiSettings() {
+    const auto kind = m_searchBar.kind();
+    if (kind == ui::PromptKind::AiKeyInput) {
+        if (m_aiSecret.empty()) { setCommandStatus("Enter an API key", true); return; }
+        std::string error; const bool ok = credentials::save(m_aiSecret, error);
+        std::fill(m_aiSecret.begin(), m_aiSecret.end(), '\0'); m_aiSecret.clear();
+        if (!ok) { m_searchBar.setQuery({}); setCommandStatus(error, true); return; }
+        openAiSettings(); setCommandStatus("OpenRouter API key saved in system credentials", false); return;
+    }
+    if (kind == ui::PromptKind::AiModelInput) {
+        const std::string model(m_searchBar.query());
+        if (model.size() > 200 || std::any_of(model.begin(), model.end(), [](unsigned char c) { return c < 33 || c > 126; })) { setCommandStatus("Use a model ID of at most 200 printable characters", true); return; }
+        auto* target = m_aiSettingsWorkflow == 0 ? &m_settings.aiAskModel : m_aiSettingsWorkflow == 1 ? &m_settings.aiCleanupModel : &m_settings.aiDebugModel;
+        const auto old = *target; *target = model;
+        if (!persistSettings()) { *target = old; setCommandStatus("Could not save settings", true); return; }
+        openAiSettings(); setCommandStatus("Model saved", false); return;
+    }
+    const int choice = m_selectedSuggestion >= 0 ? m_selectedSuggestion : 0;
+    if (choice >= 0 && choice < 6) {
+        m_aiSettingsWorkflow = choice / 2;
+        if (choice % 2 == 1) {
+            const auto& model = m_aiSettingsWorkflow == 0 ? m_settings.aiAskModel : m_aiSettingsWorkflow == 1 ? m_settings.aiCleanupModel : m_settings.aiDebugModel;
+            const std::string current = model; m_searchBar.open(ui::PromptKind::AiModelInput); m_searchBar.setQuery(current);
+            clearCommandFeedback(); setCommandStatus("Enter an OpenRouter model ID; empty clears it", false); refreshSuggestions(); return;
+        }
+        auto* provider = m_aiSettingsWorkflow == 0 ? &m_settings.aiAskProvider : m_aiSettingsWorkflow == 1 ? &m_settings.aiCleanupProvider : &m_settings.aiDebugProvider;
+        const auto old = *provider; *provider = old == "local" ? "openrouter" : "local";
+        if (!persistSettings()) { *provider = old; setCommandStatus("Could not save settings", true); return; }
+        refreshSuggestions(); setCommandStatus("Provider saved. OpenRouter sends context online and may incur costs.", false); return;
+    }
+    if (choice == 6) { m_searchBar.open(ui::PromptKind::AiKeyInput); clearCommandFeedback(); setCommandStatus("Paste key; Enter saves it to system credentials, Escape cancels", false); refreshSuggestions(); return; }
+    if (choice == 7) { std::string error; if (!credentials::remove(error)) setCommandStatus(error, true); else setCommandStatus("OpenRouter key removed", false); }
+}
+
+void Application::openAiPrompt() {
+    if (m_aiFuture.valid()) {
+        setStatus("AI request is still running", false);
+        return;
+    }
+    m_aiReady = false;
+    m_aiCleanup = false;
+    m_aiDebugExplanation = false; m_aiDebugOpenRouter = false; m_aiDebugContext.clear();
+    m_aiResponse.clear();
+    m_aiLines.clear();
+    m_aiScroll = 0;
+    m_aiFile = m_filePath;
+    m_aiRevision = m_document.revision();
+    m_aiStart = m_document.hasSelection() ? m_document.selectionStart() : editor::TextPosition{m_document.cursorLine(), m_document.cursorColumn()};
+    m_aiEnd = m_document.hasSelection() ? m_document.selectionEnd() : m_aiStart;
+    m_searchBar.open(ui::PromptKind::Ai);
+    clearCommandFeedback();
+    setCommandStatus(m_settings.aiAskProvider == "openrouter" ? "OpenRouter receives your prompt, selected code and diagnostic; Enter sends" : "Local AI: first use downloads a 491 MB model", false);
+}
+
+void Application::openAiCleanup() {
+    if (!m_hasDocument || m_settingsPanelVisible || m_compileTerminalFocused || m_searchBar.visible()) return;
+    std::string request, error;
+    if (!ai::cleanupRequest(m_document, m_filePath, request, error)) { setStatus(error, true); return; }
+    openAiPrompt();
+    if (!m_searchBar.isOpen() || m_searchBar.kind() != ui::PromptKind::Ai || m_aiFuture.valid()) return;
+    m_aiCleanup = true;
+    setCommandStatus(m_settings.aiCleanupProvider == "openrouter" ? "OpenRouter receives selected code and surrounding context; Enter sends" : "Clean selection with local AI; Enter to generate, Esc cancels", false);
+}
+
+void Application::pollAi() {
+    if (!m_aiFuture.valid() || m_aiFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    AiResult result = m_aiFuture.get();
+    if (!m_searchBar.isOpen() || m_searchBar.kind() != ui::PromptKind::Ai) return;
+    if (!result.error.empty()) { setCommandStatus(std::move(result.error), true); return; }
+    m_aiResponse = std::move(result.output);
+    if (m_aiCleanup && !ai::cleanupResponse(m_aiResponse, result.error)) { setCommandStatus(std::move(result.error), true); return; }
+    m_aiLines.clear();
+    std::string line;
+    for (char c : m_aiResponse) {
+        if (c == '\n' || (line.size() >= 65 && (static_cast<unsigned char>(c) & 0xC0U) != 0x80U)) {
+            m_aiLines.push_back(std::move(line));
+            line.clear();
+            if (c == '\n') continue;
+        }
+        line.push_back(c);
+    }
+    if (!line.empty()) m_aiLines.push_back(std::move(line));
+    m_aiScroll = 0;
+    m_aiReady = true;
+    setCommandStatus(m_aiDebugExplanation ? (m_aiDebugOpenRouter ? "OpenRouter explanation: Up/Down scroll, Enter or Esc closes" : "Local explanation: Up/Down scroll, Enter or Esc closes") : m_aiCleanup ? "Review rewrite: Up/Down scroll, Enter applies, Esc discards" : "AI preview: Up/Down scroll, Enter inserts, Esc dismisses", false);
+    refreshSuggestions();
+}
+
 void Application::applyCommand(bool forceFolder) {
     if (!m_searchBar.isOpen()) {
+        return;
+    }
+
+    if (m_searchBar.kind() == ui::PromptKind::AiSettings || m_searchBar.kind() == ui::PromptKind::AiModelInput || m_searchBar.kind() == ui::PromptKind::AiKeyInput) { applyAiSettings(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugInput || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput) { applyDebugCommand(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::RecoveryList || m_searchBar.kind() == ui::PromptKind::RecoveryDetail) { applyRecovery(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleList || m_searchBar.kind() == ui::PromptKind::ModuleActions || m_searchBar.kind() == ui::PromptKind::ModuleCommands) { applyModuleCommand(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput) { applyGitReview(); return; }
+    if (isTaskPrompt(m_searchBar.kind())) {
+        applyTaskCommand();
+        return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::Ai) {
+        if (m_aiFuture.valid()) return;
+        if (m_aiReady) {
+            if (m_aiDebugExplanation) { m_searchBar.close(); m_aiReady = false; return; }
+            if (!m_hasDocument || m_filePath != m_aiFile || m_document.revision() != m_aiRevision) {
+                setCommandStatus("Document changed; request a new suggestion", true);
+                return;
+            }
+            m_document.setCursor(m_aiStart.line, m_aiStart.column);
+            m_document.extendSelectionTo(m_aiEnd.line, m_aiEnd.column);
+            m_document.pasteUtf8(m_aiResponse);
+            m_searchBar.close();
+            m_aiReady = false;
+            m_followCursor = true;
+            return;
+        }
+        const std::string query(m_searchBar.query());
+        if (!m_aiCleanup && query.empty()) { setCommandStatus("Describe what you need", true); return; }
+        std::string cleanup, cleanupError;
+        if (m_aiCleanup && (!m_hasDocument || m_filePath != m_aiFile || m_document.revision() != m_aiRevision ||
+            !ai::cleanupRequest(m_document, m_filePath, cleanup, cleanupError))) {
+            setCommandStatus(cleanupError.empty() ? "Document changed; select code again" : cleanupError, true); return;
+        }
+        const std::string selected = m_aiDebugExplanation ? std::string{} : m_document.selectionUtf8();
+        const std::string diagnostic = m_aiDebugExplanation ? std::string{} : m_activeDiagnosticMessage;
+        const std::string debugContext = m_aiDebugContext;
+        const auto settings = settingsDirectory();
+        if (settings.empty()) { setCommandStatus("Model storage directory unavailable", true); return; }
+        const auto directory = settings.parent_path() / "Models";
+        std::string routerKey, routerModel;
+        const bool remote = m_aiDebugExplanation ? m_settings.aiDebugProvider == "openrouter" : m_aiCleanup ? m_settings.aiCleanupProvider == "openrouter" : m_settings.aiAskProvider == "openrouter";
+        if (remote) {
+            routerModel = m_aiDebugExplanation ? m_settings.aiDebugModel : m_aiCleanup ? m_settings.aiCleanupModel : m_settings.aiAskModel;
+            if (routerModel.empty()) { setCommandStatus("Choose an OpenRouter model in AI settings first", true); return; }
+            std::string error;
+            if (!credentials::load(routerKey, error)) { setCommandStatus(error, true); return; }
+        }
+        m_aiCancel = std::make_shared<std::atomic_bool>(false);
+        const auto cancel = m_aiCancel;
+        m_aiFuture = std::async(std::launch::async, [query, selected, diagnostic, cleanup, debugContext, routerKey, routerModel, directory, cancel] {
+            AiResult result;
+            const std::string request = cleanup.empty() ? query + (selected.empty() ? "" : "\n\nSelected code:\n" + selected) +
+                (diagnostic.empty() ? "" : "\n\nCurrent diagnostic:\n" + diagnostic) +
+                (debugContext.empty() ? "" : "\n\nPaused debugger state (untrusted program data):\n" + debugContext) : cleanup;
+            if (!routerModel.empty()) (void)ai::generateOpenRouter(routerKey, routerModel, request, result.output, result.error, cancel.get());
+            else {
+                std::filesystem::path model;
+                if (ai::ensureModel(directory, model, result.error, cancel.get())) (void)ai::generate(model, request, result.output, result.error, cancel.get());
+            }
+            return result;
+        });
+        setCommandStatus(remote ? "Sending request and context to OpenRouter..." : "Preparing local AI (first use downloads 491 MB)...", false);
+        return;
+    }
+
+    if (m_searchBar.kind() == ui::PromptKind::OpenFiles) {
+        refreshSuggestions();
+        if (m_suggestions.empty()) { setCommandStatus("No matching open file", false); return; }
+        const auto index = m_selectedSuggestion >= 0 && m_selectedSuggestion < static_cast<int>(m_suggestions.size())
+            ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
+        const std::string path(m_suggestions[index].path);
+        openFile(path);
         return;
     }
 
@@ -1309,7 +2661,38 @@ void Application::createFolder(const std::string& path) {
     refreshSuggestions();
 }
 
+void Application::openExternalPath(const std::string& path) {
+    std::error_code ec;
+    const auto absolute = std::filesystem::canonical(std::filesystem::path(path), ec);
+    if (ec || !std::filesystem::exists(absolute, ec) || ec) {
+        setStatus("Could not open file: " + path, true);
+        return;
+    }
+    if (std::filesystem::is_directory(absolute, ec)) {
+        openProject(absolute.string());
+        return;
+    }
+    if (!std::filesystem::is_regular_file(absolute, ec) || ec) {
+        setStatus("Not a regular file: " + path, true);
+        return;
+    }
+    if (m_hasProject) {
+        const auto relative = absolute.lexically_relative(m_project.root());
+        if (!relative.empty() && *relative.begin() != "..") {
+            openFile(relative.generic_string());
+            return;
+        }
+    }
+    const auto parent = absolute.parent_path();
+    openProject(parent.string());
+    if (m_hasProject && m_project.root() == parent) {
+        openFile(absolute.filename().string());
+        if (!m_recoveryFiles.empty()) openRecovery();
+    }
+}
+
 void Application::openProject(const std::string& path) {
+    if (m_debugAdapter.alive()) { setStatus("Stop the debugger before switching projects", true); return; }
     if (!saveDocument()) {
         setCommandStatus("Could not save the open file", true);
         return;
@@ -1324,7 +2707,14 @@ void Application::openProject(const std::string& path) {
         return;
     }
 
+    if (!saveActiveTaskContext()) return;
+    m_inactiveDocuments.clear();
+    m_activeTaskId.clear();
+    m_selectedTaskId.clear();
+    m_taskBoard = {};
     m_project = std::move(project);
+    m_debugBreakpoints.clear();
+    m_recoveryFiles.clear();
     m_projectName = m_project.name();
     m_hasProject = true;
     m_mouseSelecting = false;
@@ -1361,6 +2751,12 @@ void Application::openProject(const std::string& path) {
     m_dragTarget = DragTarget::None;
 
     setStatus((created ? "Created project " : "Opened project ") + m_projectName, false);
+    const auto recoveryRoot = std::filesystem::path(m_settingsRoot).parent_path() / "Recovery";
+    std::error_code recoveryError;
+    if (!m_settingsRoot.empty() && !m_settingsPanelVisible && std::filesystem::is_directory(recoveryRoot, recoveryError)) {
+        openRecovery();
+        if (m_recoveryFiles.empty()) m_searchBar.close();
+    }
 }
 
 void Application::openFile(const std::string& path) {
@@ -1401,6 +2797,13 @@ void Application::openFile(const std::string& path) {
     bool created = false;
     std::string error;
     if (!m_project.exists(relative)) {
+        const auto cachedFile = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(),
+            [&relative](const OpenDocument& file) { return file.path == relative; });
+        if (cachedFile != m_inactiveDocuments.end()) {
+            setCommandStatus("Open file no longer exists: " + relative, true);
+            setStatus("Open file no longer exists: " + relative, true);
+            return;
+        }
         if (!m_project.createFile(relative, error)) {
             setCommandStatus(std::move(error), true);
             return;
@@ -1426,11 +2829,29 @@ void Application::openFile(const std::string& path) {
         return;
     }
 
+    editor::Document next = editor::Document::fromUtf8(content);
+    int nextFirstLine = 0;
+    const auto cached = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(),
+        [&relative](const OpenDocument& file) { return file.path == relative; });
+    if (cached != m_inactiveDocuments.end()) {
+        // Reload if another program changed the file while it was inactive.
+        if (cached->document.toUtf8() == next.toUtf8()) {
+            next = std::move(cached->document);
+            nextFirstLine = cached->firstLine;
+        }
+        m_inactiveDocuments.erase(cached);
+    }
+    if (m_hasDocument) {
+        m_inactiveDocuments.insert(m_inactiveDocuments.begin(),
+            OpenDocument{m_filePath, std::move(m_document), m_firstLine, m_diskContents});
+    }
     closeCompileTerminal();
-    m_document = editor::Document::fromUtf8(content);
+    m_document = std::move(next);
+    m_accessibilityKey.clear();
     m_hasDocument = true;
     m_filePath = relative;
-    m_firstLine = 0;
+    m_diskContents = content;
+    m_firstLine = nextFirstLine;
     m_followCursor = true;
     m_syntaxValid = false;
     m_compileScriptValid = false;
@@ -1453,11 +2874,21 @@ bool Application::saveDocument() {
     }
 
     std::string error;
-    if (!m_project.writeFile(m_filePath, m_document.toUtf8(), error)) {
+    std::string disk;
+    if (!m_project.readFile(m_filePath, disk, error)) {
+        setStatus("Cannot save: file was removed or cannot be read. Your changes remain open.", true);
+        return false;
+    }
+    if (disk != m_diskContents) {
+        setStatus("File changed outside Lucid; save blocked to protect both versions.", true);
+        return false;
+    }
+    const std::string contents = m_document.toUtf8();
+    if (!m_project.writeFile(m_filePath, contents, error)) {
         setStatus(std::move(error), true);
         return false;
     }
-
+    m_diskContents = contents;
     m_document.markSaved();
     invalidateFunctionIndex();
     setStatus("Saved " + m_filePath, false);
@@ -1509,6 +2940,7 @@ void Application::deleteCurrentFile() {
 }
 
 void Application::deleteCurrentProject() {
+    if (m_debugAdapter.alive()) { setStatus("Stop the debugger before deleting the project", true); return; }
     if (!m_hasProject) {
         setStatus("No project is open", true);
         return;
@@ -1569,6 +3001,10 @@ void Application::closeProject() {
     closeCompileTerminal();
     const std::string root = m_project.root().string();
     m_project = workspace::Project{};
+    m_taskBoard = {};
+    m_activeTaskId.clear();
+    m_selectedTaskId.clear();
+    m_inactiveDocuments.clear();
     m_hasProject = false;
     m_projectName.clear();
     m_hasDocument = false;
@@ -1622,7 +3058,12 @@ void Application::closeDocument() {
     m_compileScript = editor::CompileScript{};
     m_compileScriptValid = false;
     resetDiagnostics();
-    setStatus("Closed " + closed, false);
+    if (!m_inactiveDocuments.empty()) {
+        const std::string nextPath = m_inactiveDocuments.front().path;
+        openFile(nextPath);
+    } else {
+        setStatus("Closed " + closed, false);
+    }
 }
 
 void Application::moveSuggestion(int delta) {
@@ -1698,6 +3139,56 @@ void Application::refreshSuggestions() {
     const auto remaining = [this]() {
         return m_suggestions.size() < capacity ? capacity - m_suggestions.size() : 0;
     };
+
+    if (m_searchBar.kind() == ui::PromptKind::AiSettings) {
+        const std::array<std::string, 3> names{"Ask AI", "Code cleanup", "Debugger"};
+        const std::array<std::string, 3> providers{m_settings.aiAskProvider, m_settings.aiCleanupProvider, m_settings.aiDebugProvider};
+        const std::array<std::string, 3> models{m_settings.aiAskModel, m_settings.aiCleanupModel, m_settings.aiDebugModel};
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            addDetailedSuggestion(names[i] + ": " + (providers[i] == "local" ? "Local" : "OpenRouter"), ui::SuggestionKind::Task, "Enter toggles provider");
+            addDetailedSuggestion(names[i] + " OpenRouter model", ui::SuggestionKind::Task, models[i].empty() ? "Not set" : models[i]);
+        }
+        addDetailedSuggestion("Set or change OpenRouter API key", ui::SuggestionKind::Task, "Stored in system credentials");
+        addDetailedSuggestion("Remove OpenRouter API key", ui::SuggestionKind::Task, "Deletes saved key");
+        if (m_selectedSuggestion >= static_cast<int>(m_suggestions.size())) m_selectedSuggestion = -1;
+        return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::AiKeyInput || m_searchBar.kind() == ui::PromptKind::AiModelInput) return;
+    if (m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugInput || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput) { refreshDebugSuggestions(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::RecoveryList || m_searchBar.kind() == ui::PromptKind::RecoveryDetail) { refreshRecoverySuggestions(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleList || m_searchBar.kind() == ui::PromptKind::ModuleActions || m_searchBar.kind() == ui::PromptKind::ModuleCommands) { refreshModuleSuggestions(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput) { refreshGitSuggestions(); return; }
+    if (isTaskPrompt(m_searchBar.kind())) {
+        refreshTaskSuggestions();
+        return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::OpenFiles) {
+        std::vector<std::string> paths;
+        if (m_hasDocument) paths.push_back(m_filePath);
+        for (const auto& file : m_inactiveDocuments) paths.push_back(file.path);
+        if (m_searchBar.query().empty()) {
+            for (const auto& path : paths) {
+                if (m_suggestions.size() == capacity) break;
+                addDetailedSuggestion(path, ui::SuggestionKind::File,
+                                      path == m_filePath ? "Current" : "Open");
+            }
+        } else {
+            for (const auto path : workspace::filterPaths(paths, m_searchBar.query(), capacity))
+                addDetailedSuggestion(std::string(path), ui::SuggestionKind::File,
+                                      path == m_filePath ? "Current" : "Open");
+        }
+        if (m_selectedSuggestion >= static_cast<int>(m_suggestions.size())) m_selectedSuggestion = -1;
+        return;
+    }
+
+    if (m_searchBar.kind() == ui::PromptKind::Find || m_searchBar.kind() == ui::PromptKind::Replace) return;
+    if (m_searchBar.kind() == ui::PromptKind::Ai) {
+        if (m_aiReady) {
+            for (std::size_t i = m_aiScroll; i < m_aiLines.size() && m_suggestions.size() < capacity; ++i)
+                addSuggestion(m_aiLines[i], ui::SuggestionKind::Project);
+        }
+        return;
+    }
 
     if (m_searchBar.kind() == ui::PromptKind::Function) {
         if (!m_hasProject) {
@@ -1814,6 +3305,9 @@ void Application::onCommandQueryChanged() {
     m_suggestionSelectionOpacityVelocity = 0.0F;
     m_commandStatus.clear();
     m_commandStatusIsError = false;
+    if (m_searchBar.kind() == ui::PromptKind::Find) findInDocument(false);
+    else if (m_searchBar.kind() == ui::PromptKind::Replace)
+        setCommandStatus("Enter: replace this match  Escape: cancel", false);
     refreshSuggestions();
 }
 
@@ -2263,7 +3757,9 @@ void Application::runCompileFunction(editor::CompileFunction function,
                    : (editor::currentCompilePlatform() ==
                               editor::CompilePlatform::Linux
                           ? "linux"
-                          : "unknown"));
+                          : (editor::currentCompilePlatform() == editor::CompilePlatform::FreeBSD
+                              ? "freebsd" : editor::currentCompilePlatform() == editor::CompilePlatform::OpenBSD
+                                  ? "openbsd" : "unknown")));
 
     std::unordered_map<std::string, std::string> variables;
     variables["project"] = projectRoot;
@@ -2624,6 +4120,8 @@ void Application::applySettings(const EditorSettings& settings) {
     m_cursorStyle = settings.cursorStyle;
     m_backgroundMotion = settings.backgroundMotion;
     applyTheme(settings.theme);
+    platform::setThemedApplicationIcon(m_window.handle(), ui::theme::kPrimary.r,
+        ui::theme::kPrimary.g, ui::theme::kPrimary.b, settings.iconTheme);
 
     if (std::abs(m_uiZoom - settings.zoomFactor) > 0.001F) {
         m_uiZoom = std::clamp(settings.zoomFactor, 0.5F, 3.0F);
@@ -2646,6 +4144,7 @@ void Application::applyTheme(const ThemeSettings& themeSettings) {
             ui::theme::selectionTint(palette.background, palette.primary);
     }
 
+    if (m_settings.highContrast) palette = ui::theme::highContrastPalette(palette);
     ui::theme::applyPalette(palette);
     if (m_renderer != nullptr) {
         const ui::theme::Color& background = ui::theme::kBackground;
@@ -2672,6 +4171,79 @@ void Application::refreshSettings() {
 
     m_settingsError.clear();
     applySettings(result.settings);
+}
+
+void Application::syncAccessibility(const ui::FrameState& frame) {
+#if defined(__APPLE__)
+    std::string label, value, key;
+    std::size_t start = 0, length = 0;
+    if (frame.settingsPanelVisible) {
+        label = "Lucid settings";
+        const auto settingName = [](ui::SettingsControl control) -> std::string {
+            using C = ui::SettingsControl;
+            if (control >= C::PrimaryColor0 && control <= C::PrimaryColor7) return "Primary color " + std::to_string(static_cast<int>(control) - static_cast<int>(C::PrimaryColor0) + 1);
+            switch (control) {
+            case C::ThemeLucidDark: return "Dark theme"; case C::ThemeGraphite: return "Graphite theme"; case C::ThemeLucidLight: return "Light theme";
+            case C::SpeedHalf: return "Animation speed half"; case C::SpeedNormal: return "Animation speed normal"; case C::SpeedDouble: return "Animation speed double";
+            case C::Zoom75: return "Text size 75 percent"; case C::Zoom100: return "Text size 100 percent"; case C::Zoom125: return "Text size 125 percent"; case C::Zoom150: return "Text size 150 percent";
+            case C::ShowSyntaxErrors: return "Show syntax errors"; case C::ShowLineNumbers: return "Show line numbers"; case C::HighlightCurrentLine: return "Highlight current line";
+            case C::CursorBlink: return "Cursor blink"; case C::CursorLine: return "Line cursor"; case C::CursorBlock: return "Block cursor";
+            case C::CursorUnderscore: return "Underscore cursor"; case C::CursorKitty: return "Kitty cursor";
+            case C::IconClassic: return "Classic icon"; case C::IconAccent: return "Accent icon"; case C::IconOutline: return "Outline icon";
+            case C::AiSettings: return "AI settings"; case C::BackgroundMotion: return "Background motion"; case C::OpenSettingsJson: return "Open settings file"; case C::Done: return "Done";
+            default: return "None";
+            }
+        };
+        value = "Settings. Use Tab or arrow keys to choose a control, Enter to activate, and Escape to close. Focus: " + settingName(frame.settingsHovered);
+        key = label + value;
+    } else if (frame.commandVisible && m_searchBar.isOpen()) {
+        label = "Lucid command";
+        value = std::string(frame.commandPlaceholder.empty() ? "Command" : frame.commandPlaceholder) + "\n" + std::string(frame.commandQuery);
+        for (const auto& item : frame.suggestions) { value += "\n"; value += item.path; if (!item.detail.empty()) { value += ": "; value += item.detail; } }
+        if (!frame.commandStatus.empty()) { value += frame.commandStatusIsError ? "\nError: " : "\n"; value += frame.commandStatus; }
+        value += "\nSelected option " + std::to_string(m_selectedSuggestion + 1);
+        key = label + value;
+    } else if (m_hasDocument) {
+        label = "Editor: " + m_filePath;
+        if (!m_activeDiagnosticMessage.empty()) label += "; error: " + m_activeDiagnosticMessage;
+        const auto from = m_document.hasSelection() ? m_document.selectionStart() : editor::TextPosition{m_document.cursorLine(), m_document.cursorColumn()};
+        const auto to = m_document.hasSelection() ? m_document.selectionEnd() : from;
+        key = label + ":" + std::to_string(m_document.revision()) + ":" + std::to_string(from.line) + ":" + std::to_string(from.column) + ":" + std::to_string(to.line) + ":" + std::to_string(to.column);
+        if (key == m_accessibilityKey) return;
+        value = m_document.toUtf8();
+        const auto offset = [this](editor::TextPosition position) {
+            std::size_t n = 0;
+            for (std::size_t i = 0; i < position.line && i < m_document.lineCount(); ++i) {
+                for (char32_t c : m_document.line(i)) n += c > 0xffff ? 2 : 1;
+                ++n;
+            }
+            if (position.line < m_document.lineCount()) {
+                const auto& line = m_document.line(position.line);
+                for (std::size_t i = 0; i < std::min(position.column, line.size()); ++i) n += line[i] > 0xffff ? 2 : 1;
+            }
+            return n;
+        };
+        start = offset(from); length = offset(to) - start;
+    } else { label = "Lucid"; value = "Open a project to start editing."; key = label + value; }
+    if (key == m_accessibilityKey) return;
+    m_accessibilityKey = std::move(key);
+    platform::updateAccessibility(m_window.handle(), label, value, start, length);
+#else
+    (void)frame;
+#endif
+}
+
+void Application::changeZoom(float delta) {
+    auto settings = m_settings;
+    settings.zoomFactor = delta == 0.0F ? 1.0F : std::clamp(settings.zoomFactor + delta, 0.5F, 3.0F);
+    applySettings(settings);
+    (void)persistSettings();
+}
+
+void Application::toggleHighContrast() {
+    auto settings = m_settings; settings.highContrast = !settings.highContrast;
+    applySettings(settings);
+    if (persistSettings()) setStatus(settings.highContrast ? "High contrast enabled" : "High contrast disabled", false);
 }
 
 void Application::openSettings() {
@@ -2727,12 +4299,38 @@ void Application::updateSettingsPanelHover(double x, double y) {
     m_settingsHovered = settingsControlAt(x, y);
 }
 
-void Application::handleSettingsPanelClick(double x, double y) {
+void Application::moveSettingsFocus(int direction) {
     using ui::SettingsControl;
-    const SettingsControl control = settingsControlAt(x, y);
+    static constexpr auto controls = std::to_array<SettingsControl>({
+        SettingsControl::ThemeLucidDark, SettingsControl::ThemeGraphite, SettingsControl::ThemeLucidLight,
+        SettingsControl::PrimaryColor0, SettingsControl::PrimaryColor1, SettingsControl::PrimaryColor2,
+        SettingsControl::PrimaryColor3, SettingsControl::PrimaryColor4, SettingsControl::PrimaryColor5,
+        SettingsControl::PrimaryColor6, SettingsControl::PrimaryColor7,
+        SettingsControl::SpeedHalf, SettingsControl::SpeedNormal, SettingsControl::SpeedDouble,
+        SettingsControl::Zoom75, SettingsControl::Zoom100, SettingsControl::Zoom125, SettingsControl::Zoom150,
+        SettingsControl::ShowSyntaxErrors, SettingsControl::ShowLineNumbers,
+        SettingsControl::HighlightCurrentLine, SettingsControl::CursorBlink,
+        SettingsControl::CursorLine, SettingsControl::CursorBlock,
+        SettingsControl::CursorUnderscore, SettingsControl::CursorKitty,
+        SettingsControl::IconClassic, SettingsControl::IconAccent, SettingsControl::IconOutline,
+        SettingsControl::OpenSettingsJson, SettingsControl::AiSettings, SettingsControl::BackgroundMotion, SettingsControl::Done});
+    const auto found = std::find(controls.begin(), controls.end(), m_settingsHovered);
+    const int count = static_cast<int>(controls.size());
+    const int index = found == controls.end() ? (direction > 0 ? -1 : 0)
+        : static_cast<int>(found - controls.begin());
+    m_settingsHovered = controls[static_cast<std::size_t>((index + direction + count) % count)];
+}
+
+void Application::handleSettingsPanelClick(double x, double y) {
+    activateSettingsControl(settingsControlAt(x, y));
+}
+
+void Application::activateSettingsControl(ui::SettingsControl control) {
+    using ui::SettingsControl;
     if (control == SettingsControl::None) {
         return;
     }
+    if (control == SettingsControl::AiSettings) { closeSettingsPanel(); openAiSettings(); return; }
     if (control == SettingsControl::OpenSettingsJson) {
         if (!m_settingsRoot.empty()) {
             closeSettingsPanel();
@@ -2767,6 +4365,15 @@ void Application::handleSettingsPanelClick(double x, double y) {
     }
 
     switch (control) {
+    case SettingsControl::IconClassic:
+        m_settings.iconTheme = "classic";
+        break;
+    case SettingsControl::IconAccent:
+        m_settings.iconTheme = "accent";
+        break;
+    case SettingsControl::IconOutline:
+        m_settings.iconTheme = "outline";
+        break;
     case SettingsControl::ThemeLucidDark:
         m_settings.theme.name = "lucid-dark";
         m_settings.theme.primary.reset();
@@ -2827,6 +4434,7 @@ void Application::handleSettingsPanelClick(double x, double y) {
     case SettingsControl::BackgroundMotion:
         m_settings.backgroundMotion = !m_settings.backgroundMotion;
         break;
+    case SettingsControl::AiSettings:
     case SettingsControl::OpenSettingsJson:
     case SettingsControl::Done:
     case SettingsControl::None:
@@ -2839,14 +4447,14 @@ void Application::handleSettingsPanelClick(double x, double y) {
     persistSettings();
 }
 
-void Application::persistSettings() {
+bool Application::persistSettings() {
     if (m_settingsRoot.empty()) {
         setStatus("Settings are unavailable", true);
-        return;
+        return false;
     }
 
     if (m_hasDocument && isSettingsDocument() && !saveDocument()) {
-        return;
+        return false;
     }
 
     const std::filesystem::path file =
@@ -2855,12 +4463,12 @@ void Application::persistSettings() {
     std::ofstream stream(file, std::ios::binary | std::ios::trunc);
     if (!stream) {
         setStatus("Could not write settings.json", true);
-        return;
+        return false;
     }
     stream.write(text.data(), static_cast<std::streamsize>(text.size()));
     if (!stream) {
         setStatus("Could not write settings.json", true);
-        return;
+        return false;
     }
 
     if (m_hasDocument && isSettingsDocument()) {
@@ -2870,6 +4478,7 @@ void Application::persistSettings() {
     }
     m_settingsError.clear();
     setStatus("Settings saved", false);
+    return true;
 }
 
 bool Application::isJsonDocument() const {
@@ -3088,13 +4697,57 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
         m_searchBar.frameState(timeSeconds, m_animationSpeed);
     state.animationTime =
         static_cast<float>(std::fmod(m_animationTimeSeconds, animationPeriod));
+    switch (m_searchBar.kind()) {
+    case ui::PromptKind::Ai: if (m_aiCleanup) state.commandPlaceholder = "Clean selected code with AI..."; break;
+    case ui::PromptKind::AiSettings: state.commandPlaceholder = "AI settings: choose a workflow or key..."; break;
+    case ui::PromptKind::AiModelInput: state.commandPlaceholder = "OpenRouter model ID (e.g. provider/model)..."; break;
+    case ui::PromptKind::AiKeyInput: state.commandPlaceholder = "Paste OpenRouter API key; Enter saves securely..."; break;
+    case ui::PromptKind::DebugMenu: state.commandPlaceholder = "Debugger..."; break;
+    case ui::PromptKind::DebugInput: state.commandPlaceholder = "Executable path inside project..."; break;
+    case ui::PromptKind::DebugStack: state.commandPlaceholder = "Debug call stack..."; break;
+    case ui::PromptKind::DebugVariables: state.commandPlaceholder = "Debug variables..."; break;
+    case ui::PromptKind::DebugOutput: state.commandPlaceholder = "Debug output..."; break;
+    case ui::PromptKind::RecoveryList: state.commandPlaceholder = "Recovery snapshots..."; break;
+    case ui::PromptKind::RecoveryDetail: state.commandPlaceholder = "Review snapshot before restoring..."; break;
+    case ui::PromptKind::ModuleList: state.commandPlaceholder = "Modules..."; break;
+    case ui::PromptKind::ModuleActions: state.commandPlaceholder = "Module details and permissions..."; break;
+    case ui::PromptKind::ModuleCommands: state.commandPlaceholder = "Module commands..."; break;
+    case ui::PromptKind::GitChanges: state.commandPlaceholder = "Git review: changed files..."; break;
+    case ui::PromptKind::GitFile: state.commandPlaceholder = "Git: file actions..."; break;
+    case ui::PromptKind::GitDiff: state.commandPlaceholder = "Git review: select a line to open..."; break;
+    case ui::PromptKind::GitCommitReview: state.commandPlaceholder = "Review staged files before committing..."; break;
+    case ui::PromptKind::GitCommitInput: state.commandPlaceholder = "Commit message; Enter creates a local commit..."; break;
+    case ui::PromptKind::TaskList: state.commandPlaceholder = "Tasks: search or create..."; break;
+    case ui::PromptKind::TaskActions: state.commandPlaceholder = "Task actions..."; break;
+    case ui::PromptKind::TaskSubtasks: state.commandPlaceholder = "Subtasks..."; break;
+    case ui::PromptKind::TaskHistory: state.commandPlaceholder = "Task activity..."; break;
+    case ui::PromptKind::TaskTier: state.commandPlaceholder = "Choose task tier..."; break;
+    case ui::PromptKind::TaskInput:
+        switch (m_taskInputKind) {
+        case TaskInputKind::Identity: state.commandPlaceholder = "Your display name..."; break;
+        case TaskInputKind::Title: state.commandPlaceholder = "New task title..."; break;
+        case TaskInputKind::Subtask: state.commandPlaceholder = "New subtask title..."; break;
+        case TaskInputKind::Assignee: state.commandPlaceholder = "Assign to... (empty clears)"; break;
+        case TaskInputKind::Solution: state.commandPlaceholder = "How was it solved?"; break;
+        }
+        break;
+    default: break;
+    }
 
+    state.completionVisible = m_completionOpen && !m_searchBar.visible();
+    if (state.completionVisible) {
+        for (const auto& completion : m_completions) state.completions.push_back(completion);
+        state.selectedCompletion = m_completionSelected;
+    }
+
+    pollAi();
     pollCompilerDiagnostics(timeSeconds);
     refreshSettings();
     refreshDiagnostics(timeSeconds);
 
     state.animationSpeed = m_animationSpeed;
     state.hasProject = m_hasProject;
+    state.welcomeShortcutScroll = m_welcomeShortcutScroll;
     state.welcomeActionHovered = m_welcomeActionHovered && !state.commandVisible;
     state.projectName = m_projectName;
     state.hasDocument = m_hasDocument;
@@ -3143,6 +4796,7 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     state.settingsHovered =
         state.settingsPanelVisible ? m_settingsHovered : ui::SettingsControl::None;
     state.settingsTheme = m_settings.theme.name;
+    state.settingsIconTheme = m_settings.iconTheme;
     state.settingsPrimary = ui::theme::kPrimary;
     state.settingsAnimationSpeed = m_settings.animationSpeed;
     state.settingsZoomFactor = m_settings.zoomFactor;
@@ -3179,6 +4833,31 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     state.visibleTokens = m_visibleTokens;
     state.firstLine = m_firstLine;
 
+    state.debugBreakpointLines.clear();
+    if (auto found = m_debugBreakpoints.find(m_filePath); m_hasDocument && found != m_debugBreakpoints.end())
+        for (int line : found->second) state.debugBreakpointLines.push_back(line - 1);
+    state.debugStoppedLine = -1; m_debugInline.clear();
+    if (m_hasProject && m_hasDocument && m_debugSession.state() == debug::State::Stopped && !m_debugSession.stack().empty()) {
+        const auto& top = m_debugSession.stack()[std::min(m_debugSession.selectedFrame(), m_debugSession.stack().size() - 1)];
+        std::error_code ec; const auto file = std::filesystem::weakly_canonical(m_project.root() / m_filePath, ec);
+        if (!ec && file == std::filesystem::weakly_canonical(top.path, ec) && !ec) {
+            state.debugStoppedLine = top.line - 1;
+            const auto appendInline = [this](std::string_view text) {
+                constexpr std::size_t limit = 180;
+                if (m_debugInline.size() >= limit) return;
+                auto count = std::min(text.size(), limit - m_debugInline.size());
+                while (count > 0 && count < text.size() && (static_cast<unsigned char>(text[count]) & 0xc0U) == 0x80U) --count;
+                m_debugInline.append(text.substr(0, count));
+            };
+            for (const auto& variable : m_debugSession.variables()) {
+                if (!m_debugInline.empty()) appendInline("  ");
+                if (variable.changed) appendInline("* ");
+                appendInline(variable.name); appendInline(" = "); appendInline(variable.value);
+                if (m_debugInline.size() >= 180) break;
+            }
+        }
+    }
+    state.debugInline = m_debugInline;
     state.compileFunctionLines.clear();
     if (m_hasDocument && m_compileScriptValid) {
         const int lastLine = m_firstLine + visibleRowCount();

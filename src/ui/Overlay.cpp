@@ -57,8 +57,8 @@ float commandBarTop(float viewportHeight) noexcept {
 
 SettingsPanelLayout settingsPanelLayout(float viewportWidth,
                                         float viewportHeight) noexcept {
-    constexpr float kPanelWidth = 420.0F;
-    constexpr float kPanelHeight = 430.0F;
+    constexpr float kPanelWidth = 620.0F;
+    constexpr float kPanelHeight = 500.0F;
     constexpr float kCompactHeight = 234.0F;
     constexpr float kPadding = 16.0F;
     constexpr float kChipGap = 8.0F;
@@ -159,6 +159,23 @@ SettingsPanelLayout settingsPanelLayout(float viewportWidth,
                  buttonX + cursorButtonWidth, vertical(187.0F, 366.0F)};
     }
 
+    if (height >= 300.0F) {
+        layout.iconLabel = Rect{x0 + kPadding, vertical(188.0F, 375.0F), x1 - kPadding,
+                                vertical(197.0F, 389.0F)};
+        for (std::size_t i = 0; i < layout.iconButtons.size(); ++i) {
+            const float buttonX = x0 + kPadding + static_cast<float>(i) * (chipWidth + kChipGap);
+            layout.iconButtons[i] = Rect{buttonX, vertical(201.0F, 397.0F), buttonX + chipWidth,
+                                        vertical(218.0F, 425.0F)};
+        }
+    } else {
+        const float buttonWidth = std::min(72.0F, std::max(36.0F, (innerWidth - 96.0F - kChipGap * 2.0F) / 3.0F));
+        const float start = x1 - kPadding - (buttonWidth * 3.0F + kChipGap * 2.0F);
+        for (std::size_t i = 0; i < layout.iconButtons.size(); ++i) {
+            const float left = start + static_cast<float>(i) * (buttonWidth + kChipGap);
+            layout.iconButtons[i] = Rect{left, y0 + 1.0F, left + buttonWidth, y0 + 13.0F};
+        }
+    }
+
     const float footerHeight = 20.0F + 8.0F * blend;
     const float footerBottom = y0 + height - (6.0F + 8.0F * blend);
     const float footerY = footerBottom - footerHeight;
@@ -168,7 +185,8 @@ SettingsPanelLayout settingsPanelLayout(float viewportWidth,
         Rect{x1 - kPadding - 84.0F, footerY, x1 - kPadding, footerBottom};
 
     const float motionGap = 8.0F;
-    const float motionX0 = layout.openSettingsJson.x1 + motionGap;
+    layout.aiSettings = Rect{layout.openSettingsJson.x1 + motionGap, footerY, layout.openSettingsJson.x1 + motionGap + 96.0F, footerBottom};
+    const float motionX0 = layout.aiSettings.x1 + motionGap;
     const float motionX1 = layout.done.x0 - motionGap;
     if (motionX1 > motionX0) {
         layout.backgroundMotion = Rect{motionX0, footerY, motionX1, footerBottom};
@@ -182,11 +200,19 @@ SettingsControl settingsControlAt(const SettingsPanelLayout& layout, double x,
     if (hit(layout.done)) {
         return SettingsControl::Done;
     }
+    if (hit(layout.aiSettings)) return SettingsControl::AiSettings;
     if (hit(layout.openSettingsJson)) {
         return SettingsControl::OpenSettingsJson;
     }
     if (hit(layout.backgroundMotion)) {
         return SettingsControl::BackgroundMotion;
+    }
+    for (std::size_t index = 0; index < layout.iconButtons.size(); ++index) {
+        if (hit(layout.iconButtons[index])) {
+            static constexpr std::array<SettingsControl, 3> kControls{
+                SettingsControl::IconClassic, SettingsControl::IconAccent, SettingsControl::IconOutline};
+            return kControls[index];
+        }
     }
     for (std::size_t index = 0; index < layout.themeChips.size(); ++index) {
         if (hit(layout.themeChips[index])) {

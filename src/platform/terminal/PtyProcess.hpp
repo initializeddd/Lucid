@@ -29,6 +29,7 @@ public:
     [[nodiscard]] bool commandsDone() const noexcept { return m_commandsDone; }
     [[nodiscard]] bool hasProcess() const noexcept { return m_fd >= 0 || m_pid > 0; }
     [[nodiscard]] std::string_view output() const noexcept { return m_output; }
+    [[nodiscard]] const std::vector<int>& exitCodes() const noexcept { return m_exitCodes; }
 
 private:
     void sendNextCommand();
@@ -41,6 +42,7 @@ private:
     bool m_commandsDone = false;
     std::size_t m_nextCommand = 0;
     std::vector<std::string> m_commands;
+    std::vector<int> m_exitCodes;
     std::string m_marker;
     std::string m_rawOutput;
     std::string m_output;

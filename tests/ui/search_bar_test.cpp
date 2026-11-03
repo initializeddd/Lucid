@@ -41,9 +41,11 @@ int main() {
 
     bar.append(U'\n');
     bar.append(U'\u263A');
-    if (bar.query() != "hi") {
+    if (bar.query() != "hi\xE2\x98\xBA") {
         return 7;
     }
+    bar.backspace();
+    if (bar.query() != "hi") return 16;
 
     bar.backspace();
     if (bar.query() != "h") {

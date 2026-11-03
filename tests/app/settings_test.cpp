@@ -20,6 +20,12 @@ bool colorNear(const std::optional<lucid::ui::theme::Color>& color, int red,
 int main() {
     using lucid::parseSettings;
 
+    const auto ai = parseSettings(R"({"aiAskProvider":"openrouter","aiAskModel":"anthropic/claude-sonnet-4","aiCleanupProvider":"local","aiCleanupModel":"openai/gpt-4o-mini","aiDebugProvider":"openrouter","aiDebugModel":"google/gemini-2.5-flash"})");
+    if (!ai.valid || ai.settings.aiAskProvider != "openrouter" || ai.settings.aiCleanupProvider != "local" || ai.settings.aiDebugModel != "google/gemini-2.5-flash") return 40;
+    const auto aiRoundTrip = parseSettings(lucid::serializeSettings(ai.settings));
+    if (!aiRoundTrip.valid || aiRoundTrip.settings.aiAskModel != ai.settings.aiAskModel || aiRoundTrip.settings.aiDebugProvider != "openrouter") return 41;
+    if (parseSettings(R"({"aiAskProvider":"cloud"})").valid || parseSettings(R"({"aiAskModel":"bad model"})").valid) return 42;
+
     const auto defaults = parseSettings(lucid::defaultSettingsJson());
     if (!defaults.valid || !near(defaults.settings.animationSpeed, 1.0F) ||
         !defaults.settings.showSyntaxErrors ||
@@ -125,5 +131,21 @@ int main() {
         return 18;
     }
 
+    const auto icon = parseSettings(R"({"iconTheme":"accent","primary":"#ff0000"})");
+    if (!icon.valid || icon.settings.iconTheme != "accent" || !icon.settings.theme.primary) return 19;
+    const auto iconRoundTrip = parseSettings(lucid::serializeSettings(icon.settings));
+    if (!iconRoundTrip.valid || iconRoundTrip.settings.iconTheme != "accent") return 20;
+    if (parseSettings(R"({"iconTheme":"unknown"})").valid) return 21;
+
+    auto namedSettings = custom.settings;
+    namedSettings.taskIdentity = "Alice \"A\" \\ ✓";
+    const auto named = parseSettings(lucid::serializeSettings(namedSettings));
+    if (!named.valid || named.settings.taskIdentity != namedSettings.taskIdentity) return 22;
+    const auto contrast = parseSettings(R"({"highContrast":true})");
+    if (!contrast.valid || !contrast.settings.highContrast ||
+        !parseSettings(lucid::serializeSettings(contrast.settings)).settings.highContrast ||
+        parseSettings(R"({"highContrast":1})").valid) return 23;
+    const auto hc = lucid::ui::theme::highContrastPalette(lucid::ui::theme::lucidDarkPalette());
+    if (hc.background.r != 0.0F || hc.text.r != 1.0F || hc.syntaxComment.r != 1.0F) return 24;
     return 0;
 }

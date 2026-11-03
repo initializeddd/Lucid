@@ -80,6 +80,10 @@ CompilePlatform currentCompilePlatform() noexcept {
     return CompilePlatform::Windows;
 #elif defined(__linux__)
     return CompilePlatform::Linux;
+#elif defined(__FreeBSD__)
+    return CompilePlatform::FreeBSD;
+#elif defined(__OpenBSD__)
+    return CompilePlatform::OpenBSD;
 #else
     return CompilePlatform::Any;
 #endif
@@ -94,9 +98,9 @@ CompilePlatform parseCompilePlatform(std::string_view text) noexcept {
     if (platform == "windows" || platform == "win" || platform == "win32") {
         return CompilePlatform::Windows;
     }
-    if (platform == "linux") {
-        return CompilePlatform::Linux;
-    }
+    if (platform == "linux") return CompilePlatform::Linux;
+    if (platform == "freebsd") return CompilePlatform::FreeBSD;
+    if (platform == "openbsd") return CompilePlatform::OpenBSD;
     return CompilePlatform::Any;
 }
 

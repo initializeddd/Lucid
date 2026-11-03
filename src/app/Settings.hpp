@@ -23,7 +23,12 @@ struct EditorSettings {
     bool cursorBlink = true;
     editor::CursorStyle cursorStyle = editor::CursorStyle::Line;
     bool backgroundMotion = true;
+    bool highContrast = false;
     float zoomFactor = 1.0F;
+    std::string iconTheme = "classic";
+    std::string taskIdentity;
+    std::string aiAskProvider = "local", aiCleanupProvider = "local", aiDebugProvider = "local";
+    std::string aiAskModel, aiCleanupModel, aiDebugModel;
     ThemeSettings theme{};
 };
 

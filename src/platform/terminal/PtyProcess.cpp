@@ -126,6 +126,7 @@ bool PtyProcess::start(std::string workingDirectory,
     close();
     error.clear();
     m_commands = std::move(commands);
+    m_exitCodes.clear();
     m_nextCommand = 0;
     m_commandsDone = false;
     m_rawOutput.clear();
@@ -247,7 +248,7 @@ void PtyProcess::sendNextCommand() {
 
     const std::string& command = m_commands[m_nextCommand++];
     std::string line = command;
-    line += "; printf '\\n%s\\n' \"$LUCID_DONE_MARKER\"\n";
+    line += "; printf '\\n%s:%s\\n' \"$LUCID_DONE_MARKER\" \"$?\"\n";
     write(line);
 }
 
@@ -277,14 +278,22 @@ void PtyProcess::pumpOutput() {
     if (!m_marker.empty()) {
         const std::size_t marker = m_rawOutput.find(m_marker);
         if (marker != std::string::npos) {
-            m_rawOutput.erase(marker, m_marker.size());
-            if (marker < m_rawOutput.size() && m_rawOutput[marker] == '\n') {
-                m_rawOutput.erase(marker, 1);
+            const std::size_t statusStart = marker + m_marker.size();
+            const std::size_t end = m_rawOutput.find('\n', statusStart);
+            if (end != std::string::npos && statusStart < end &&
+                m_rawOutput[statusStart] == ':') {
+                const std::string status = m_rawOutput.substr(statusStart + 1, end - statusStart - 1);
+                char* parsedEnd = nullptr;
+                const long code = std::strtol(status.c_str(), &parsedEnd, 10);
+                if (parsedEnd != status.c_str() && (*parsedEnd == '\0' ||
+                    (*parsedEnd == '\r' && parsedEnd[1] == '\0')) && code >= 0 && code <= 255) {
+                    m_exitCodes.push_back(static_cast<int>(code));
+                    m_rawOutput.erase(marker, end - marker + 1);
+                    if (marker > 0 && m_rawOutput[marker - 1] == '\n')
+                        m_rawOutput.erase(marker - 1, 1);
+                    sendNextCommand();
+                }
             }
-            if (marker > 0 && m_rawOutput[marker - 1] == '\n') {
-                m_rawOutput.erase(marker - 1, 1);
-            }
-            sendNextCommand();
         }
     }
 

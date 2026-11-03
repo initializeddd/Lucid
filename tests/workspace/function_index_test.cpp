@@ -101,6 +101,16 @@ int main() {
         return 12;
     }
 
+    if (!project.writeFile("src/bsd.cpp", "/*\n@open:openbsd\n$ echo open\n@end\n@free:freebsd\n$ echo free\n@end\n*/\n", error)) return 13;
+    project.refresh();
+    auto bsdIndex = loadFunctionIndex(project, error);
+    if (!error.empty()) return 14;
+    bsdIndex = loadFunctionIndex(project, error);
+    const auto open = searchFunctions(bsdIndex.functions, "open", 8);
+    const auto free = searchFunctions(bsdIndex.functions, "free", 8);
+    if (!bsdIndex.usedCache || open.empty() || free.empty() ||
+        bsdIndex.functions[open.front()].platform != lucid::editor::CompilePlatform::OpenBSD ||
+        bsdIndex.functions[free.front()].platform != lucid::editor::CompilePlatform::FreeBSD) return 15;
     fs::remove_all(base, filesystemError);
     return 0;
 }

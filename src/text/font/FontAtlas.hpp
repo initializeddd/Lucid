@@ -3,9 +3,12 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lucid::text {
+
+void setExecutablePath(std::string_view argv0);
 
 struct Glyph {
     float x0 = 0.0F;

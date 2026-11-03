@@ -5,7 +5,7 @@ lean is part of the design.
 
 ## Before you start
 
-- Search existing issues and pull requests before opening a new one.
+- Search existing issues and pull requests before opening a new one. Use Discussions for questions and early ideas.
 - For a large feature or a platform-behaviour change, open an issue first so the design can be
   discussed before you invest in an implementation.
 - Security issues should follow [SECURITY.md](SECURITY.md), not the public issue tracker.
@@ -31,7 +31,7 @@ ctest --test-dir build --output-on-failure
   before committing:
 
   ```sh
-  clang-format -i $(git ls-files '*.cpp' '*.hpp' '*.mm')
+  clang-format -i path/to/changed_file.cpp
   ```
 
 - Prefer explicit ownership and RAII. Avoid hidden global state and framework gravity.

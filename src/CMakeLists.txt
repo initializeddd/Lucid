@@ -31,24 +31,28 @@ target_include_directories(lucid_core PRIVATE
     "${CMAKE_BINARY_DIR}/generated")
 
 target_include_directories(lucid_core SYSTEM PRIVATE
-    "${PROJECT_SOURCE_DIR}/third_party/stb")
+    "${PROJECT_SOURCE_DIR}/third_party/stb"
+    "${PROJECT_SOURCE_DIR}/third_party/picosha2")
 
 target_link_libraries(lucid_core PUBLIC
     glfw
     Vulkan::Vulkan
-    Threads::Threads)
+    Threads::Threads
+    llama
+    libcurl_static)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(lucid_core PUBLIC util)
 endif()
 
 if(WIN32)
-    target_link_libraries(lucid_core PUBLIC dwmapi shell32)
+    target_link_libraries(lucid_core PUBLIC dwmapi shell32 bcrypt advapi32)
 endif()
 
 if(APPLE)
     target_link_libraries(lucid_core PUBLIC
         "-framework Cocoa"
+        "-framework Security"
         "-framework Metal"
         "-framework QuartzCore"
         "-framework IOKit"
@@ -130,6 +134,10 @@ if(APPLE)
                 "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/Lucid.app")
         endif()
     ]])
+endif()
+
+if(NOT APPLE)
+    install(DIRECTORY "${PROJECT_SOURCE_DIR}/assets" DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 
 if(UNIX AND NOT APPLE)

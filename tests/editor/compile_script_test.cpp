@@ -82,6 +82,8 @@ int main() {
     if (parseCompilePlatform("macOS") != CompilePlatform::MacOS ||
         parseCompilePlatform("WIN32") != CompilePlatform::Windows ||
         parseCompilePlatform("linux") != CompilePlatform::Linux ||
+        parseCompilePlatform("freebsd") != CompilePlatform::FreeBSD ||
+        parseCompilePlatform("OpenBSD") != CompilePlatform::OpenBSD ||
         parseCompilePlatform("unknown") != CompilePlatform::Any) {
         return 8;
     }

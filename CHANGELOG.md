@@ -5,6 +5,23 @@ All notable changes to Lucid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.1] - Unreleased
+
+### Added
+
+- LLDB debug-adapter sessions with breakpoints, stepping, stack frames, variables, task-linked launch settings, and opt-in paused-state explanations.
+- Git review actions to stage and unstage files, mark edited conflicts resolved, and review staged paths before creating a local commit.
+- Keyboard navigation of settings controls using Tab, arrow keys, Enter and Space.
+- A temporary open-file switcher with per-file cursor, scroll position and undo history.
+- A full-page settings view, adjustable text/UI scale, and three running-app icon themes that follow the primary color.
+- File-opening support for OS launch and drag-and-drop, and installation-time Open With registration.
+- A themed macOS DMG, Windows MSI configuration, and per-user Linux installer script alongside standalone archives.
+- Find and replace text in the current file, including next/previous and wraparound.
+- Word and line selection by repeated clicks, word drag selection, and word navigation.
+- Cursor-side function suggestions with Ctrl+Shift+Space (Command+Shift+Space on macOS).
+- Optional local AI with a bundled inference engine and a verified model downloaded on first use.
+  Suggestions are shown for review before insertion.
+
 ## [0.1.0-beta.4] - 2026-11-02
 
 ### Changed

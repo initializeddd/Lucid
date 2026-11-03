@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
   pull_request:
   workflow_dispatch:
 
@@ -41,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            ninja-build libglfw3-dev libvulkan-dev vulkan-tools glslang-tools \
+            ninja-build libglfw3-dev libvulkan-dev vulkan-tools glslang-tools libssl-dev lldb-18 \
             libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
             libwayland-dev libxkbcommon-dev
 
@@ -54,6 +54,13 @@ jobs:
             Sort-Object Name -Descending | Select-Object -First 1
           "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$($sdk.FullName)\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install debugger (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install llvm --no-progress -y
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Configure (Unix)
         if: runner.os != 'Windows'
@@ -70,6 +77,26 @@ jobs:
       - name: Build (Windows)
         if: runner.os == 'Windows'
         run: cmake --build build --config Release --parallel
+
+      - name: Test real debugger (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LUCID_TEST_LLDB: '1'
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            mkdir -p "$RUNNER_TEMP/lucid-debug-bin"
+            ln -s "$(command -v lldb-dap-18)" "$RUNNER_TEMP/lucid-debug-bin/lldb-dap"
+            export PATH="$RUNNER_TEMP/lucid-debug-bin:$PATH"
+          fi
+          ctest --test-dir build -R '^debug.lldb_optional$' --output-on-failure
+
+      - name: Test real debugger (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LUCID_TEST_LLDB: '1'
+        run: ctest --test-dir build -C Release -R '^debug.lldb_optional$' --output-on-failure
 
       - name: Test (Unix)
         if: runner.os != 'Windows'

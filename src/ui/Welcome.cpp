@@ -30,20 +30,20 @@ WelcomeLayout welcomeLayout(float viewportWidth, float viewportHeight, float sca
         layout.contentLeft = left + layout.logoSize + columnGap + dividerWidth +
                              columnGap;
 
-        const float contentHeight =
-            actionHeight + hintGap + hintLineHeight * 2.0F;
+        layout.hintColumns = viewportWidth >= 1000.0F * scale ? 3 : 2;
+        const float contentHeight = actionHeight;
         const float groupHeight = std::max(layout.logoSize, contentHeight);
-        const float top = std::max(margin, (viewportHeight - groupHeight) * 0.5F);
+        const float hintsHeight = hintLineHeight * static_cast<float>((18 + layout.hintColumns - 1) / layout.hintColumns);
+        const float top = std::max(margin, (viewportHeight - groupHeight - hintGap - hintsHeight) * 0.5F);
 
         layout.logoTop = top + (groupHeight - layout.logoSize) * 0.5F;
         layout.actionX0 = layout.contentLeft;
         layout.actionX1 = layout.contentLeft + layout.contentWidth;
         layout.actionY0 = top + (groupHeight - contentHeight) * 0.5F;
         layout.actionY1 = layout.actionY0 + actionHeight;
-        layout.hintTop = layout.actionY1 + hintGap;
-        layout.hintLeft = layout.contentLeft;
-        layout.hintColumns = 3;
-        layout.hintAlignLeft = true;
+        layout.hintTop = top + groupHeight + hintGap;
+        layout.hintLeft = layout.centerX;
+        layout.hintAlignLeft = false;
 
         layout.showDivider = true;
         layout.dividerX0 = layout.logoLeft + layout.logoSize + columnGap;
@@ -53,13 +53,15 @@ WelcomeLayout welcomeLayout(float viewportWidth, float viewportHeight, float sca
         return layout;
     }
 
-    layout.logoSize = 160.0F * scale;
+    layout.hintColumns = viewportWidth < 440.0F * scale ? 1 : 2;
+    const float rowsHeight = hintLineHeight * static_cast<float>((18 + layout.hintColumns - 1) / layout.hintColumns);
+    layout.logoSize = std::clamp(viewportHeight - actionHeight - hintGap - rowsHeight - margin * 2.0F - actionGap, 64.0F * scale, 160.0F * scale);
     layout.logoLeft = layout.centerX - layout.logoSize * 0.5F;
     const float actionWidth =
         std::min(340.0F * scale, std::max(0.0F, viewportWidth - margin * 2.0F));
     const float groupHeight =
         layout.logoSize + actionGap + actionHeight + hintGap +
-        hintLineHeight * 3.0F;
+        rowsHeight;
 
     layout.logoTop = std::max(margin, (viewportHeight - groupHeight) * 0.5F);
     layout.actionY0 = layout.logoTop + layout.logoSize + actionGap;
@@ -68,7 +70,6 @@ WelcomeLayout welcomeLayout(float viewportWidth, float viewportHeight, float sca
     layout.actionY1 = layout.actionY0 + actionHeight;
     layout.hintTop = layout.actionY1 + hintGap;
     layout.hintLeft = layout.centerX;
-    layout.hintColumns = 2;
     layout.hintAlignLeft = false;
     layout.contentLeft = layout.actionX0;
     layout.contentWidth = actionWidth;

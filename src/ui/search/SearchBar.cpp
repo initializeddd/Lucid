@@ -53,25 +53,38 @@ void SearchBar::toggle(PromptKind kind) {
 }
 
 void SearchBar::append(char32_t codepoint) {
-    if (!m_open || codepoint < 32 || codepoint > 126) {
-        return;
+    if (!m_open || codepoint < 32 || codepoint > 0x10FFFF ||
+        (codepoint >= 0xD800 && codepoint <= 0xDFFF)) return;
+    std::string encoded;
+    if (codepoint < 0x80) encoded.push_back(static_cast<char>(codepoint));
+    else if (codepoint < 0x800) {
+        encoded.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+        encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint < 0x10000) {
+        encoded.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+        encoded.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+        encoded.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+        encoded.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+        encoded.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
     }
-    if (m_query.size() >= kMaxQueryLength) {
-        return;
-    }
-    m_query.push_back(static_cast<char>(codepoint));
+    if (m_query.size() + encoded.size() <= kMaxQueryLength) m_query += encoded;
 }
 
 void SearchBar::backspace() {
-    if (!m_open || m_query.empty()) {
-        return;
-    }
-    m_query.pop_back();
+    if (!m_open || m_query.empty()) return;
+    std::size_t start = m_query.size() - 1;
+    while (start > 0 && (static_cast<unsigned char>(m_query[start]) & 0xC0) == 0x80) --start;
+    m_query.erase(start);
 }
 
 void SearchBar::setQuery(std::string query) {
     if (query.size() > kMaxQueryLength) {
-        query.resize(kMaxQueryLength);
+        std::size_t end = kMaxQueryLength;
+        while (end > 0 && (static_cast<unsigned char>(query[end]) & 0xC0) == 0x80) --end;
+        query.resize(end);
     }
     m_query = std::move(query);
 }

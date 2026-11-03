@@ -12,6 +12,8 @@ enum class CompilePlatform {
     MacOS,
     Windows,
     Linux,
+    FreeBSD,
+    OpenBSD,
 };
 
 struct CompileCommand {

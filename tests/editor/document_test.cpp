@@ -319,5 +319,30 @@ int main() {
         return 54;
     }
 
+    Document clicks = Document::fromUtf8("hello_world, next\nsecond");
+    clicks.setCursor(0, 4);
+    clicks.selectWord();
+    if (clicks.selectionUtf8() != "hello_world") return 56;
+    clicks.setCursor(0, 11);
+    clicks.selectWord();
+    if (clicks.selectionUtf8() != ",") return 57;
+    clicks.setCursor(0, 3);
+    clicks.selectLine();
+    if (clicks.selectionUtf8() != "hello_world, next\n") return 58;
+    clicks.setCursor(1, 2);
+    clicks.selectLine();
+    if (clicks.selectionUtf8() != "second") return 59;
+
+    Document words = Document::fromUtf8("hello, world\nnext");
+    words.setCursor(0, 0);
+    words.moveWordRight();
+    if (words.cursorColumn() != 5) return 60;
+    words.moveWordRight();
+    if (words.cursorColumn() != 7) return 61;
+    words.moveWordRight(true);
+    if (words.selectionUtf8() != "world") return 62;
+    words.moveWordLeft();
+    if (words.cursorColumn() != 7) return 63;
+
     return 0;
 }

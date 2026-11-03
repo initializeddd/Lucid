@@ -1,0 +1,51 @@
+#pragma once
+#include "debug/Protocol.hpp"
+#include <cstdint>
+#include <map>
+#include <string>
+#include <string_view>
+#include <vector>
+namespace lucid::debug {
+enum class State { Idle, Initializing, Launching, Running, Stopped, Ended, Failed };
+struct StackFrame { int id = 0, line = 0, column = 0; std::string name, path; };
+struct Variable { std::string name, value, type; int reference = 0; bool changed = false; };
+class Session {
+public:
+    void start(std::string program, std::string cwd, std::string source, std::vector<int> breakpoints);
+    void start(std::string program, std::string cwd, std::map<std::string, std::vector<int>> breakpoints);
+    [[nodiscard]] bool receive(std::string_view bytes, std::string& error);
+    [[nodiscard]] std::string takeOutbound();
+    [[nodiscard]] bool resume(std::string_view command, std::string& error);
+    void disconnect();
+    [[nodiscard]] bool setBreakpoints(std::vector<int> lines, std::string& error);
+    [[nodiscard]] bool setBreakpoints(std::string source, std::vector<int> lines, std::string& error);
+    [[nodiscard]] bool selectFrame(std::size_t index, std::string& error);
+    [[nodiscard]] bool expandVariable(std::size_t index, std::string& error);
+    [[nodiscard]] std::size_t selectedFrame() const noexcept { return m_selectedFrame; }
+    [[nodiscard]] bool expandedVariables() const noexcept { return m_expanded; }
+    [[nodiscard]] State state() const noexcept { return m_state; }
+    [[nodiscard]] const std::string& message() const noexcept { return m_message; }
+    [[nodiscard]] const std::vector<StackFrame>& stack() const noexcept { return m_stack; }
+    [[nodiscard]] const std::vector<Variable>& variables() const noexcept { return m_variables; }
+    [[nodiscard]] const std::string& output() const noexcept { return m_output; }
+    [[nodiscard]] const std::string& breakpointWarning() const noexcept { return m_breakpointWarning; }
+private:
+    void request(std::string command, std::string arguments);
+    void handle(std::string_view json);
+    State m_state = State::Idle;
+    FrameDecoder m_decoder;
+    int m_seq = 1, m_thread = 0;
+    std::uint64_t m_generation = 0;
+    bool m_initialized = false;
+    std::string m_program, m_cwd, m_source, m_outbound, m_message, m_output, m_breakpointWarning;
+    std::map<std::string, std::vector<int>> m_breakpoints;
+    std::vector<StackFrame> m_stack;
+    std::vector<Variable> m_variables;
+    std::map<std::string, std::string> m_previousValues;
+    std::string m_previousFrameName, m_previousFramePath;
+    std::size_t m_selectedFrame = 0;
+    bool m_expanded = false;
+    struct Pending { std::string command; std::uint64_t generation; };
+    std::map<int, Pending> m_requests;
+};
+}

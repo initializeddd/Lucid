@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Lucid (Beta)" Language="1033" Version="0.2.0" Manufacturer="Lucid contributors" UpgradeCode="E2F83EC3-EBF5-4AB2-950C-39E57A69F8AA">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Lucid is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder"><Directory Id="ProgramsFolder" Name="Programs"><Directory Id="INSTALLFOLDER" Name="Lucid" /></Directory></Directory>
+      <Directory Id="ProgramMenuFolder"><Directory Id="LucidMenu" Name="Lucid" /></Directory>
+    </Directory>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="Associations" Guid="AF9474CF-3386-498C-9E36-DF6F0EFDB485">
+        <RegistryValue Root="HKCU" Key="Software\Classes\Lucid.File" Value="Lucid text file" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Classes\Lucid.File\DefaultIcon" Value="[INSTALLFOLDER]Lucid.exe,0" Type="string" />
+        <RegistryValue Root="HKCU" Key="Software\Classes\Lucid.File\shell\open\command" Value="&quot;[INSTALLFOLDER]Lucid.exe&quot; &quot;%1&quot;" Type="string" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.txt\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.md\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.c\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.h\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.cc\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.cpp\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.cxx\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.hpp\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.py\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.js\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.jsx\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.ts\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.tsx\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.json\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.html\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.css\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.xml\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.yaml\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.yml\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.toml\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.rs\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.go\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.java\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+          <RegistryValue Root="HKCU" Key="Software\Classes\.sh\OpenWithProgids" Name="Lucid.File" Type="string" Value="" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="LucidMenu">
+      <Component Id="StartMenuShortcut" Guid="7D319C83-5C1A-4555-85E3-7C8BFCF50484">
+        <Shortcut Id="LucidShortcut" Name="Lucid (Beta)" Target="[INSTALLFOLDER]Lucid.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveLucidMenu" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Lucid" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <Feature Id="Main" Title="Lucid" Level="1">
+      <ComponentGroupRef Id="Payload" />
+      <ComponentRef Id="Associations" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Product>
+</Wix>

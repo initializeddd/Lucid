@@ -1,0 +1,36 @@
+name: BSD builds
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  freebsd:
+    name: FreeBSD native build and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: '14.3'
+          prepare: |
+            pkg install -y cmake ninja git glfw vulkan-headers vulkan-loader glslang openssl
+          run: |
+            cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
+            cmake --build build-bsd --parallel 2
+            ctest --test-dir build-bsd --output-on-failure
+  openbsd:
+    name: OpenBSD native build and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/openbsd-vm@v1
+        with:
+          prepare: |
+            pkg_add cmake ninja git glfw vulkan-headers vulkan-loader glslang
+          run: |
+            cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
+            cmake --build build-bsd --parallel 2
+            ctest --test-dir build-bsd --output-on-failure

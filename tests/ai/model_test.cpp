@@ -1,0 +1,51 @@
+#include "ai/LocalModel.hpp"
+#include "ai/CodeCleanup.hpp"
+#include "ai/OpenRouter.hpp"
+#include "ai/ModelDownload.hpp"
+
+#include <atomic>
+#include <cstdlib>
+#include <filesystem>
+#include <string>
+
+int main() {
+    std::string output, error;
+    if (lucid::ai::generate(std::filesystem::path("missing-lucid-model.gguf"), "test", output, error) || error.empty()) return 1;
+    std::filesystem::path path;
+    if (lucid::ai::ensureModel({}, path, error) || error.empty()) return 2;
+    std::atomic_bool cancelled{true};
+    if (lucid::ai::generate("unused.gguf", "test", output, error, &cancelled) ||
+        error != "AI request cancelled") return 3;
+    if (const char* model = std::getenv("LUCID_TEST_MODEL"); model && *model) {
+        const auto modelPath = std::filesystem::path(model);
+        std::filesystem::path verified;
+        if (!lucid::ai::ensureModel(modelPath.parent_path(), verified, error) || verified != modelPath) return 4;
+        if (!lucid::ai::generate(verified, "Write a Python function that adds two numbers.", output, error) ||
+            output.empty()) return 5;
+    }
+    auto doc = lucid::editor::Document::fromUtf8("style_before();\nold_code();\nstyle_after();");
+    std::string request;
+    if (lucid::ai::cleanupRequest(doc, "sample.cpp", request, error)) return 6;
+    doc.setCursor(1, 0); doc.extendSelectionTo(1, 11);
+    if (!lucid::ai::cleanupRequest(doc, "sample.cpp", request, error) ||
+        request.find("style_before();") == std::string::npos ||
+        request.find("old_code();") == std::string::npos ||
+        request.find("style_after();") == std::string::npos) return 7;
+    if (const char* model = std::getenv("LUCID_TEST_MODEL"); model && *model) {
+        if (!lucid::ai::generate(model, request, output, error) ||
+            !lucid::ai::cleanupResponse(output, error) || output.empty()) return 11;
+        if (!lucid::ai::generate(model, "Explain in at most three sentences: paused in main at line 3, n = 7. State uncertainty.", output, error) || output.empty()) return 16;
+    }
+    std::string fenced = "```cpp\nclean();\n```\n";
+    if (!lucid::ai::cleanupResponse(fenced, error) || fenced != "clean();\n") return 8;
+    std::string incomplete = "```cpp\npartial";
+    if (lucid::ai::cleanupResponse(incomplete, error) || error.empty()) return 9;
+    std::string empty = "  ";
+    if (lucid::ai::cleanupResponse(empty, error)) return 10;
+    const auto payload = lucid::ai::openRouterRequest("vendor/model", "quoted \"state\"");
+    if (payload.find("vendor/model") == std::string::npos || payload.find("\\\"state\\\"") == std::string::npos) return 12;
+    if (!lucid::ai::parseOpenRouterResponse(R"({"choices":[{"finish_reason":"stop","message":{"content":"explanation"}}]})", output, error) || output != "explanation") return 13;
+    if (lucid::ai::parseOpenRouterResponse(R"({"choices":[{"finish_reason":"length","message":{"content":"partial"}}]})", output, error)) return 14;
+    if (lucid::ai::generateOpenRouter("bad\nkey", "model", "prompt", output, error) || error.empty()) return 15;
+    return 0;
+}

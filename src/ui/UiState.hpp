@@ -14,6 +14,34 @@ enum class PromptKind {
     Project,
     File,
     Function,
+    Ai,
+    AiSettings,
+    AiModelInput,
+    AiKeyInput,
+    Find,
+    Replace,
+    OpenFiles,
+    RecoveryList,
+    RecoveryDetail,
+    ModuleList,
+    ModuleActions,
+    ModuleCommands,
+    DebugMenu,
+    DebugInput,
+    DebugStack,
+    DebugVariables,
+    DebugOutput,
+    GitChanges,
+    GitFile,
+    GitDiff,
+    GitCommitReview,
+    GitCommitInput,
+    TaskList,
+    TaskActions,
+    TaskSubtasks,
+    TaskHistory,
+    TaskTier,
+    TaskInput,
 };
 
 enum class SettingsControl {
@@ -36,6 +64,9 @@ enum class SettingsControl {
     CursorBlock,
     CursorUnderscore,
     CursorKitty,
+    IconClassic,
+    IconAccent,
+    IconOutline,
     PrimaryColor0,
     PrimaryColor1,
     PrimaryColor2,
@@ -46,6 +77,7 @@ enum class SettingsControl {
     PrimaryColor7,
     BackgroundMotion,
     OpenSettingsJson,
+    AiSettings,
     Done,
 };
 
@@ -56,6 +88,7 @@ enum class SuggestionKind {
     CreateDirectory,
     Project,
     Function,
+    Task,
 };
 
 struct PathSuggestion {
@@ -67,6 +100,7 @@ struct PathSuggestion {
 struct FrameState {
     bool commandVisible = false;
     std::string_view commandQuery;
+    std::string_view commandPlaceholder;
     PromptKind commandKind = PromptKind::File;
     double timeSeconds = 0.0;
     float animationTime = 0.0F;
@@ -83,6 +117,7 @@ struct FrameState {
     bool showWelcome = true;
     bool hasProject = false;
     bool welcomeActionHovered = false;
+    int welcomeShortcutScroll = 0;
     std::string_view projectName;
 
     bool settingsErrorVisible = false;
@@ -92,6 +127,7 @@ struct FrameState {
     bool settingsPanelVisible = false;
     SettingsControl settingsHovered = SettingsControl::None;
     std::string_view settingsTheme;
+    std::string_view settingsIconTheme;
     float settingsAnimationSpeed = 1.0F;
     float settingsZoomFactor = 1.0F;
     bool settingsShowSyntaxErrors = true;
@@ -127,6 +163,9 @@ struct FrameState {
     int selectionEndColumn = 0;
 
     std::vector<int> compileFunctionLines;
+    std::vector<int> debugBreakpointLines;
+    int debugStoppedLine = -1;
+    std::string_view debugInline;
 
     bool compileTerminalVisible = false;
     bool compileTerminalStandalone = false;
@@ -157,6 +196,9 @@ struct FrameState {
     float diagnosticOffsetX = 0.0F;
     float diagnosticOffsetY = 0.0F;
 
+    bool completionVisible = false;
+    std::vector<std::string_view> completions;
+    int selectedCompletion = 0;
     std::vector<PathSuggestion> suggestions;
     int selectedSuggestion = -1;
 

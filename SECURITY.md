@@ -13,16 +13,17 @@ release.
 
 ## Reporting a vulnerability
 
-Please do **not** open a public issue for a security problem. Instead:
+Please do **not** open a public issue for a security problem.
 
-1. Use GitHub's private vulnerability reporting: **Security → Report a vulnerability** in this
-   repository.
-2. Include a description, affected version or commit, reproduction steps, and the impact you
-   expect.
-3. Allow time for a fix before disclosing the issue publicly.
+- For this private repository, contact the repository owner through an existing private channel.
+  Collaborators with the necessary permissions can also create a draft security advisory in the
+  repository's **Security** tab.
+- If private vulnerability reporting is available and enabled after the repository becomes public,
+  use **Security → Report a vulnerability**.
+- Include the affected version or commit, reproduction steps, and expected impact. Avoid sharing
+  sensitive details in an issue or discussion.
 
-You will receive an acknowledgement as soon as possible. Confirmed issues are fixed on `main` and
-described in the release notes once a fix is available.
+Maintainers will acknowledge the report as soon as possible and coordinate a fix and disclosure.
 
 ## Scope
 

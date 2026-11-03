@@ -1,17 +1,21 @@
 #include "platform/app/PlatformApp.hpp"
 
 #import <Cocoa/Cocoa.h>
+#import <Carbon/Carbon.h>
 
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include <GLFW/glfw3native.h>
 
+#include <algorithm>
 #include <string>
+#include <cstring>
+#include <vector>
 
 namespace lucid::platform {
 namespace {
 
-enum MenuCommand : NSInteger {
+enum LucidMenuCommand : NSInteger {
     CommandOpenProject = 1,
     CommandOpenFile,
     CommandSave,
@@ -28,12 +32,27 @@ enum MenuCommand : NSInteger {
     CommandSelectAll,
     CommandDeleteFile,
     CommandDeleteProject,
+    CommandComplete,
+    CommandAskAi,
+    CommandAiCleanup,
+    CommandFind,
+    CommandReplace,
+    CommandSwitchFile,
+    CommandTasks,
+    CommandGitReview,
+    CommandModules,
+    CommandRecovery,
+    CommandZoomIn, CommandZoomOut, CommandZoomReset, CommandContrast,
+    CommandDebugger, CommandBreakpoint,
 };
 
 MenuActions g_actions;
 id g_menuTarget = nil;
+std::function<void(std::string)> g_openFileHandler;
+std::vector<std::string> g_pendingFiles;
+id g_openFilesTarget = nil;
 
-NSMenuItem* customItem(NSString* title, MenuCommand command, NSString* key,
+NSMenuItem* customItem(NSString* title, LucidMenuCommand command, NSString* key,
                        NSEventModifierFlags modifiers) {
     NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title
                                                   action:@selector(performMenuCommand:)
@@ -62,6 +81,23 @@ NSMenu* submenu(NSString* title, NSMenuItem* parent) {
 } // namespace
 } // namespace lucid::platform
 
+@interface LucidOpenFilesTarget : NSObject
+- (void)handleOpenDocuments:(NSAppleEventDescriptor*)event reply:(NSAppleEventDescriptor*)reply;
+@end
+@implementation LucidOpenFilesTarget
+- (void)handleOpenDocuments:(NSAppleEventDescriptor*)event reply:(NSAppleEventDescriptor*)reply {
+    (void)reply;
+    NSAppleEventDescriptor* files = [event paramDescriptorForKeyword:keyDirectObject];
+    for (NSInteger i = 1; i <= [files numberOfItems]; ++i) {
+        NSURL* url = [[files descriptorAtIndex:i] fileURLValue];
+        if (!url.isFileURL || !url.path.UTF8String) continue;
+        std::string path(url.path.UTF8String);
+        if (lucid::platform::g_openFileHandler) lucid::platform::g_openFileHandler(std::move(path));
+        else lucid::platform::g_pendingFiles.push_back(std::move(path));
+    }
+}
+@end
+
 @interface LucidMenuTarget : NSObject
 - (void)performMenuCommand:(id)sender;
 @end
@@ -69,8 +105,44 @@ NSMenu* submenu(NSString* title, NSMenuItem* parent) {
 @implementation LucidMenuTarget
 - (void)performMenuCommand:(id)sender {
     using namespace lucid::platform;
-    const MenuCommand command = static_cast<MenuCommand>([sender tag]);
+    const LucidMenuCommand command = static_cast<LucidMenuCommand>([sender tag]);
     switch (command) {
+    case CommandDebugger: if (g_actions.debugger) g_actions.debugger(); break;
+    case CommandBreakpoint: if (g_actions.breakpoint) g_actions.breakpoint(); break;
+    case CommandZoomIn: if (g_actions.zoomIn) g_actions.zoomIn(); break;
+    case CommandZoomOut: if (g_actions.zoomOut) g_actions.zoomOut(); break;
+    case CommandZoomReset: if (g_actions.zoomReset) g_actions.zoomReset(); break;
+    case CommandContrast: if (g_actions.contrast) g_actions.contrast(); break;
+    case CommandRecovery:
+        if (g_actions.recovery) g_actions.recovery();
+        break;
+    case CommandModules:
+        if (g_actions.modules) g_actions.modules();
+        break;
+    case CommandGitReview:
+        if (g_actions.gitReview) g_actions.gitReview();
+        break;
+    case CommandTasks:
+        if (g_actions.tasks) g_actions.tasks();
+        break;
+    case CommandSwitchFile:
+        if (g_actions.switchFile) g_actions.switchFile();
+        break;
+    case CommandReplace:
+        if (g_actions.replace) g_actions.replace();
+        break;
+    case CommandFind:
+        if (g_actions.find) g_actions.find();
+        break;
+    case CommandComplete:
+        if (g_actions.complete) g_actions.complete();
+        break;
+    case CommandAiCleanup:
+        if (g_actions.aiCleanup) g_actions.aiCleanup();
+        break;
+    case CommandAskAi:
+        if (g_actions.askAi) g_actions.askAi();
+        break;
     case CommandOpenProject:
         if (g_actions.openProject) g_actions.openProject();
         break;
@@ -125,6 +197,40 @@ NSMenu* submenu(NSString* title, NSMenuItem* parent) {
 
 namespace lucid::platform {
 
+void setNativeAppIcon(const unsigned char* rgba, int width, int height) {
+    @autoreleasepool {
+        NSBitmapImageRep* bitmap = [[NSBitmapImageRep alloc]
+            initWithBitmapDataPlanes:nil pixelsWide:width pixelsHigh:height
+            bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+            colorSpaceName:NSDeviceRGBColorSpace bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
+            bytesPerRow:width * 4 bitsPerPixel:32];
+        if (!bitmap) return;
+        std::memcpy(bitmap.bitmapData, rgba, static_cast<std::size_t>(width * height * 4));
+        NSImage* image = [[NSImage alloc] initWithSize:NSMakeSize(width, height)];
+        [image addRepresentation:bitmap];
+        [NSApp setApplicationIconImage:image];
+    }
+}
+
+void prepareOpenFiles() {
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        if (!g_openFilesTarget) g_openFilesTarget = [[LucidOpenFilesTarget alloc] init];
+        [[NSAppleEventManager sharedAppleEventManager] setEventHandler:g_openFilesTarget
+            andSelector:@selector(handleOpenDocuments:reply:)
+            forEventClass:kCoreEventClass andEventID:kAEOpenDocuments];
+    }
+}
+
+void setOpenFileHandler(std::function<void(std::string)> handler) {
+    g_openFileHandler = std::move(handler);
+    if (g_openFileHandler) {
+        auto pending = std::move(g_pendingFiles);
+        g_pendingFiles.clear();
+        for (auto& path : pending) g_openFileHandler(std::move(path));
+    }
+}
+
 void installApplicationMenu(const MenuActions& actions) {
     @autoreleasepool {
         g_actions = actions;
@@ -176,6 +282,7 @@ void installApplicationMenu(const MenuActions& actions) {
         [fileMenu addItem:customItem(@"Open File…", CommandOpenFile, @"n",
                                      NSEventModifierFlagCommand)];
         [fileMenu addItem:[NSMenuItem separatorItem]];
+        [fileMenu addItem:customItem(@"Switch Open File…", CommandSwitchFile, @"e", NSEventModifierFlagCommand)];
         [fileMenu addItem:customItem(@"Save", CommandSave, @"s",
                                      NSEventModifierFlagCommand)];
         [fileMenu addItem:customItem(@"Close File", CommandCloseFile, @"w",
@@ -205,6 +312,22 @@ void installApplicationMenu(const MenuActions& actions) {
                                      NSEventModifierFlagCommand)];
         [editMenu addItem:customItem(@"Select All", CommandSelectAll, @"a",
                                      NSEventModifierFlagCommand)];
+        [editMenu addItem:[NSMenuItem separatorItem]];
+        [editMenu addItem:customItem(@"Find…", CommandFind, @"f", NSEventModifierFlagCommand)];
+        [editMenu addItem:customItem(@"Replace…", CommandReplace, @"f", NSEventModifierFlagCommand | NSEventModifierFlagOption)];
+        [editMenu addItem:customItem(@"Complete Functions", CommandComplete, @" ",
+                                     NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+        [editMenu addItem:customItem(@"Clean Up Selection with AI…", CommandAiCleanup, @"l", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+        [editMenu addItem:customItem(@"Ask AI…", CommandAskAi, @"a",
+                                     NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+
+        NSMenuItem* viewItem = [[NSMenuItem alloc] initWithTitle:@"View" action:nil keyEquivalent:@""];
+        [mainMenu addItem:viewItem];
+        NSMenu* viewMenu = submenu(@"View", viewItem);
+        [viewMenu addItem:customItem(@"Increase Text Size", CommandZoomIn, @"=", NSEventModifierFlagCommand)];
+        [viewMenu addItem:customItem(@"Decrease Text Size", CommandZoomOut, @"-", NSEventModifierFlagCommand)];
+        [viewMenu addItem:customItem(@"Reset Text Size", CommandZoomReset, @"0", NSEventModifierFlagCommand)];
+        [viewMenu addItem:customItem(@"Toggle High Contrast", CommandContrast, @"u", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
 
         NSMenuItem* runItem = [[NSMenuItem alloc] initWithTitle:@"Run"
                                                          action:nil
@@ -217,6 +340,13 @@ void installApplicationMenu(const MenuActions& actions) {
                                     CommandRunFunction, @"r",
                                     NSEventModifierFlagCommand |
                                         NSEventModifierFlagShift)];
+        [runMenu addItem:[NSMenuItem separatorItem]];
+        [runMenu addItem:customItem(@"Debugger…", CommandDebugger, @"d", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+        [runMenu addItem:customItem(@"Toggle Breakpoint", CommandBreakpoint, @"b", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+        [runMenu addItem:customItem(@"Recovery…", CommandRecovery, @"y", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+        [runMenu addItem:customItem(@"Modules…", CommandModules, @"m", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+        [runMenu addItem:customItem(@"Git Review…", CommandGitReview, @"g", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
+        [runMenu addItem:customItem(@"Tasks…", CommandTasks, @"t", NSEventModifierFlagCommand | NSEventModifierFlagShift)];
         [runMenu addItem:customItem(@"Close Terminal", CommandCloseTerminal, @"",
                                     0)];
 
@@ -261,6 +391,28 @@ void configureApplicationWindow(void* nativeWindow, std::string_view title) {
                                   NSWindowStyleMaskResizable |
                                   NSWindowStyleMaskFullSizeContentView];
 
+    }
+}
+
+void updateAccessibility(void* nativeWindow, std::string_view label, std::string_view value,
+                         std::size_t selectionStart, std::size_t selectionLength) {
+    if (nativeWindow == nullptr) return;
+    @autoreleasepool {
+        NSWindow* window = glfwGetCocoaWindow(static_cast<GLFWwindow*>(nativeWindow));
+        NSView* view = window.contentView;
+        if (!view) return;
+        NSString* name = [[NSString alloc] initWithBytes:label.data() length:label.size() encoding:NSUTF8StringEncoding];
+        NSString* text = [[NSString alloc] initWithBytes:value.data() length:value.size() encoding:NSUTF8StringEncoding];
+        if (!name || !text) return;
+        [view setAccessibilityElement:YES];
+        [view setAccessibilityRole:NSAccessibilityTextAreaRole];
+        [view setAccessibilityLabel:name];
+        [view setAccessibilityValue:text];
+        const NSUInteger start = std::min<NSUInteger>(selectionStart, text.length);
+        const NSUInteger length = std::min<NSUInteger>(selectionLength, text.length - start);
+        [view setAccessibilitySelectedTextRange:NSMakeRange(start, length)];
+        NSAccessibilityPostNotification(view, NSAccessibilityValueChangedNotification);
+        NSAccessibilityPostNotification(view, NSAccessibilitySelectedTextChangedNotification);
     }
 }
 

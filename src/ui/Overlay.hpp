@@ -55,9 +55,12 @@ struct SettingsPanelLayout {
     Rect highlightCurrentLine;
     Rect cursorBlink;
     Rect cursorLabel;
+    Rect iconLabel;
+    std::array<Rect, 3> iconButtons{};
     std::array<Rect, 4> cursorButtons{};
     Rect backgroundMotion;
     Rect openSettingsJson;
+    Rect aiSettings;
     Rect done;
 };
 

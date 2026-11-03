@@ -40,7 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            ninja-build libglfw3-dev libvulkan-dev vulkan-tools glslang-tools \
+            ninja-build libglfw3-dev libvulkan-dev vulkan-tools glslang-tools libssl-dev \
             libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
             libwayland-dev libxkbcommon-dev
 
@@ -70,23 +70,32 @@ jobs:
         if: runner.os == 'Windows'
         run: cmake --build build --config Release --parallel
 
+      - name: Install DMG builder (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/dmgbuild"
+          "$RUNNER_TEMP/dmgbuild/bin/pip" install 'dmgbuild==1.6.5'
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist
+          packaging/macos/bundle-libraries.sh build/bin/Lucid.app
           ditto -c -k --keepParent \
             build/bin/Lucid.app "dist/Lucid-${GITHUB_REF_NAME}-macOS.zip"
+          DMGBUILD="$RUNNER_TEMP/dmgbuild/bin/dmgbuild" packaging/macos/create-dmg.sh build/bin/Lucid.app "dist/Lucid-${GITHUB_REF_NAME}-macOS.dmg"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           name="Lucid-${GITHUB_REF_NAME}-Linux"
-          stage="dist/${name}"
+          stage="${RUNNER_TEMP}/${name}"
           mkdir -p "${stage}/lib" dist
           cp build/bin/lucid "${stage}/"
           cp -r build/bin/assets "${stage}/assets"
           cp LICENSE "${stage}/LICENSE"
+          cp packaging/linux/dev.lucid.editor.desktop packaging/linux/dev.lucid.editor.png "${stage}/"
           printf '%s\n' \
             "Lucid (Beta)" \
             "" \
@@ -105,17 +114,34 @@ jobs:
             exit 1
           fi
           tar -czf "dist/${name}.tar.gz" -C "${stage}" .
+          sed "s/@LUCID_RELEASE_TAG@/${GITHUB_REF_NAME}/g" packaging/linux/install.sh > dist/install.sh
+
+      - name: Install WiX (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install wixtoolset --no-progress -y
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $exe = Get-ChildItem build -Recurse -Filter Lucid.exe |
-            Select-Object -First 1
-          Compress-Archive -Path "$($exe.DirectoryName)\Lucid.exe", `
-            "$($exe.DirectoryName)\assets" `
+          $exe = Get-ChildItem build -Recurse -Filter Lucid.exe | Select-Object -First 1
+          if (-not $exe) { throw "Lucid.exe not found" }
+          $stage = Join-Path $env:RUNNER_TEMP 'lucid-msi-payload'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item $exe.FullName $stage
+          Copy-Item "$($exe.DirectoryName)\assets" $stage -Recurse
+          Compress-Archive -Path "$stage\Lucid.exe", "$stage\assets" `
             -DestinationPath "dist\Lucid-$env:GITHUB_REF_NAME-Windows.zip"
+          $wix = (Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset*\bin\heat.exe" | Select-Object -First 1).DirectoryName
+          if (-not $wix) { throw "WiX 3 was not found" }
+          & "$wix\heat.exe" dir $stage -cg Payload -dr INSTALLFOLDER -srd -sreg -sfrag -ag -var var.SourceDir -out "$env:RUNNER_TEMP\Payload.wxs"
+          if ($LASTEXITCODE -ne 0) { throw "WiX harvest failed" }
+          & "$wix\candle.exe" -arch x64 "-dSourceDir=$stage" packaging/windows/Lucid.wxs "$env:RUNNER_TEMP\Payload.wxs" -out "$env:RUNNER_TEMP\"
+          if ($LASTEXITCODE -ne 0) { throw "WiX compilation failed" }
+          & "$wix\light.exe" "$env:RUNNER_TEMP\Lucid.wixobj" "$env:RUNNER_TEMP\Payload.wixobj" -out "dist\Lucid-$env:GITHUB_REF_NAME-Windows.msi"
+          if ($LASTEXITCODE -ne 0) { throw "WiX linking failed" }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -124,9 +150,54 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  package-freebsd:
+    name: Package FreeBSD
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: '14.3'
+          envs: 'GITHUB_REF_NAME'
+          prepare: |
+            pkg install -y cmake ninja git glfw vulkan-headers vulkan-loader glslang openssl
+          run: |
+            cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
+            cmake --build build-bsd --parallel 2
+            ctest --test-dir build-bsd --output-on-failure
+            sh packaging/bsd/package.sh "$GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-FreeBSD
+          path: dist/*
+          if-no-files-found: error
+
+  package-openbsd:
+    name: Package OpenBSD
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/openbsd-vm@v1
+        with:
+          envs: 'GITHUB_REF_NAME'
+          prepare: |
+            pkg_add cmake ninja git glfw vulkan-headers vulkan-loader glslang
+          run: |
+            cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
+            cmake --build build-bsd --parallel 2
+            ctest --test-dir build-bsd --output-on-failure
+            sh packaging/bsd/package.sh "$GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-OpenBSD
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: Publish release
-    needs: package
+    needs: [package, package-freebsd, package-openbsd]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
@@ -137,10 +208,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Create checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           name: Lucid (Beta) ${{ github.ref_name }}
           files: dist/*
           generate_release_notes: true
-          make_latest: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}

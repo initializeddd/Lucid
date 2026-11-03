@@ -25,6 +25,8 @@
 
 namespace lucid::text {
 namespace {
+std::filesystem::path g_launchPath;
+
 
 [[nodiscard]] std::vector<std::uint8_t> readFile(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -70,6 +72,7 @@ namespace {
     const std::filesystem::path canonical = std::filesystem::canonical(buffer, error);
     return error ? std::filesystem::path(buffer) : canonical;
 #else
+    if (!g_launchPath.empty()) return g_launchPath;
     std::error_code error;
     const std::filesystem::path path = std::filesystem::read_symlink("/proc/self/exe", error);
     return error ? std::filesystem::path() : path;
@@ -94,6 +97,9 @@ namespace {
     candidates.emplace_back("C:/Windows/Fonts/consola.ttf");
     candidates.emplace_back("C:/Windows/Fonts/arial.ttf");
 #else
+    candidates.emplace_back("/usr/local/share/fonts/dejavu/DejaVuSansMono.ttf");
+    candidates.emplace_back("/usr/local/share/fonts/TTF/DejaVuSansMono.ttf");
+    candidates.emplace_back("/usr/X11R6/lib/X11/fonts/TTF/DejaVuSansMono.ttf");
     candidates.emplace_back("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
     candidates.emplace_back("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf");
     candidates.emplace_back("/usr/share/fonts/TTF/DejaVuSans.ttf");
@@ -116,6 +122,29 @@ namespace {
 }
 
 } // namespace
+
+void setExecutablePath(std::string_view argv0) {
+    if (argv0.empty()) return;
+    std::filesystem::path path{std::string(argv0)};
+    std::error_code error;
+    if (path.has_parent_path()) {
+        g_launchPath = std::filesystem::canonical(path, error);
+        return;
+    }
+    const char* search = std::getenv("PATH");
+    if (!search) return;
+    std::string_view paths(search);
+    while (true) {
+        const auto separator = paths.find(':');
+        const auto directory = paths.substr(0, separator);
+        const auto candidate = std::filesystem::path(directory.empty() ? "." : std::string(directory)) / path;
+        error.clear();
+        auto resolved = std::filesystem::canonical(candidate, error);
+        if (!error && std::filesystem::is_regular_file(resolved, error) && !error) { g_launchPath = std::move(resolved); return; }
+        if (separator == std::string_view::npos) break;
+        paths.remove_prefix(separator + 1);
+    }
+}
 
 FontAtlas::FontAtlas(int pixelHeight) : m_pixelHeight(pixelHeight) {
     if (pixelHeight <= 0) {

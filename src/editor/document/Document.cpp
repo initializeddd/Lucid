@@ -220,6 +220,33 @@ std::string Document::lineUtf8(std::size_t index) const {
     return encodeUtf8(line(index));
 }
 
+void Document::selectWord() {
+    const auto lineIndex = m_cursorLine;
+    const auto& text = m_lines[lineIndex];
+    if (text.empty()) return;
+    auto category = [](char32_t c) {
+        if (c == U' ' || c == U'\t') return 0;
+        if ((c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z') ||
+            (c >= U'0' && c <= U'9') || c == U'_' || c >= 128) return 1;
+        return 2;
+    };
+    auto index = std::min(m_cursorColumn, text.size() - 1);
+    const int kind = category(text[index]);
+    auto start = index;
+    auto end = index + 1;
+    while (start > 0 && category(text[start - 1]) == kind) --start;
+    while (end < text.size() && category(text[end]) == kind) ++end;
+    setCursor(lineIndex, start);
+    extendSelectionTo(lineIndex, end);
+}
+
+void Document::selectLine() {
+    const auto lineIndex = m_cursorLine;
+    setCursor(lineIndex, 0);
+    if (lineIndex + 1 < m_lines.size()) extendSelectionTo(lineIndex + 1, 0);
+    else extendSelectionTo(lineIndex, m_lines[lineIndex].size());
+}
+
 void Document::setCursor(std::size_t lineIndex, std::size_t column) {
     m_selectionActive = false;
     m_cursorLine = lineIndex;
@@ -725,6 +752,39 @@ void Document::deleteForward() {
     m_lines[m_cursorLine] += m_lines[m_cursorLine + 1];
     m_lines.erase(m_lines.begin() + static_cast<std::ptrdiff_t>(m_cursorLine + 1));
     markEdited();
+}
+
+void Document::moveWordLeft(bool extendSelection) {
+    if (extendSelection) beginExtend(); else clearSelection();
+    if (m_cursorColumn == 0 && m_cursorLine > 0) {
+        --m_cursorLine;
+        m_cursorColumn = m_lines[m_cursorLine].size();
+    } else {
+        const auto& text = m_lines[m_cursorLine];
+        while (m_cursorColumn > 0 && (text[m_cursorColumn - 1] == U' ' || text[m_cursorColumn - 1] == U'\t')) --m_cursorColumn;
+        if (m_cursorColumn > 0) {
+            const auto word = [](char32_t c) { return (c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z') || (c >= U'0' && c <= U'9') || c == U'_' || c >= 128; };
+            const bool kind = word(text[m_cursorColumn - 1]);
+            while (m_cursorColumn > 0 && text[m_cursorColumn - 1] != U' ' && text[m_cursorColumn - 1] != U'\t' && word(text[m_cursorColumn - 1]) == kind) --m_cursorColumn;
+        }
+    }
+    m_preferredColumn = m_cursorColumn;
+}
+
+void Document::moveWordRight(bool extendSelection) {
+    if (extendSelection) beginExtend(); else clearSelection();
+    const auto& text = m_lines[m_cursorLine];
+    if (m_cursorColumn == text.size() && m_cursorLine + 1 < m_lines.size()) {
+        ++m_cursorLine; m_cursorColumn = 0;
+    } else {
+        const auto word = [](char32_t c) { return (c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z') || (c >= U'0' && c <= U'9') || c == U'_' || c >= 128; };
+        if (m_cursorColumn < text.size() && text[m_cursorColumn] != U' ' && text[m_cursorColumn] != U'\t') {
+            const bool kind = word(text[m_cursorColumn]);
+            while (m_cursorColumn < text.size() && text[m_cursorColumn] != U' ' && text[m_cursorColumn] != U'\t' && word(text[m_cursorColumn]) == kind) ++m_cursorColumn;
+        }
+        while (m_cursorColumn < text.size() && (text[m_cursorColumn] == U' ' || text[m_cursorColumn] == U'\t')) ++m_cursorColumn;
+    }
+    m_preferredColumn = m_cursorColumn;
 }
 
 void Document::moveLeft(bool extendSelection) {

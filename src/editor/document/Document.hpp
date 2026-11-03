@@ -35,9 +35,12 @@ public:
     [[nodiscard]] std::string lineUtf8(std::size_t index) const;
 
     void markSaved() noexcept { m_dirty = false; }
+    void markRecovered() noexcept { m_dirty = true; }
     void setCursor(std::size_t line, std::size_t column);
     void clearSelection() noexcept { m_selectionActive = false; }
     void selectAll();
+    void selectWord();
+    void selectLine();
     void extendSelectionTo(std::size_t line, std::size_t column);
 
     void insert(char32_t codepoint);
@@ -61,6 +64,8 @@ public:
     void redo();
     void backspace();
     void deleteForward();
+    void moveWordLeft(bool extendSelection = false);
+    void moveWordRight(bool extendSelection = false);
     void moveLeft(bool extendSelection = false);
     void moveRight(bool extendSelection = false);
     void moveUp(bool extendSelection = false);

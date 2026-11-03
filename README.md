@@ -82,6 +82,8 @@ Download [Lucid v0.2.1-lucid.1](https://github.com/initializeddd/Lucid/releases/
 | Windows | MSI and standalone ZIP | MSI requires administrator access; debugger integration is not yet validated |
 | FreeBSD and OpenBSD | Standalone archives | Native tests pass; GLFW, Vulkan and system crypto libraries must be installed separately |
 
+The macOS build and local automated tests have been exercised on macOS 27.0.1.
+
 The release includes SHA-256 checksums. Beta builds are not signed with distribution certificates,
 so macOS Gatekeeper and Windows SmartScreen may warn on first launch. BSD builds have not had a
 full graphical desktop smoke test.

@@ -32,8 +32,7 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Beta software.** The latest published build is `v0.1.0-beta.4`. This working tree targets
-> `v0.2.0-beta.1` and includes unreleased features described below; they are not in that download.
+> **Beta software.** Version `v0.2.0-beta.1` includes features at different stages of maturity.
 > File formats and behavior may change. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
 ## At a glance
@@ -72,36 +71,24 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-The currently published beta bundles are attached to [v0.1.0-beta.4](https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.4):
+Download [Lucid v0.2.0-beta.1](https://github.com/initializeddd/Lucid/releases/tag/v0.2.0-beta.1). The repository and release are private and require GitHub access.
 
-| Platform | Artifact | Notes |
+| Platform | Artifacts | Notes |
 | --- | --- | --- |
-| macOS | `Lucid-v0.1.0-beta.4-macOS.zip` | Ad-hoc signed; unzip and open `Lucid.app` |
-| Linux | `Lucid-v0.1.0-beta.4-Linux.tar.gz` | Extract and run `./lucid`; shared libraries are bundled |
-| Windows | `Lucid-v0.1.0-beta.4-Windows.zip` | Extract and run `Lucid.exe`; needs the Vulkan runtime |
+| macOS | DMG and standalone ZIP | Ad-hoc signed, not notarized |
+| Linux | Standalone archive and installer script | A working Vulkan driver is required |
+| Windows | MSI and standalone ZIP | MSI requires administrator access; debugger integration is not yet validated |
+| FreeBSD and OpenBSD | Standalone archives | Native tests pass; GLFW, Vulkan and system crypto libraries must be installed separately |
 
-The Linux tarball is self-contained: it ships `libglfw`, the Vulkan loader and the X11
-runtime libraries next to the binary, so no development packages are required. A working Vulkan
-driver is still needed to render.
+The release includes SHA-256 checksums. Beta builds are not signed with distribution certificates,
+so macOS Gatekeeper and Windows SmartScreen may warn on first launch. BSD builds have not had a
+full graphical desktop smoke test.
 
-Beta builds are not notarized or code-signed for distribution. macOS Gatekeeper and Windows
-SmartScreen may warn on first launch; build from source below if you prefer.
-
-### Installer builds for the next release
-
-The unreleased workflow is configured to build a themed macOS DMG and a Windows MSI alongside the
-standalone archives, plus a per-user Linux installer. These packages are not available in the
-current published release. After a compatible release is published, its Linux installer can be run with:
-
-```sh
-curl -fsSL https://github.com/initializeddd/Lucid/releases/download/v0.2.0-beta.1/install.sh | sh
-```
-
-The command will work after that beta is published and requires a publicly accessible release; a private repository needs an
-authenticated download. The script checks the release checksum and installs into `~/.local` (or the corresponding XDG
-locations); a working Vulkan driver is still required. Installers register Lucid as an **Open With**
-option for supported text and source files without changing the default application. macOS and
-Windows packages are not notarized or signed by a distribution certificate.
+The installer script supports Linux, FreeBSD and OpenBSD. Its curl command works once the release
+is publicly accessible; the current private repository requires an authenticated download, and the
+script itself cannot download private release assets. Use the downloadable archives in the meantime.
+Installers register Lucid as an **Open With** option for supported text and source files without
+changing the default application.
 
 ## Requirements
 

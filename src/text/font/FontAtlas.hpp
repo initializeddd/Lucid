@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -9,6 +10,7 @@
 namespace lucid::text {
 
 void setExecutablePath(std::string_view argv0);
+[[nodiscard]] std::filesystem::path assetPath(std::string_view relative);
 
 struct Glyph {
     float x0 = 0.0F;

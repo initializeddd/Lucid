@@ -12,5 +12,5 @@ int main() {
     static_assert(kAppName == std::string_view("Lucid"));
 
     constexpr std::array<std::uint32_t, 3> components{kVersionMajor, kVersionMinor, kVersionPatch};
-    return components[0] == 0 && components[1] == 2 && components[2] == 0 ? 0 : 1;
+    return components[0] == 0 && components[1] == 2 && components[2] == 1 ? 0 : 1;
 }

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(Lucid
-    VERSION 0.2.0
+    VERSION 0.2.1
     DESCRIPTION "A minimal, GPU-accelerated code editor."
     LANGUAGES CXX)
 

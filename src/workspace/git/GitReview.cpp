@@ -25,7 +25,7 @@ bool safePath(std::string_view name) {
     for (const auto& part : path) if (part == "..") return false;
     return path.lexically_normal() != ".";
 }
-bool git(const std::filesystem::path& root, std::vector<std::string> args, std::string& output, std::string& error) {
+bool git(const std::filesystem::path& root, std::vector<std::string> args, std::string& output, std::string& error, bool noninteractive = false) {
 #if defined(_WIN32)
     const auto wide = [](std::string_view text) {
         if (text.empty()) return std::wstring{};
@@ -55,7 +55,20 @@ bool git(const std::filesystem::path& root, std::vector<std::string> args, std::
     STARTUPINFOW startup{}; startup.cb = sizeof(startup); startup.dwFlags = STARTF_USESTDHANDLES;
     startup.hStdInput = input; startup.hStdOutput = writer; startup.hStdError = writer;
     PROCESS_INFORMATION process{};
-    const BOOL launched = CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+    std::vector<wchar_t> environment;
+    if (noninteractive) {
+        LPWCH block = GetEnvironmentStringsW();
+        if (!block) { CloseHandle(reader); CloseHandle(writer); CloseHandle(input); error = "Could not prepare Git environment"; return false; }
+        for (const wchar_t* item = block; *item; item += wcslen(item) + 1) {
+            if (_wcsnicmp(item, L"GIT_TERMINAL_PROMPT=", 20) == 0 || _wcsnicmp(item, L"GCM_INTERACTIVE=", 16) == 0 || _wcsnicmp(item, L"GIT_SSH_COMMAND=", 16) == 0) continue;
+            environment.insert(environment.end(), item, item + wcslen(item) + 1);
+        }
+        FreeEnvironmentStringsW(block);
+        for (const auto* value : {L"GIT_TERMINAL_PROMPT=0", L"GCM_INTERACTIVE=Never", L"GIT_SSH_COMMAND=ssh -oBatchMode=yes -oConnectTimeout=15"})
+            environment.insert(environment.end(), value, value + wcslen(value) + 1);
+        environment.push_back(L'\0');
+    }
+    const BOOL launched = CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | (noninteractive ? CREATE_UNICODE_ENVIRONMENT : 0), noninteractive ? environment.data() : nullptr, nullptr, &startup, &process);
     CloseHandle(writer); CloseHandle(input);
     if (!launched) { CloseHandle(reader); error = "Could not start Git; install Git and try again"; return false; }
     output.clear(); char buffer[4096]; DWORD n = 0; bool truncated = false;
@@ -78,7 +91,17 @@ bool git(const std::filesystem::path& root, std::vector<std::string> args, std::
     posix_spawn_file_actions_adddup2(&actions, fd[1], STDOUT_FILENO);
     posix_spawn_file_actions_adddup2(&actions, fd[1], STDERR_FILENO);
     posix_spawn_file_actions_addclose(&actions, fd[0]); posix_spawn_file_actions_addclose(&actions, fd[1]);
-    pid_t child; const int result = posix_spawnp(&child, "git", &actions, nullptr, argv.data(), environ);
+    std::vector<std::string> environment; std::vector<char*> envp;
+    if (noninteractive) {
+        for (char** item = environ; item && *item; ++item) {
+            const std::string_view entry(*item);
+            if (!entry.starts_with("GIT_TERMINAL_PROMPT=") && !entry.starts_with("GCM_INTERACTIVE=") && !entry.starts_with("GIT_SSH_COMMAND=")) environment.emplace_back(entry);
+        }
+        environment.emplace_back("GIT_TERMINAL_PROMPT=0"); environment.emplace_back("GCM_INTERACTIVE=Never");
+        environment.emplace_back("GIT_SSH_COMMAND=ssh -oBatchMode=yes -oConnectTimeout=15");
+        for (auto& value : environment) envp.push_back(value.data()); envp.push_back(nullptr);
+    }
+    pid_t child; const int result = posix_spawnp(&child, "git", &actions, nullptr, argv.data(), noninteractive ? envp.data() : environ);
     posix_spawn_file_actions_destroy(&actions); close(fd[1]);
     if (result != 0) { close(fd[0]); error = "Could not start Git; install Git and try again"; return false; }
     output.clear(); char buffer[4096]; ssize_t n; bool truncated = false;
@@ -214,5 +237,53 @@ bool gitBlame(const std::filesystem::path& root, std::string_view path, int line
     while (std::getline(in, row)) { if (row.rfind("author ", 0) == 0) name = row.substr(7); else if (row.rfind("summary ", 0) == 0) summary = row.substr(8); }
     if (output.rfind("0000000000000000000000000000000000000000 ", 0) == 0) { author = "Uncommitted change"; return true; }
     author = name.empty() ? "Unknown author" : name; if (!summary.empty()) author += " — " + summary; return true;
+}
+
+bool gitHistory(const std::filesystem::path& root, std::vector<GitHistoryEntry>& entries, std::string& error) {
+    std::string output; entries.clear();
+    if (!git(root, {"log", "-n", "50", "--format=%h%x09%an%x09%as%x09%s"}, output, error)) return false;
+    std::istringstream lines(output); std::string row;
+    while (std::getline(lines, row)) {
+        const auto first = row.find('\t'), second = first == std::string::npos ? first : row.find('\t', first + 1), third = second == std::string::npos ? second : row.find('\t', second + 1);
+        if (third == std::string::npos) continue;
+        entries.push_back({row.substr(0, first), row.substr(first + 1, second - first - 1), row.substr(second + 1, third - second - 1), row.substr(third + 1)});
+    }
+    return true;
+}
+
+bool gitUpstream(const std::filesystem::path& root, GitUpstream& upstream, std::string& error) {
+    GitUpstream value;
+    auto read = [&](std::vector<std::string> args, std::string& result) {
+        if (!git(root, std::move(args), result, error)) return false;
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) result.pop_back();
+        return true;
+    };
+    if (!read({"symbolic-ref", "--quiet", "--short", "HEAD"}, value.branch) || value.branch.empty()) { error = "A checked-out branch is required"; return false; }
+    if (!read({"config", "--get", "branch." + value.branch + ".remote"}, value.remote) ||
+        !read({"config", "--get", "branch." + value.branch + ".merge"}, value.mergeRef)) { error = "This branch has no configured upstream"; return false; }
+    if (value.remote.empty() || value.remote.front() == '-' || value.remote == "." ||
+        !std::string_view(value.mergeRef).starts_with("refs/heads/") || value.mergeRef.find_first_of("\r\n") != std::string::npos) {
+        error = "Unsupported upstream configuration"; return false;
+    }
+    if (!read({"rev-parse", "--verify", "HEAD"}, value.head)) return false;
+    upstream = std::move(value); error.clear(); return true;
+}
+
+bool gitRemote(const std::filesystem::path& root, const GitUpstream& expected, GitRemoteAction action, std::string& output, std::string& error) {
+    GitUpstream current;
+    if (!gitUpstream(root, current, error)) return false;
+    if (current.branch != expected.branch || current.remote != expected.remote || current.mergeRef != expected.mergeRef || current.head != expected.head) {
+        error = "Branch, upstream or HEAD changed; review the operation again"; return false;
+    }
+    if (action == GitRemoteAction::Pull) {
+        std::string status;
+        if (!git(root, {"status", "--porcelain=v1", "--untracked-files=normal"}, status, error)) return false;
+        if (!status.empty()) { error = "Commit or otherwise resolve all working-tree changes before pulling"; return false; }
+    }
+    std::vector<std::string> args{"-c", "credential.interactive=never", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30"};
+    if (action == GitRemoteAction::Fetch) args.insert(args.end(), {"fetch", "--no-tags", "--", current.remote});
+    else if (action == GitRemoteAction::Pull) args.insert(args.end(), {"pull", "--ff-only", "--no-rebase", "--", current.remote, current.mergeRef});
+    else args.insert(args.end(), {"push", "--no-follow-tags", "--recurse-submodules=no", "--", current.remote, current.head + ":" + current.mergeRef});
+    return git(root, std::move(args), output, error, true);
 }
 }

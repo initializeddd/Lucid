@@ -50,7 +50,7 @@
 - [x] Folder suggestions and keyboard navigation through directories
 - [x] Save before switching files/projects and on quit
 - [x] In-session recent projects and project directory browsing
-- [ ] Persisted recent projects and session restore
+- [x] Persisted recent projects and session restore (clean exits; crash recovery is separate)
 - [ ] Large-project index updates without a full refresh
 
 ## 0.5 — Daily driver
@@ -66,10 +66,10 @@
 ## Later
 
 - [ ] Incremental parsing
-- [ ] Language server client
+- [x] C/C++ language server client (clangd; more languages and capabilities remain)
 - [ ] Multi-cursor editing
 - [ ] Plugin surface
-- [ ] Windows and Linux packaging
+- [x] Windows and Linux packaging
 
 ## VS Code replacement work
 
@@ -78,12 +78,11 @@ make the missing work explicit while retaining the path-first interface and opti
 
 1. **Everyday editing:** reliable open/save and external-change handling; a transient open-file switcher and splits; file and
    project search with replace; multi-cursor editing; indentation, formatting, encodings and line
-   endings; persistent workspaces and keyboard shortcuts. In-file literal search and one-match replacement are available now.
+   endings; persistent workspaces and keyboard shortcuts. In-file and project-wide literal search and reviewed replacement are available now.
 2. **Development tools:** extend the existing comment-driven compile windows for builds and test
    results; provide Git status, diffs, staging, commits and merge conflict resolution. Do not add a
    general-purpose terminal.
-3. **Language support:** language-server integration for semantic completion, navigation,
-   references, rename, diagnostics and formatting, with discoverable language setup.
+3. **Language support:** extend C/C++ clangd integration for additional languages, rename support and discoverable language setup.
 4. **Debugging:** debug-adapter integration, launch configurations, breakpoints, variables,
    call stacks and stepping.
 5. **Extensibility and accessibility:** a documented module API, themes, configurable
@@ -93,4 +92,4 @@ make the missing work explicit while retaining the path-first interface and opti
    interaction tests for macOS, Linux and Windows.
 7. **Multiplayer:** shared projects reached through private-network links, with both a participant-hosted
    session and a self-hosted server. Authentication, access controls, conflict resolution and recovery
-   must be designed and tested before collaboration is exposed.
+   remain unfinished; collaboration is not exposed in the editor.

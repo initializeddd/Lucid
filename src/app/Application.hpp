@@ -3,6 +3,9 @@
 #include "app/Settings.hpp"
 #include "debug/Session.hpp"
 #include "debug/AdapterProcess.hpp"
+#include "editor/lsp/Client.hpp"
+#include "workspace/search/ProjectSearch.hpp"
+#include "workspace/session/Session.hpp"
 #include "editor/compile/CompileScript.hpp"
 #include "editor/diagnostics/CompilerDiagnostics.hpp"
 #include "editor/diagnostics/Diagnostics.hpp"
@@ -79,7 +82,9 @@ private:
     void refreshDebugSuggestions();
     void applyDebugCommand();
     void checkpointRecovery();
-    void openRecovery();
+    [[nodiscard]] bool saveSession(std::string& error);
+    void restoreSession(const workspace::session::State& state);
+    void openRecovery(bool includeHistory = true);
     void refreshRecoverySuggestions();
     void applyRecovery();
     void openModules();
@@ -88,6 +93,7 @@ private:
     void openGitReview();
     void refreshGitSuggestions();
     void applyGitReview();
+    void pollGitRemote();
     void showTaskView(ui::PromptKind view);
     void refreshTaskSuggestions();
     void applyTaskCommand();
@@ -102,12 +108,19 @@ private:
     void openAiPrompt();
     void openAiCleanup();
     void openFind();
+    void openProjectSearch(bool replace);
+    void applyProjectSearch();
+    void pollProjectSearch();
     void openReplace();
     void applyReplacement();
     void findInDocument(bool advance, bool backwards = false);
     void pollAi();
     void openCompletion();
     void refreshCompletions();
+    void pollLanguageServer();
+    void requestLanguageNavigation(bool references);
+    void requestLanguageFormatting();
+    void applyLanguageLocation();
     void applyCommand(bool forceFolder);
     void createFolder(const std::string& path);
     void openProject(const std::string& path);
@@ -166,7 +179,10 @@ private:
                             std::string sourcePath = {});
     void runProjectFunction(const workspace::ProjectFunction& function);
     void ensureFunctionIndex();
+    void pollFunctionIndex();
     void invalidateFunctionIndex();
+    void scheduleProjectIndex();
+    void pollProjectIndex();
     [[nodiscard]] bool ensureCompileTerminalWindow();
     void destroyCompileTerminalWindow();
     void closeCompileTerminal();
@@ -175,6 +191,9 @@ private:
     void handleCompileTerminalChar(char32_t codepoint);
     void handleCompileTerminalMouseButton(const input::MouseButtonEvent& event);
     void handleCompileTerminalMouseMove(const input::MouseMoveEvent& event);
+    [[nodiscard]] std::size_t compileOutputPosition(double x, double y, bool standalone) const;
+    void copyCompileSelection();
+    void scrollCompileOutput(double offset, bool standalone);
     [[nodiscard]] ui::FrameState
     makeCompileTerminalFrameState(double timeSeconds) const;
     void updateCompileTerminalHover(double x, double y);
@@ -193,6 +212,7 @@ private:
     [[nodiscard]] int suggestionIndexAt(double x, double y) const;
     [[nodiscard]] bool commandRegionContains(double x, double y) const;
     [[nodiscard]] bool welcomeActionContains(double x, double y) const;
+    [[nodiscard]] bool welcomeExpandContains(double x, double y) const;
     [[nodiscard]] bool titlebarDragContains(double x, double y) const;
     [[nodiscard]] ui::FrameState makeFrameState(double timeSeconds);
     [[nodiscard]] std::string commandPath() const;
@@ -219,6 +239,8 @@ private:
     enum class TaskInputKind { Identity, Title, Subtask, Assignee, Solution };
     std::filesystem::path m_recoveryFile;
     std::vector<std::filesystem::path> m_recoveryFiles;
+    struct RecoverySummary { std::string file; bool saved = false, history = false; std::size_t openCount = 0; };
+    std::vector<RecoverySummary> m_recoverySummaries;
     workspace::recovery::Snapshot m_recoveryPreview;
     std::size_t m_recoverySelected = 0, m_recoveryPage = 0;
     std::vector<int> m_recoveryChoices;
@@ -236,10 +258,17 @@ private:
     std::size_t m_debugPage = 0;
     bool m_debugClosing = false;
     double m_debugCloseDeadline = 0.0;
+    double m_debugStartDeadline = 0.0;
     debug::State m_debugLastState = debug::State::Idle;
     std::vector<workspace::GitChange> m_gitChanges;
+    std::vector<workspace::GitHistoryEntry> m_gitHistory;
     workspace::GitReview m_gitReview;
     workspace::GitCommitPreview m_gitCommitPreview;
+    workspace::GitUpstream m_gitUpstream;
+    workspace::GitRemoteAction m_gitRemoteAction = workspace::GitRemoteAction::Fetch;
+    struct GitRemoteResult { bool ok = false; std::string output, error; };
+    std::future<GitRemoteResult> m_gitRemoteFuture;
+    std::string m_gitRemoteRoot;
     std::size_t m_gitSelectedFile = 0;
     std::size_t m_gitPage = 0;
     std::vector<int> m_gitChoices;
@@ -266,12 +295,35 @@ private:
     bool m_followCursor = true;
     bool m_welcomeActionHovered = false;
     int m_welcomeShortcutScroll = 0;
+    bool m_welcomeShortcutsExpanded = false;
+    float m_welcomeShortcutProgress = 0.0F;
     editor::TextPosition m_findAnchor{};
     bool m_replacePending = false;
     std::string m_replaceQuery;
     std::string m_replaceFile;
     std::uint64_t m_replaceRevision = 0;
     bool m_completionOpen = false;
+    editor::lsp::Client m_languageServer;
+    std::string m_languageRoot;
+    std::string m_languageAttemptRoot;
+    std::string m_languageFile;
+    std::uint64_t m_languageRevision = 0;
+    struct LanguageLocation { std::string path; std::size_t line = 0, character = 0; };
+    std::vector<LanguageLocation> m_languageLocations;
+    std::vector<int> m_languageLocationChoices;
+    std::size_t m_languageLocationPage = 0;
+    bool m_languageNavigationQueued = false, m_languageReferences = false;
+    std::uint64_t m_languageNavigationRequest = 0, m_languageNavigationRevision = 0;
+    std::string m_languageNavigationFile;
+    std::size_t m_languageNavigationLine = 0, m_languageNavigationColumn = 0;
+    bool m_languageFormatQueued = false;
+    std::uint64_t m_languageFormatRequest = 0, m_languageFormatRevision = 0;
+    std::string m_languageFormatFile, m_languageFormatOriginal, m_languageFormatOutput;
+    std::string m_languageDiagnosticsFile;
+    std::uint64_t m_languageDiagnosticsRevision = ~std::uint64_t{0};
+    std::uint64_t m_completionRequest = 0;
+    std::uint64_t m_completionRequestRevision = 0;
+    std::size_t m_completionRequestLine = 0, m_completionRequestColumn = 0;
     int m_completionSelected = 0;
     std::size_t m_completionStart = 0;
     std::vector<std::string> m_completions;
@@ -294,14 +346,21 @@ private:
     editor::CursorStyle m_cursorStyle = editor::CursorStyle::Line;
     bool m_backgroundMotion = true;
     float m_backgroundDim = 0.0F;
+    std::string m_statusPosition;
+    float m_statusPositionReveal = 0.0F;
     float m_uiZoom = 1.0F;
     EditorSettings m_settings;
 
     std::vector<std::string> m_recentProjects;
+    bool m_restoringSession = false;
     std::vector<std::string> m_suggestionPaths;
     std::vector<std::string> m_suggestionDetails;
     std::vector<std::size_t> m_suggestionFunctionIndices;
     std::vector<ui::PathSuggestion> m_suggestions;
+    std::size_t m_suggestionScroll = 0;
+    bool m_suggestionHasMoreBelow = false;
+    float m_suggestionMoreAbove = 0.0F;
+    float m_suggestionMoreBelow = 0.0F;
     int m_selectedSuggestion = -1;
     double m_suggestionEpoch = 0.0;
     double m_lastTimeSeconds = 0.0;
@@ -331,7 +390,12 @@ private:
     bool m_compileTerminalCloseHovered = false;
     std::string m_compileTerminalTitle;
     std::string m_compileTerminalInput;
+    std::string m_compileSelectionSnapshot;
+    std::size_t m_compileSelectionAnchor = 0;
+    std::size_t m_compileSelectionEnd = 0;
+    bool m_compileSelecting = false;
     int m_compileTerminalLine = 0;
+    int m_compileOutputScroll = 0;
     float m_compileTerminalReveal = 0.0F;
     float m_compileTerminalVelocity = 0.0F;
     float m_compileTerminalOffsetX = 0.0F;
@@ -343,10 +407,20 @@ private:
     std::string m_settingsError;
     bool m_settingsErrorHovered = false;
     bool m_settingsPanelVisible = false;
+    int m_settingsMenuPage = 0;
+    std::size_t m_backgroundScenePage = 0;
+    std::vector<int> m_backgroundSceneChoices;
     ui::SettingsControl m_settingsHovered = ui::SettingsControl::None;
     std::uint64_t m_settingsRevision = ~std::uint64_t{0};
 
     std::vector<editor::Diagnostic> m_diagnostics;
+    workspace::ProjectSearchResults m_projectSearchResults;
+    std::string m_projectSearchQuery, m_projectReplacement;
+    std::size_t m_projectSearchPage = 0;
+    bool m_projectSearchReplace = false;
+    std::future<workspace::ProjectSearchResults> m_projectSearchFuture;
+    std::string m_projectSearchRoot;
+    std::vector<int> m_projectSearchChoices;
     std::uint64_t m_diagnosticsRevision = 0;
     bool m_diagnosticsValid = false;
     std::set<std::string> m_ignoredDiagnostics;
@@ -363,6 +437,8 @@ private:
 
     struct AiResult { std::string output; std::string error; };
     std::future<AiResult> m_aiFuture;
+    bool m_aiDownloadingModel = false;
+    std::shared_ptr<std::atomic<int>> m_aiProgress;
     std::shared_ptr<std::atomic_bool> m_aiCancel;
     std::string m_aiResponse;
     std::vector<std::string> m_aiLines;
@@ -387,6 +463,13 @@ private:
     double m_compilerDueTime = 0.0;
 
     workspace::FunctionIndex m_functionIndex;
+    struct FunctionIndexResult { workspace::FunctionIndex index; std::string root, error; std::uint64_t generation = 0; };
+    std::future<FunctionIndexResult> m_functionIndexFuture;
+    std::uint64_t m_functionIndexGeneration = 0;
+    struct ProjectIndexResult { workspace::Project project; std::string root; std::uint64_t generation = 0; };
+    std::future<ProjectIndexResult> m_projectIndexFuture;
+    std::uint64_t m_projectIndexGeneration = 0;
+    bool m_projectIndexPending = false;
     bool m_functionIndexValid = false;
     bool m_functionIndexDirty = true;
 

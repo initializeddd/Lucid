@@ -33,7 +33,7 @@ WelcomeLayout welcomeLayout(float viewportWidth, float viewportHeight, float sca
         layout.hintColumns = viewportWidth >= 1000.0F * scale ? 3 : 2;
         const float contentHeight = actionHeight;
         const float groupHeight = std::max(layout.logoSize, contentHeight);
-        const float hintsHeight = hintLineHeight * static_cast<float>((18 + layout.hintColumns - 1) / layout.hintColumns);
+        const float hintsHeight = hintLineHeight * 3.0F;
         const float top = std::max(margin, (viewportHeight - groupHeight - hintGap - hintsHeight) * 0.5F);
 
         layout.logoTop = top + (groupHeight - layout.logoSize) * 0.5F;
@@ -54,7 +54,7 @@ WelcomeLayout welcomeLayout(float viewportWidth, float viewportHeight, float sca
     }
 
     layout.hintColumns = viewportWidth < 440.0F * scale ? 1 : 2;
-    const float rowsHeight = hintLineHeight * static_cast<float>((18 + layout.hintColumns - 1) / layout.hintColumns);
+    const float rowsHeight = hintLineHeight * 3.0F;
     layout.logoSize = std::clamp(viewportHeight - actionHeight - hintGap - rowsHeight - margin * 2.0F - actionGap, 64.0F * scale, 160.0F * scale);
     layout.logoLeft = layout.centerX - layout.logoSize * 0.5F;
     const float actionWidth =

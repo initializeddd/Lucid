@@ -37,16 +37,17 @@ size_t writeData(char* data, size_t size, size_t count, void* context) {
 } // namespace
 
 bool ensureModel(const std::filesystem::path& directory, std::filesystem::path& model,
-                 std::string& error, const std::atomic_bool* cancel) {
+                 std::string& error, const std::atomic_bool* cancel, std::atomic<int>* progress) {
     static std::mutex mutex;
     const std::lock_guard lock(mutex);
     error.clear();
+    if (cancel && cancel->load()) { error = "Model download cancelled"; return false; }
     if (directory.empty()) { error = "Model storage directory unavailable"; return false; }
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
     if (ec) { error = "Could not create model directory: " + ec.message(); return false; }
     model = directory / kName;
-    if (valid(model)) return true;
+    if (valid(model)) { if (cancel && cancel->load()) { error = "Model download cancelled"; return false; } if (progress) *progress = 100; return true; }
     auto temporary = model;
     temporary += ".download";
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
@@ -55,15 +56,17 @@ bool ensureModel(const std::filesystem::path& directory, std::filesystem::path& 
     std::call_once(init, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
     using Handle = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
     Handle curl(curl_easy_init(), curl_easy_cleanup);
-    if (!curl) { error = "Could not initialize download"; return false; }
+    if (!curl) { stream.close(); std::filesystem::remove(temporary, ec); error = "Could not initialize download"; return false; }
     curl_easy_setopt(curl.get(), CURLOPT_URL, kUrl);
     curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
+    struct Progress { const std::atomic_bool* cancel; std::atomic<int>* value; } progressState{cancel, progress};
     curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION,
-        +[](void* data, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
-            const auto* flag = static_cast<const std::atomic_bool*>(data);
-            return flag && flag->load() ? 1 : 0;
+        +[](void* data, curl_off_t total, curl_off_t now, curl_off_t, curl_off_t) -> int {
+            auto* state = static_cast<Progress*>(data);
+            if (state->value && total > 0) *state->value = static_cast<int>(now * 100 / total);
+            return state->cancel && state->cancel->load() ? 1 : 0;
         });
-    curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, cancel);
+    curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &progressState);
     curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "https");
@@ -80,7 +83,7 @@ bool ensureModel(const std::filesystem::path& directory, std::filesystem::path& 
     stream.close();
     if (result != CURLE_OK || !stream || !valid(temporary)) {
         std::filesystem::remove(temporary, ec);
-        error = result == CURLE_OK ? "Model download failed integrity verification" :
+        error = cancel && cancel->load() ? "Model download cancelled" : result == CURLE_OK ? "Model download failed integrity verification" :
             std::string("Model download failed: ") + curl_easy_strerror(result);
         return false;
     }

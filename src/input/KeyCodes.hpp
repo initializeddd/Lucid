@@ -16,6 +16,7 @@ enum class Key {
     Down,
     Home,
     End,
+    F12,
     A,
     B,
     C,

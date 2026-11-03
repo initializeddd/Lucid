@@ -1,0 +1,48 @@
+{
+  "parts": [
+    {
+      "mesh": "retro-grid-perspective-grid.obj",
+      "group": "retro-grid",
+      "color": [
+        0.25,
+        0.28999999165534973,
+        0.41999998688697815,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "retro-sun-striped-sun.obj",
+      "group": "retro-sun",
+      "color": [
+        0.5699999928474426,
+        0.6100000143051147,
+        0.8799999952316284,
+        1.0
+      ],
+      "emission": 0.2
+    },
+    {
+      "mesh": "static-striped-sun.obj",
+      "group": "static",
+      "color": [
+        0.5699999928474426,
+        0.6100000143051147,
+        0.8799999952316284,
+        1.0
+      ],
+      "emission": 0.2
+    },
+    {
+      "mesh": "static-wireframe-mountains.obj",
+      "group": "static",
+      "color": [
+        0.12999999523162842,
+        0.15000000596046448,
+        0.20999999344348907,
+        1.0
+      ],
+      "emission": 0.0
+    }
+  ]
+}

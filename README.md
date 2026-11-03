@@ -32,7 +32,7 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Beta software.** Version `v0.2.0-beta.1` includes features at different stages of maturity.
+> **Beta software.** Version `v0.2.1-lucid.1` includes features at different stages of maturity.
 > File formats and behavior may change. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
 ## At a glance
@@ -40,6 +40,7 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 - **A focused workspace** — open projects and files by path, and switch between open files without a permanent tab bar.
 - **A GPU-rendered interface** — Vulkan on Windows and Linux, and MoltenVK on macOS.
 - **Everyday editing** — UTF-8 text, undo/redo, find and replace, syntax highlighting, and C/C++ and JSON diagnostics.
+- **Project search** — use Ctrl+Shift+F (Command+Shift+F on macOS) to search project files and review replacements before applying them.
 - **Comment-driven builds** — define and run project commands alongside the code that describes them.
 - **Optional local AI** — review a suggestion before applying it; the model is downloaded and verified on first use.
 - **Work in context** — task workspaces, Git review, recovery snapshots, and declarative text modules bring project work into temporary surfaces.
@@ -50,9 +51,10 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 | --- | --- |
 | Editing, open-file switcher, settings | Available; keyboard-first workflows are still evolving |
 | Local AI and code cleanup | Preview; small selections, local inference and explicit acceptance |
-| Git review | File-level stage/unstage and local commits; no pull-request integration |
+| Git review | File-level staging, local commits, recent history and upstream fetch/pull/push; no pull-request integration |
 | Task workspaces and recovery | Local previews; recovery has [known limits](#recovery-snapshots) |
 | Modules | Declarative text commands only; no arbitrary-code runtime |
+| Language intelligence | C/C++ through installed clangd; rename and automatic server installation are not yet supported |
 | Debugger | LLDB-based C/C++ workflow; macOS tested, Linux and Windows require platform validation |
 | Multiplayer | Not yet available |
 | Screen readers | Initial macOS bridge; broader accessibility work remains |
@@ -71,7 +73,7 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-Download [Lucid v0.2.0-beta.1](https://github.com/initializeddd/Lucid/releases/tag/v0.2.0-beta.1). The repository and release are private and require GitHub access.
+Download [Lucid v0.2.1-lucid.1](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-lucid.1). The repository and release are private and require GitHub access.
 
 | Platform | Artifacts | Notes |
 | --- | --- | --- |
@@ -90,6 +92,12 @@ script itself cannot download private release assets. Use the downloadable archi
 Installers register Lucid as an **Open With** option for supported text and source files without
 changing the default application.
 
+### Project-wide search and replace
+
+Press Ctrl+Shift+F (Command+Shift+F on macOS), enter a literal, case-sensitive search and press Enter. Select a result to open its file, or select **Replace all matches** to enter replacement text and review the affected files before applying it. Ctrl+Shift+H also starts the workflow on Linux and Windows.
+
+Search uses the project index, skips unreadable, binary and unsupported text files, and reports how many were skipped. It currently uses fixed project exclusions rather than `.gitignore`. Replacement is disabled when the result or memory limit is reached. Files are checked for external changes before and during replacement. Replacements across files are not one undoable transaction: if a later write fails, earlier files may already have changed; use version control to review or revert them.
+
 ## Requirements
 
 | Requirement | Minimum | Notes |
@@ -102,11 +110,10 @@ changing the default application.
 
 ### FreeBSD and OpenBSD (work in progress)
 
-Native x86-64 BSD build, test, and release jobs are configured but have not yet
-been run. Do not treat the BSD archives or installers as available until those
-jobs pass and a release containing them is published. When available, the same
-version-specific installer command above selects the appropriate BSD archive.
-The archive can also be extracted and run directly with `./lucid`.
+The previous release produced native x86-64 BSD archives and passed automated
+VM tests. A full graphical desktop smoke test remains outstanding. Extract an
+archive and run `./lucid`; the release installer script also supports BSD, but
+its automatic downloads require public release assets.
 
 BSD builds use system libraries rather than the Linux library bundle. Install
 GLFW, the Vulkan loader and a suitable Vulkan driver through the operating
@@ -225,7 +232,7 @@ ctest --test-dir build -C Release --output-on-failure
 The executable embeds `packaging/windows/lucid.ico`. On Windows 11, Lucid applies a dark caption,
 text and border color through DWM while keeping the standard window controls.
 
-> Compile functions and their PTY terminals currently run on macOS and Linux only. On Windows the
+> Compile functions and their PTY terminals run on macOS, Linux and BSD. On Windows the
 > platform layer reports that the terminal is unavailable.
 
 ### Build options
@@ -263,6 +270,7 @@ See [Building](docs/building.md) for signing, packaging, icon regeneration and v
     "cursorBlink": true,
     "cursorStyle": "line",
     "backgroundMotion": true,
+    "backgroundScene": 0,
     "highContrast": false,
     "zoomFactor": 1.0,
     "iconTheme": "classic",
@@ -273,11 +281,16 @@ See [Building](docs/building.md) for signing, packaging, icon regeneration and v
 
 `animationSpeed` accepts `0.5`, `1.0` or `2.0`. `cursorStyle` accepts `line`, `block`,
 `underscore` or `kitty` (`bar` and `underline` remain accepted as aliases). `backgroundMotion`
-toggles the soft animated aurora behind the editor and empty surfaces; with a file open it fades
-darker and more diffuse so text stays readable. `zoomFactor` accepts `0.5` through `3.0` and scales
+enables or disables the animated 3D background. Choose a scene under **Settings → Animation →
+Background scene**; scenes follow the selected primary color and dim and blur while a file is open to keep code readable. The bundled scenes
+are rendered locally and do not require an image download. In `settings.json`, `backgroundScene`
+uses IDs `0`, `1`, `2`, and `4` through `9`: city transit, lunar horizon, mountain parallax,
+ocean lighthouse, rainy street, orbital station, forest fireflies, drafting grid, and retro landscape.
+The removed scene ID `3` falls back to city transit. If the 3D renderer or its assets are unavailable, Lucid leaves the background
+clear and logs the error. `zoomFactor` accepts `0.5` through `3.0` and scales
 the whole interface, including text, layout and mouse hit testing. `theme` accepts `lucid-dark`,
 `graphite` or `lucid-light`. `primary` accepts any `#RRGGBB` color and overrides the theme accent and
-selection tint; omit it to use the theme default. The settings panel includes primary color swatches
+selection tint; omit it to use the theme default. The settings menu includes primary color swatches
 for quick changes. In settings, use Tab or arrow keys to move between controls and Enter or Space
 to activate them. `iconTheme` accepts `classic`, `accent` or `outline`; the running application's
 Dock or window icon uses the active primary color. The installed file icon remains the bundled
@@ -339,9 +352,17 @@ Replace opens a find prompt, then Enter opens the replacement prompt. Enter repl
 match (an empty replacement deletes it), and returns to the find prompt. Escape closes the prompt;
 replacements can be undone normally.
 
-The cursor completion menu suggests function-like names found in the current file and a bounded scan of project files. Use Up/Down
-and Enter or Tab to select one; Escape dismisses it. This is a lightweight text-based suggestion,
-not a language server, so it cannot resolve every function in scope.
+### Language intelligence
+
+For C and C++ projects Lucid starts `clangd` from your PATH, if available, to provide diagnostics
+and supported completion suggestions. Install LLVM/clangd separately and provide a
+`compile_commands.json` for the most accurate project results. Use Ctrl+Shift+Space
+(Command+Shift+Space on macOS) to open completion, F12 to find a definition, Shift+F12 to
+find references, and Alt+Shift+F (Option+Shift+F on macOS) to format the current buffer.
+Navigation currently opens locations inside the project only. Formatting can be undone and
+does not save the file automatically. When clangd is unavailable, completion falls back to
+function names found in the current file and a bounded scan of project files. Workspace rename,
+automatic language-server installation and languages beyond C/C++ are not yet supported.
 
 Local AI runs inside Lucid without a separate model server. On its first request Lucid downloads
 approximately 491 MB from Hugging Face and verifies the pinned model's SHA-256 before loading it.
@@ -373,6 +394,18 @@ their visible options, through the native accessibility API. This is an initial
 bridge: full VoiceOver editing and navigation, complete semantic controls, and
 Windows and Linux screen-reader integration are not implemented yet.
 
+## Sessions and recovery
+
+Lucid saves recent projects and, on a clean exit, the active project and open
+file positions. It reopens available text files on the next launch; missing or
+unsupported files are skipped. An explicit file supplied at launch takes
+precedence. If crash snapshots are available, Lucid presents recovery instead
+of automatically reopening the saved file context. Session records contain
+paths and positions, not unsaved text or undo history.
+
+Project file scans and compile-function indexing run in the background. The
+file picker waits for the current scan before offering paths.
+
 ## Recovery snapshots
 
 While a project and file are open, Lucid keeps a local recovery snapshot about
@@ -387,9 +420,23 @@ If the disk file has changed or disappeared since the snapshot, Lucid blocks a
 normal save and keeps the recovered text open so you can copy it. Recovery records
 are stored locally in Lucid's `Recovery` directory, contain plain text, and remain
 until explicitly deleted in the recovery view. A clean exit removes the current
-session's snapshot. Snapshots are periodic, limited to 10 MiB per file, and do
+session's snapshot. Snapshots are periodic, limited to 16 MiB per file, and do
 not preserve undo history; edits made after the last successful snapshot may be
 lost. Concurrent changes between the disk check and the write are not prevented.
+
+Before saving an edited file, Lucid keeps up to three previous saved versions in
+its local Recovery/History directory. Project-wide replacement also backs up each
+affected file before making changes. Open Recovery to review a version and use
+**Restore as a new file** to keep the current file untouched. If the backup
+cannot be written, Lucid stops the save or replacement. Backups contain the file
+contents in plain text and consume disk space; deletion through the Recovery
+interface is not yet available on every platform.
+
+On Linux and macOS, saves preserve supported extended attributes and permissions;
+Lucid refuses to replace a hard-linked file rather than silently breaking its
+links. Other filesystem metadata and platform-specific behavior still require
+validation. No editor can guarantee protection against every power, storage,
+filesystem or concurrent-write failure; keep independent backups.
 
 ## Modules
 
@@ -434,15 +481,21 @@ line to jump to its source; Git blame identifies committed and uncommitted lines
 To resolve a conflict, edit the file, remove the conflict markers, then choose
 **Mark resolved and stage**. From the file list, choose **Review staged changes
 and commit** to inspect the staged paths and enter a message. Lucid creates a
-local commit; it does not push. If the index or HEAD changes during review, Lucid
+local commit; it does not automatically push. If the index or HEAD changes during review, Lucid
 asks you to review again. When a subfolder is open as the project, committing is
 blocked if the index includes paths outside it; open the repository root instead.
 
 Git must be installed locally. Git hooks and configured signing run as they do
 for a normal commit and may reject it. The open file is saved before review, and
-Git output is limited to 2 MiB. Staging individual hunks, branch management,
-remote pull-request metadata, and push/pull are not implemented. The Windows
-implementation requires validation on Windows.
+Git output is limited to 2 MiB. The Git menu also offers recent commits and
+reviewed fetch, pull and push operations for the current branch's configured
+upstream. Pull requires a clean working tree and only permits fast-forward
+updates; push targets the reviewed commit and never force-pushes. Remote
+operations run without interactive credential prompts; SSH uses batch mode,
+so credentials must already be available. An SSH command configured in the
+environment or Git configuration is not used for these operations. Staging
+individual hunks, branch management and pull-request metadata are not yet
+implemented. The Windows implementation requires validation on Windows.
 
 ## Task workspaces
 
@@ -511,12 +564,12 @@ every platform. Variables are expanded before execution:
 | `%fileName%` | open file name |
 | `%relative%` | file path relative to the project root |
 | `%line%` | compile function definition line |
-| `%platform%` | `macOS`, `windows` or `linux` |
+| `%platform%` | `macOS`, `windows`, `linux`, `freebsd` or `openbsd` |
 
 Run a function with `Ctrl+R` anywhere inside its block, click its highlighted `@name`, or use
 **Run > Run Compile Function** on macOS. The file is saved first. A dedicated compile window
 streams output and accepts input while the process is running. Close it or press Escape to stop the
-process. Compile functions are currently available on macOS and Linux.
+process. Compile functions are currently available on macOS, Linux and BSD; Windows remains unsupported.
 
 Press `Ctrl+Shift+R` or choose **Run > Search Project Functions…** to list
 functions from every text file in the project. Type part of a name, then press `Enter` to open the

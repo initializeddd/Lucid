@@ -23,6 +23,7 @@ struct EditorSettings {
     bool cursorBlink = true;
     editor::CursorStyle cursorStyle = editor::CursorStyle::Line;
     bool backgroundMotion = true;
+    int backgroundScene = 0;
     bool highContrast = false;
     float zoomFactor = 1.0F;
     std::string iconTheme = "classic";

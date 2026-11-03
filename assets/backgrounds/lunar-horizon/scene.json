@@ -1,0 +1,114 @@
+{
+  "parts": [
+    {
+      "mesh": "landscape-basalt.obj",
+      "group": "landscape",
+      "color": [
+        0.14000000059604645,
+        0.1599999964237213,
+        0.23000000417232513,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-crater-rock.obj",
+      "group": "landscape",
+      "color": [
+        0.30000001192092896,
+        0.33000001311302185,
+        0.4399999976158142,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-earth-land.obj",
+      "group": "landscape",
+      "color": [
+        0.3499999940395355,
+        0.38999998569488525,
+        0.5,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-earth-ocean.obj",
+      "group": "landscape",
+      "color": [
+        0.14000000059604645,
+        0.1899999976158142,
+        0.3499999940395355,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-lunar-regolith.obj",
+      "group": "landscape",
+      "color": [
+        0.20999999344348907,
+        0.23000000417232513,
+        0.3199999928474426,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-starlight.obj",
+      "group": "landscape",
+      "color": [
+        0.6700000166893005,
+        0.7099999785423279,
+        0.8999999761581421,
+        1.0
+      ],
+      "emission": 0.8
+    },
+    {
+      "mesh": "meteor-starlight.obj",
+      "group": "meteor",
+      "color": [
+        0.6700000166893005,
+        0.7099999785423279,
+        0.8999999761581421,
+        1.0
+      ],
+      "emission": 0.8
+    },
+    {
+      "mesh": "satellite-satellite-metal.obj",
+      "group": "satellite",
+      "color": [
+        0.4300000071525574,
+        0.47999998927116394,
+        0.6200000047683716,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "satellite-solar-cells.obj",
+      "group": "satellite",
+      "color": [
+        0.11999999731779099,
+        0.17000000178813934,
+        0.3100000023841858,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "satellite-solar-frame.obj",
+      "group": "satellite",
+      "color": [
+        0.5799999833106995,
+        0.6299999952316284,
+        0.7699999809265137,
+        1.0
+      ],
+      "emission": 0.15
+    }
+  ]
+}

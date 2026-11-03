@@ -1,0 +1,81 @@
+{
+  "parts": [
+    {
+      "mesh": "birds-cloud-silver.obj",
+      "group": "birds",
+      "color": [
+        0.550000011920929,
+        0.5799999833106995,
+        0.6800000071525574,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "clouds-cloud-silver.obj",
+      "group": "clouds",
+      "color": [
+        0.550000011920929,
+        0.5799999833106995,
+        0.6800000071525574,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-distant-foothills.obj",
+      "group": "landscape",
+      "color": [
+        0.15000000596046448,
+        0.1899999976158142,
+        0.27000001072883606,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-mountain-slate.obj",
+      "group": "landscape",
+      "color": [
+        0.2199999988079071,
+        0.25,
+        0.3400000035762787,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-pine-bark.obj",
+      "group": "landscape",
+      "color": [
+        0.14000000059604645,
+        0.15000000596046448,
+        0.20000000298023224,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-pine-needles.obj",
+      "group": "landscape",
+      "color": [
+        0.10000000149011612,
+        0.12999999523162842,
+        0.20000000298023224,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "landscape-snow-caps.obj",
+      "group": "landscape",
+      "color": [
+        0.5,
+        0.5400000214576721,
+        0.6700000166893005,
+        1.0
+      ],
+      "emission": 0.0
+    }
+  ]
+}

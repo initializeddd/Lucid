@@ -13,3 +13,6 @@ dist/
 .lucid/
 *.swp
 *~
+
+__pycache__/
+*.pyc

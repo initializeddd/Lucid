@@ -18,6 +18,14 @@ bool colorNear(const std::optional<lucid::ui::theme::Color>& color, int red,
 } // namespace
 
 int main() {
+    for (int scene = 0; scene < 10; ++scene) {
+        lucid::EditorSettings settings; settings.backgroundScene = scene;
+        const auto result = lucid::parseSettings(lucid::serializeSettings(settings));
+        if (!result.valid || result.settings.backgroundScene != (scene == 3 ? 0 : scene)) return 170 + scene;
+    }
+    if (lucid::parseSettings(R"({"backgroundScene":10})").valid ||
+        lucid::parseSettings(R"({"backgroundScene":1.5})").valid ||
+        lucid::parseSettings(R"({"backgroundScene":-1})").valid) return 180;
     using lucid::parseSettings;
 
     const auto ai = parseSettings(R"({"aiAskProvider":"openrouter","aiAskModel":"anthropic/claude-sonnet-4","aiCleanupProvider":"local","aiCleanupModel":"openai/gpt-4o-mini","aiDebugProvider":"openrouter","aiDebugModel":"google/gemini-2.5-flash"})");

@@ -19,6 +19,8 @@ public:
     static Document fromUtf8(std::string_view text);
 
     [[nodiscard]] std::string toUtf8() const;
+    [[nodiscard]] static bool canEditLosslessly(std::string_view text, std::string& error);
+    [[nodiscard]] bool serializeForFile(std::string_view original, std::string& output, std::string& error) const;
 
     [[nodiscard]] const std::vector<std::u32string>& lines() const noexcept { return m_lines; }
     [[nodiscard]] std::size_t lineCount() const noexcept { return m_lines.size(); }
@@ -71,6 +73,7 @@ public:
     void moveUp(bool extendSelection = false);
     void moveDown(bool extendSelection = false);
     void moveHome(bool extendSelection = false);
+    void moveSmartHome(bool extendSelection = false);
     void moveEnd(bool extendSelection = false);
 
 private:

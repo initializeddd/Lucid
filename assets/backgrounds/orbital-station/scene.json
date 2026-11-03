@@ -1,0 +1,114 @@
+{
+  "parts": [
+    {
+      "mesh": "meteor-windows-and-lights.obj",
+      "group": "meteor",
+      "color": [
+        0.6600000262260437,
+        0.7099999785423279,
+        0.9200000166893005,
+        1.0
+      ],
+      "emission": 0.8
+    },
+    {
+      "mesh": "planet-planet-clouds.obj",
+      "group": "planet",
+      "color": [
+        0.47999998927116394,
+        0.5099999904632568,
+        0.6100000143051147,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "planet-planet-continents.obj",
+      "group": "planet",
+      "color": [
+        0.3499999940395355,
+        0.3799999952316284,
+        0.49000000953674316,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "planet-planet-ocean.obj",
+      "group": "planet",
+      "color": [
+        0.17000000178813934,
+        0.2199999988079071,
+        0.3499999940395355,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "planet-windows-and-lights.obj",
+      "group": "planet",
+      "color": [
+        0.6600000262260437,
+        0.7099999785423279,
+        0.9200000166893005,
+        1.0
+      ],
+      "emission": 0.8
+    },
+    {
+      "mesh": "station-navigation-beacons.obj",
+      "group": "station",
+      "color": [
+        0.8799999952316284,
+        0.9100000262260437,
+        1.0,
+        1.0
+      ],
+      "emission": 1.4
+    },
+    {
+      "mesh": "station-solar-cells.obj",
+      "group": "station",
+      "color": [
+        0.1599999964237213,
+        0.20999999344348907,
+        0.33000001311302185,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "station-station-metal.obj",
+      "group": "station",
+      "color": [
+        0.36000001430511475,
+        0.4000000059604645,
+        0.5199999809265137,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "station-station-shadows.obj",
+      "group": "station",
+      "color": [
+        0.14000000059604645,
+        0.18000000715255737,
+        0.25999999046325684,
+        1.0
+      ],
+      "emission": 0.0
+    },
+    {
+      "mesh": "station-windows-and-lights.obj",
+      "group": "station",
+      "color": [
+        0.6600000262260437,
+        0.7099999785423279,
+        0.9200000166893005,
+        1.0
+      ],
+      "emission": 0.8
+    }
+  ]
+}

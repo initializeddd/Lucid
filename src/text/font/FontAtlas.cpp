@@ -123,6 +123,23 @@ std::filesystem::path g_launchPath;
 
 } // namespace
 
+std::filesystem::path assetPath(std::string_view relative) {
+    const auto executable = executablePath();
+    std::vector<std::filesystem::path> roots;
+    if (!executable.empty()) {
+        const auto directory = executable.parent_path();
+        roots.push_back(directory / "assets");
+        roots.push_back(directory / ".." / "Resources" / "assets");
+    }
+    roots.push_back(std::filesystem::current_path() / "assets");
+    for (const auto& root : roots) {
+        const auto candidate = root / std::filesystem::path(relative);
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec) && !ec) return candidate;
+    }
+    return {};
+}
+
 void setExecutablePath(std::string_view argv0) {
     if (argv0.empty()) return;
     std::filesystem::path path{std::string(argv0)};

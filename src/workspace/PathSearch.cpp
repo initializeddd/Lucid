@@ -145,4 +145,30 @@ std::vector<std::string_view> filterPaths(const std::vector<std::string>& paths,
     return result;
 }
 
+std::vector<std::string_view> filterChildPaths(const std::vector<std::string>& paths,
+                                               std::string_view query, std::size_t limit) {
+    const auto slash = query.find_last_of('/');
+    const auto parent = slash == std::string_view::npos ? std::string_view{} : query.substr(0, slash + 1);
+    const auto fragment = slash == std::string_view::npos ? query : query.substr(slash + 1);
+    std::vector<ScoredPath> scored;
+    for (const auto& path : paths) {
+        const std::string_view value(path);
+        if (!value.starts_with(parent)) continue;
+        const auto child = value.substr(parent.size());
+        if (child.empty() || child.find('/') != std::string_view::npos) continue;
+        const int score = fragment.empty() ? 0 : scorePath(child, fragment);
+        if (score >= 0) scored.push_back({value, score});
+    }
+    std::sort(scored.begin(), scored.end(), [](const ScoredPath& a, const ScoredPath& b) {
+        if (a.score != b.score) return a.score > b.score;
+        if (a.path.size() != b.path.size()) return a.path.size() < b.path.size();
+        return a.path < b.path;
+    });
+    if (scored.size() > limit) scored.resize(limit);
+    std::vector<std::string_view> result;
+    result.reserve(scored.size());
+    for (const auto& item : scored) result.push_back(item.path);
+    return result;
+}
+
 } // namespace lucid::workspace

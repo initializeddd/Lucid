@@ -14,6 +14,9 @@ int main() {
     std::filesystem::path path;
     if (lucid::ai::ensureModel({}, path, error) || error.empty()) return 2;
     std::atomic_bool cancelled{true};
+    std::atomic<int> progress{0};
+    if (lucid::ai::ensureModel(std::filesystem::temp_directory_path(), path, error, &cancelled, &progress) ||
+        error != "Model download cancelled") return 17;
     if (lucid::ai::generate("unused.gguf", "test", output, error, &cancelled) ||
         error != "AI request cancelled") return 3;
     if (const char* model = std::getenv("LUCID_TEST_MODEL"); model && *model) {

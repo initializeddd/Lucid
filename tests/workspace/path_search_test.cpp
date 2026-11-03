@@ -59,5 +59,16 @@ int main() {
         return 9;
     }
 
+    const std::vector<std::string> files{"main.cpp", "src/main.cpp", "src/lib/helper.cpp", "other/main.cpp"};
+    results = lucid::workspace::filterChildPaths(files, "", 8);
+    if (results.size() != 1 || results[0] != "main.cpp") return 10;
+    results = lucid::workspace::filterChildPaths(files, "src/", 8);
+    if (results.size() != 1 || results[0] != "src/main.cpp") return 11;
+    results = lucid::workspace::filterChildPaths(files, "src/ma", 8);
+    if (results.size() != 1 || results[0] != "src/main.cpp") return 12;
+    const std::vector<std::string> directories{"src", "src/lib", "src/lib/nested", "other"};
+    results = lucid::workspace::filterChildPaths(directories, "src/", 8);
+    if (results.size() != 1 || results[0] != "src/lib") return 13;
+
     return 0;
 }

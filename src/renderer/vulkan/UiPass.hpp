@@ -68,16 +68,6 @@ private:
         float opacity;
     };
 
-    struct WelcomePushConstants {
-        float viewport[2];
-        float time;
-        float opacity;
-        float primary[4];
-        float secondary[4];
-        float softness;
-        float dim;
-    };
-
     struct TextRange {
         std::uint32_t firstVertex;
         std::uint32_t vertexCount;
@@ -117,10 +107,8 @@ private:
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
     VkPipelineLayout m_rectPipelineLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_textPipelineLayout = VK_NULL_HANDLE;
-    VkPipelineLayout m_welcomePipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_rectPipeline = VK_NULL_HANDLE;
     VkPipeline m_textPipeline = VK_NULL_HANDLE;
-    VkPipeline m_welcomePipeline = VK_NULL_HANDLE;
     std::array<Buffer, kFramesInFlight> m_vertexBuffers;
 
     mutable float m_animatedHighlightTop = 0.0F;

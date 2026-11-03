@@ -9,6 +9,9 @@
 #include "renderer/vulkan/BlurPass.hpp"
 #include "renderer/vulkan/Instance.hpp"
 #include "renderer/vulkan/SceneTarget.hpp"
+#include "renderer/vulkan/Background3DTarget.hpp"
+#include "renderer/vulkan/Background3DPipeline.hpp"
+#include "renderer/vulkan/Background3DScene.hpp"
 #include "renderer/vulkan/Surface.hpp"
 #include "renderer/vulkan/Swapchain.hpp"
 #include "renderer/vulkan/UiPass.hpp"
@@ -72,6 +75,15 @@ struct Renderer::Impl {
     std::array<std::unique_ptr<vk::BlurPass>, vk::kFramesInFlight> verticalBlurPasses;
     std::unique_ptr<vk::UiPass> overlayUiPass;
     std::unique_ptr<vk::UiPass> directUiPass;
+    std::array<std::unique_ptr<vk::Background3DScene>, 10> backgroundScenes;
+    std::array<std::unique_ptr<vk::Background3DTarget>, vk::kFramesInFlight> backgroundTargets;
+    std::array<std::unique_ptr<vk::Background3DPipeline>, vk::kFramesInFlight> backgroundPipelines;
+    std::array<std::unique_ptr<vk::BlurPass>, vk::kFramesInFlight> backgroundDirectPasses;
+    std::array<std::unique_ptr<vk::BlurPass>, vk::kFramesInFlight> backgroundScenePasses;
+    std::array<std::unique_ptr<vk::SceneTarget>, vk::kFramesInFlight> backgroundBlurTargets;
+    std::array<std::unique_ptr<vk::BlurPass>, vk::kFramesInFlight> backgroundHorizontalPasses;
+    std::array<std::unique_ptr<vk::BlurPass>, vk::kFramesInFlight> backgroundBlurDirectPasses;
+    std::array<std::unique_ptr<vk::BlurPass>, vk::kFramesInFlight> backgroundBlurScenePasses;
 
     Impl(Window& windowRef, const RendererConfig& config)
         : window(windowRef),
@@ -89,6 +101,12 @@ struct Renderer::Impl {
 
         contentScale = window.contentScale() * uiZoom;
         recreateFont();
+        constexpr std::array<const char*, 10> sceneNames{"city-transit", "lunar-horizon", "mountain-parallax", "", "ocean-lighthouse", "rainy-street", "orbital-station", "forest-fireflies", "drafting-grid", "retro-landscape"};
+        for (std::size_t index = 0; index < sceneNames.size(); ++index) {
+            if (sceneNames[index][0] == '\0') continue;
+            try { backgroundScenes[index] = std::make_unique<vk::Background3DScene>(device, sceneNames[index]); }
+            catch (const std::exception& error) { log::warn(std::string("3D background unavailable: ") + error.what()); }
+        }
         createUiResources();
         log::info("Renderer initialized. Presenting a dark surface.");
     }
@@ -113,6 +131,11 @@ struct Renderer::Impl {
     void createUiResources() {
         const VkExtent2D extent = swapchain.extent();
         for (std::size_t index = 0; index < vk::kFramesInFlight; ++index) {
+            backgroundDirectPasses[index].reset(); backgroundScenePasses[index].reset();
+            backgroundHorizontalPasses[index].reset(); backgroundBlurDirectPasses[index].reset(); backgroundBlurScenePasses[index].reset(); backgroundBlurTargets[index].reset();
+            backgroundPipelines[index].reset(); backgroundTargets[index].reset();
+        }
+        for (std::size_t index = 0; index < vk::kFramesInFlight; ++index) {
             sceneTargets[index] =
                 std::make_unique<vk::SceneTarget>(device, swapchain.format(), extent);
             blurTargets[index] =
@@ -128,6 +151,54 @@ struct Renderer::Impl {
                 device, swapchain.compositeRenderPass(), swapchain.format(), extent,
                 blurTargets[index]->view(), blurTargets[index]->sampler(),
                 vk::BlurAxis::Vertical);
+            if (std::any_of(backgroundScenes.begin(), backgroundScenes.end(), [](const auto& scene) { return static_cast<bool>(scene); })) {
+                try {
+                    const VkExtent2D backgroundExtent{std::max(1U, extent.width / 4U), std::max(1U, extent.height / 4U)};
+                    backgroundTargets[index] = std::make_unique<vk::Background3DTarget>(device, swapchain.format(), backgroundExtent);
+                    backgroundPipelines[index] = std::make_unique<vk::Background3DPipeline>(device, backgroundTargets[index]->renderPass());
+                    backgroundDirectPasses[index] = std::make_unique<vk::BlurPass>(device, swapchain.renderPass(), swapchain.format(), extent,
+                        backgroundTargets[index]->colorView(), backgroundTargets[index]->sampler(), vk::BlurAxis::Horizontal);
+                    backgroundScenePasses[index] = std::make_unique<vk::BlurPass>(device, sceneTargets[index]->renderPass(), swapchain.format(), extent,
+                        backgroundTargets[index]->colorView(), backgroundTargets[index]->sampler(), vk::BlurAxis::Horizontal);
+                    try {
+                        backgroundBlurTargets[index] = std::make_unique<vk::SceneTarget>(device, swapchain.format(), extent);
+                        backgroundHorizontalPasses[index] = std::make_unique<vk::BlurPass>(device, backgroundBlurTargets[index]->renderPass(), swapchain.format(), extent,
+                            backgroundTargets[index]->colorView(), backgroundTargets[index]->linearSampler(), vk::BlurAxis::Horizontal);
+                        backgroundBlurDirectPasses[index] = std::make_unique<vk::BlurPass>(device, swapchain.renderPass(), swapchain.format(), extent,
+                            backgroundBlurTargets[index]->view(), backgroundBlurTargets[index]->sampler(), vk::BlurAxis::Vertical);
+                        backgroundBlurScenePasses[index] = std::make_unique<vk::BlurPass>(device, sceneTargets[index]->renderPass(), swapchain.format(), extent,
+                            backgroundBlurTargets[index]->view(), backgroundBlurTargets[index]->sampler(), vk::BlurAxis::Vertical);
+                    } catch (const std::exception& error) {
+                        log::warn(std::string("3D background blur unavailable: ") + error.what());
+                        backgroundHorizontalPasses[index].reset(); backgroundBlurDirectPasses[index].reset(); backgroundBlurScenePasses[index].reset(); backgroundBlurTargets[index].reset();
+                    }
+                } catch (const std::exception& error) {
+                    log::warn(std::string("3D background renderer unavailable: ") + error.what());
+                    backgroundDirectPasses[index].reset(); backgroundScenePasses[index].reset();
+                    backgroundHorizontalPasses[index].reset(); backgroundBlurDirectPasses[index].reset(); backgroundBlurScenePasses[index].reset(); backgroundBlurTargets[index].reset();
+                    backgroundPipelines[index].reset(); backgroundTargets[index].reset();
+                }
+            }
+        }
+        // A partial allocation must not alternate between rendered and empty
+        // backgrounds as frames rotate through the in-flight targets.
+        const bool completeBackgroundTargets = std::all_of(backgroundTargets.begin(), backgroundTargets.end(),
+            [](const auto& target) { return static_cast<bool>(target); });
+        if (!completeBackgroundTargets) {
+            for (std::size_t index = 0; index < vk::kFramesInFlight; ++index) {
+                backgroundDirectPasses[index].reset(); backgroundScenePasses[index].reset();
+                backgroundHorizontalPasses[index].reset(); backgroundBlurDirectPasses[index].reset(); backgroundBlurScenePasses[index].reset(); backgroundBlurTargets[index].reset();
+                backgroundPipelines[index].reset(); backgroundTargets[index].reset();
+            }
+        }
+        // If only some frames obtained blur resources, use the same unblurred
+        // fallback for every frame rather than flickering between the two.
+        const bool completeBackgroundBlur = std::all_of(backgroundBlurTargets.begin(), backgroundBlurTargets.end(),
+            [](const auto& target) { return static_cast<bool>(target); });
+        if (!completeBackgroundBlur) {
+            for (std::size_t index = 0; index < vk::kFramesInFlight; ++index) {
+                backgroundHorizontalPasses[index].reset(); backgroundBlurDirectPasses[index].reset(); backgroundBlurScenePasses[index].reset(); backgroundBlurTargets[index].reset();
+            }
         }
         overlayUiPass = std::make_unique<vk::UiPass>(
             device, swapchain.overlayRenderPass(), swapchain.format(), extent,
@@ -222,6 +293,20 @@ struct Renderer::Impl {
 
         ui::FrameState sceneState = state;
         sceneState.commandVisible = false;
+        const auto sceneIndex = state.backgroundScene;
+        const bool renderBackground3D = state.backgroundMotion && sceneIndex >= 0 &&
+            static_cast<std::size_t>(sceneIndex) < backgroundScenes.size() && backgroundScenes[static_cast<std::size_t>(sceneIndex)] &&
+            backgroundTargets[currentFrame] && backgroundPipelines[currentFrame] &&
+            backgroundDirectPasses[currentFrame] && backgroundScenePasses[currentFrame];
+        const float backgroundBlurRadius = 12.0F * contentScale * std::clamp(state.backgroundDim, 0.0F, 1.0F);
+        const bool blurBackground3D = renderBackground3D && backgroundBlurRadius > 0.01F &&
+            backgroundBlurTargets[currentFrame] && backgroundHorizontalPasses[currentFrame] &&
+            backgroundBlurDirectPasses[currentFrame] && backgroundBlurScenePasses[currentFrame];
+        // All supported choices use 3D assets. If a device or asset fails to
+        // initialize, leave the background clear instead of showing an
+        // unrelated legacy 2D placeholder for the selected scene.
+        if (state.backgroundScene >= 0 && static_cast<std::size_t>(state.backgroundScene) < backgroundScenes.size())
+            sceneState.backgroundMotion = false;
         if (state.commandVisible) {
             sceneState.showWindowTitle = false;
         }
@@ -237,6 +322,35 @@ struct Renderer::Impl {
         overlayState.commandVisible = true;
         overlayState.backgroundMotion = false;
 
+        if (renderBackground3D) {
+            std::array<VkClearValue, 2> sceneClear{};
+            sceneClear[0] = clearValue;
+            sceneClear[1].depthStencil = {1.0F, 0};
+            VkRenderPassBeginInfo backgroundInfo{}; backgroundInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            backgroundInfo.renderPass = backgroundTargets[currentFrame]->renderPass();
+            backgroundInfo.framebuffer = backgroundTargets[currentFrame]->framebuffer();
+            backgroundInfo.renderArea.extent = backgroundTargets[currentFrame]->extent();
+            backgroundInfo.clearValueCount = static_cast<std::uint32_t>(sceneClear.size()); backgroundInfo.pClearValues = sceneClear.data();
+            vkCmdBeginRenderPass(commandBuffer, &backgroundInfo, VK_SUBPASS_CONTENTS_INLINE);
+            std::array<float,4> primary{state.settingsPrimary.r, state.settingsPrimary.g, state.settingsPrimary.b, 1.0F};
+            if (vk::isSrgbFormat(swapchain.format())) primary = vk::srgbToLinear(primary);
+            backgroundScenes[static_cast<std::size_t>(sceneIndex)]->draw(commandBuffer, *backgroundPipelines[currentFrame], backgroundTargets[currentFrame]->extent(), state.animationTime, state.backgroundDim, clear, {primary[0], primary[1], primary[2]});
+            vkCmdEndRenderPass(commandBuffer);
+            shaderReadBarrier(commandBuffer, backgroundTargets[currentFrame]->colorImage());
+        }
+        if (blurBackground3D) {
+            VkRenderPassBeginInfo blurInfo{};
+            blurInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            blurInfo.renderPass = backgroundBlurTargets[currentFrame]->renderPass();
+            blurInfo.framebuffer = backgroundBlurTargets[currentFrame]->framebuffer();
+            blurInfo.renderArea.extent = swapchain.extent();
+            blurInfo.clearValueCount = 1; blurInfo.pClearValues = &clearValue;
+            vkCmdBeginRenderPass(commandBuffer, &blurInfo, VK_SUBPASS_CONTENTS_INLINE);
+            backgroundHorizontalPasses[currentFrame]->draw(commandBuffer, backgroundBlurRadius, 0.0F);
+            vkCmdEndRenderPass(commandBuffer);
+            shaderReadBarrier(commandBuffer, backgroundBlurTargets[currentFrame]->image());
+        }
+
         if (!state.commandVisible) {
             VkRenderPassBeginInfo directInfo{};
             directInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -249,6 +363,8 @@ struct Renderer::Impl {
 
             vkCmdBeginRenderPass(commandBuffer, &directInfo,
                                  VK_SUBPASS_CONTENTS_INLINE);
+            if (blurBackground3D) backgroundBlurDirectPasses[currentFrame]->draw(commandBuffer, backgroundBlurRadius, 0.0F);
+            else if (renderBackground3D) backgroundDirectPasses[currentFrame]->draw(commandBuffer, 0.0F, 0.0F);
             directUiPass->draw(commandBuffer, currentFrame, sceneState);
             vkCmdEndRenderPass(commandBuffer);
         } else {
@@ -263,6 +379,8 @@ struct Renderer::Impl {
 
             vkCmdBeginRenderPass(commandBuffer, &sceneInfo,
                                  VK_SUBPASS_CONTENTS_INLINE);
+            if (blurBackground3D) backgroundBlurScenePasses[currentFrame]->draw(commandBuffer, backgroundBlurRadius, 0.0F);
+            else if (renderBackground3D) backgroundScenePasses[currentFrame]->draw(commandBuffer, 0.0F, 0.0F);
             sceneUiPasses[currentFrame]->draw(commandBuffer, currentFrame, sceneState);
             vkCmdEndRenderPass(commandBuffer);
 

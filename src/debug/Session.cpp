@@ -13,7 +13,7 @@ int integer(const JsonValue* v) {
 }
 }
 void Session::request(std::string command, std::string arguments) {
-    const int seq = m_seq++; m_requests.emplace(seq, Pending{command, m_generation});
+    const int seq = m_seq++; m_requests.emplace(seq, Pending{command, m_generation, {}});
     m_outbound += frame("{\"seq\":" + std::to_string(seq) + ",\"type\":\"request\",\"command\":" + jsonString(command) + ",\"arguments\":" + arguments + "}");
 }
 void Session::start(std::string program, std::string cwd, std::string source, std::vector<int> breakpoints) {
@@ -23,7 +23,7 @@ void Session::start(std::string program, std::string cwd, std::string source, st
     m_source = std::move(source);
 }
 void Session::start(std::string program, std::string cwd, std::map<std::string, std::vector<int>> breakpoints) {
-    m_decoder.reset(); m_seq = 1; m_thread = 0; m_generation = 0; m_initialized = false; m_requests.clear(); m_outbound.clear(); m_stack.clear(); m_variables.clear(); m_output.clear(); m_breakpointWarning.clear(); m_previousValues.clear(); m_previousFrameName.clear(); m_previousFramePath.clear(); m_selectedFrame = 0; m_expanded = false;
+    m_decoder.reset(); m_seq = 1; m_thread = 0; m_generation = 0; m_initialized = false; m_requests.clear(); m_outbound.clear(); m_stack.clear(); m_variables.clear(); m_output.clear(); m_breakpointWarning.clear(); m_breakpointWarnings.clear(); m_breakpointRequests.clear(); m_previousValues.clear(); m_previousFrameName.clear(); m_previousFramePath.clear(); m_selectedFrame = 0; m_expanded = false;
     m_program = std::move(program); m_cwd = std::move(cwd); m_source = breakpoints.empty() ? std::string{} : breakpoints.begin()->first; m_breakpoints = std::move(breakpoints);
     m_state = State::Initializing; m_message = "Starting debugger";
     request("initialize", "{\"clientID\":\"lucid\",\"adapterID\":\"lldb-dap\",\"linesStartAt1\":true,\"columnsStartAt1\":true,\"pathFormat\":\"path\",\"supportsRunInTerminalRequest\":false}");
@@ -45,7 +45,9 @@ void Session::handle(std::string_view raw) {
     }
     if (type == "event") {
         const auto event = text(value->find("event")); const auto* body = value->find("body");
+        if ((m_state == State::Ended || m_state == State::Failed) && event != "output") return;
         if (event == "initialized") {
+            if (m_initialized) return;
             m_initialized = true; std::string ignored;
             const auto allBreakpoints = m_breakpoints;
             for (const auto& [source, lines] : allBreakpoints) (void)setBreakpoints(source, lines, ignored);
@@ -55,7 +57,7 @@ void Session::handle(std::string_view raw) {
             if (m_thread) request("stackTrace", "{\"threadId\":" + std::to_string(m_thread) + ",\"startFrame\":0,\"levels\":30}");
             else request("threads", "{}");
         } else if (event == "continued") { m_state = State::Running; m_message = "Running"; m_stack.clear(); m_variables.clear(); }
-        else if (event == "terminated" || event == "exited") { m_state = State::Ended; m_message = "Debug session ended"; }
+        else if (event == "terminated" || event == "exited") { ++m_generation; m_initialized = false; m_state = State::Ended; m_message = "Debug session ended"; m_stack.clear(); m_variables.clear(); m_thread = 0; }
         else if (event == "output") { m_output += text(member(body, "output")); if (m_output.size() > 65536) m_output.erase(0, m_output.size() - 65536); }
         return;
     }
@@ -64,12 +66,14 @@ void Session::handle(std::string_view raw) {
     if (pending == m_requests.end()) return;
     const auto pendingRequest = pending->second; m_requests.erase(pending);
     const std::string& command = pendingRequest.command;
+    if (m_state == State::Ended || m_state == State::Failed) return;
+    if (command == "setBreakpoints" && !pendingRequest.source.empty() && m_breakpointRequests[pendingRequest.source] != seq) return;
     if ((command == "threads" || command == "stackTrace" || command == "scopes" || command == "variables") && pendingRequest.generation != m_generation) return;
     const auto* success = value->find("success"); const auto* body = value->find("body");
     if (!success || success->type != JsonType::Bool || !success->boolValue) {
         m_message = command + ": " + text(value->find("message"));
         if (command == "initialize" || command == "launch" || command == "configurationDone") m_state = State::Failed;
-        else if (command == "setBreakpoints") m_breakpointWarning = m_message;
+        else if (command == "setBreakpoints") { m_breakpointWarnings[pendingRequest.source] = m_message; m_breakpointWarning = m_message; }
         else if ((command == "continue" || command == "next" || command == "stepIn" || command == "stepOut") && pendingRequest.generation == m_generation) m_state = State::Stopped;
         return;
     }
@@ -83,15 +87,18 @@ void Session::handle(std::string_view raw) {
         request("launch", launch + "}");
     } else if (command == "launch" && m_state == State::Launching) { m_state = State::Running; m_message = "Running"; }
     else if (command == "setBreakpoints") {
-        m_breakpointWarning.clear(); const auto* points = member(body, "breakpoints");
+        std::string warning; const auto* points = member(body, "breakpoints");
         if (points && points->type == JsonType::Array) for (const auto& point : points->children) {
             const auto* verified = point.find("verified");
             if (!verified || verified->type != JsonType::Bool || !verified->boolValue) {
-                m_breakpointWarning = "A breakpoint could not be verified";
-                const auto detail = text(point.find("message")); if (!detail.empty()) m_breakpointWarning += ": " + detail;
+                warning = "A breakpoint could not be verified";
+                const auto detail = text(point.find("message")); if (!detail.empty()) warning += ": " + detail;
                 break;
             }
         }
+        if (warning.empty()) m_breakpointWarnings.erase(pendingRequest.source);
+        else m_breakpointWarnings[pendingRequest.source] = warning;
+        m_breakpointWarning = m_breakpointWarnings.empty() ? std::string{} : m_breakpointWarnings.begin()->second;
     }
     else if (command == "threads") {
         const auto* threads = member(body, "threads"); if (threads && threads->type == JsonType::Array && !threads->children.empty()) m_thread = integer(threads->children[0].find("id"));
@@ -151,8 +158,15 @@ bool Session::setBreakpoints(std::string source, std::vector<int> lines, std::st
         std::string args = "{\"source\":{\"path\":" + jsonString(source) + "},\"breakpoints\":[";
         for (std::size_t i = 0; i < lines.size(); ++i) { if (i) args += ','; args += "{\"line\":" + std::to_string(lines[i]) + "}"; }
         args += "]}"; request("setBreakpoints", args);
+        m_requests[m_seq - 1].source = source; m_breakpointRequests[source] = m_seq - 1;
     }
     error.clear(); return true;
 }
 void Session::disconnect() { if (m_state != State::Idle && m_state != State::Ended && m_state != State::Failed) request("disconnect", "{\"terminateDebuggee\":true}"); }
+void Session::transportClosed(std::string message, bool expected) {
+    ++m_generation; m_initialized = false; m_thread = 0; m_stack.clear(); m_variables.clear();
+    m_requests.clear(); m_outbound.clear();
+    m_state = expected ? State::Ended : State::Failed;
+    m_message = std::move(message);
+}
 }

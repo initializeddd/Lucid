@@ -5,6 +5,27 @@ All notable changes to Lucid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1-lucid.1] - 2026-11-03
+
+### Added
+
+- Nine selectable, animated 3D background scenes with primary-color tinting, Gaussian blur, and an option to disable motion.
+- C/C++ language-server integration through a locally installed `clangd`, including completion, diagnostics, navigation, references and formatting.
+- Project-wide search and reviewed replacement, recent-project and open-file session restore, and saved-file history.
+- Git history and reviewed fetch, fast-forward pull and push for a configured upstream.
+- Scrollable file and project suggestions with subtle animated edge cues, and welcome and status transitions.
+
+### Changed
+
+- Improved save checks, recovery snapshots and preservation of supported file metadata. Recovery remains periodic and is not a substitute for backups.
+- Improved local AI model download feedback and error reporting, local prompts, and read-only response scrolling.
+- Refined file icons, keyboard shortcuts, compile output selection, debugger handling and settings.
+
+### Limitations
+
+- Multiplayer and the full module runtime are not available. Debugger, BSD desktop, accessibility and other platform-specific workflows need further validation.
+- Packages are unsigned for distribution. The private repository requires authenticated downloads; the installer script cannot fetch private release assets directly.
+
 ## [0.2.0-beta.1] - 2026-11-03
 
 ### Added
@@ -75,7 +96,9 @@ First public beta. Download builds for macOS, Linux and Windows from the
 
 - Initial public foundation: Vulkan renderer, window layer, editor core and build system.
 
-[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.1.0-beta.4...HEAD
+[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.2.1-lucid.1...HEAD
+[0.2.1-lucid.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-lucid.1
+[0.2.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.0-beta.1
 [0.1.0-beta.4]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.2

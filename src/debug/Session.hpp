@@ -17,6 +17,7 @@ public:
     [[nodiscard]] std::string takeOutbound();
     [[nodiscard]] bool resume(std::string_view command, std::string& error);
     void disconnect();
+    void transportClosed(std::string message, bool expected);
     [[nodiscard]] bool setBreakpoints(std::vector<int> lines, std::string& error);
     [[nodiscard]] bool setBreakpoints(std::string source, std::vector<int> lines, std::string& error);
     [[nodiscard]] bool selectFrame(std::size_t index, std::string& error);
@@ -39,13 +40,15 @@ private:
     bool m_initialized = false;
     std::string m_program, m_cwd, m_source, m_outbound, m_message, m_output, m_breakpointWarning;
     std::map<std::string, std::vector<int>> m_breakpoints;
+    std::map<std::string, std::string> m_breakpointWarnings;
+    std::map<std::string, int> m_breakpointRequests;
     std::vector<StackFrame> m_stack;
     std::vector<Variable> m_variables;
     std::map<std::string, std::string> m_previousValues;
     std::string m_previousFrameName, m_previousFramePath;
     std::size_t m_selectedFrame = 0;
     bool m_expanded = false;
-    struct Pending { std::string command; std::uint64_t generation; };
+    struct Pending { std::string command; std::uint64_t generation; std::string source; };
     std::map<int, Pending> m_requests;
 };
 }

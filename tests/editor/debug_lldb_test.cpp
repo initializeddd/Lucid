@@ -29,8 +29,16 @@ int main(int argc, char** argv) {
         if (session.state() == State::Stopped && !session.stack().empty() && !session.variables().empty()) {
             if (!stopped) {
                 if (session.stack()[0].line != 4) { std::cerr << "Unexpected line " << session.stack()[0].line; return 7; }
+                bool valueFound = false;
+                for (const auto& variable : session.variables()) if (variable.name == "n" && variable.value.find('7') != std::string::npos) valueFound = true;
+                if (!valueFound) { std::cerr << "Expected n = 7 at breakpoint"; return 11; }
                 stopped = true; if (!session.resume("next", error)) return 8;
-            } else if (!stepped) { stepped = true; if (!session.resume("continue", error)) return 8; }
+            } else if (!stepped) {
+                bool changed = false;
+                for (const auto& variable : session.variables()) if (variable.name == "n" && variable.value.find('8') != std::string::npos && variable.changed) changed = true;
+                if (!changed) { std::cerr << "Expected n to change to 8 after stepping"; return 12; }
+                stepped = true; if (!session.resume("continue", error)) return 8;
+            }
             else { secondFile = std::filesystem::path(session.stack()[0].path).filename() == helper.filename() && session.stack()[0].line == 2; break; }
         }
         if (session.state() == State::Ended && !secondFile) { std::cerr << "Ended before breakpoint: " << session.output(); return 9; }

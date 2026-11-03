@@ -1,5 +1,6 @@
 #include "workspace/recovery/Snapshot.hpp"
 #include "editor/json/Json.hpp"
+#include "workspace/Project.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -38,7 +39,7 @@ bool context(const editor::JsonValue& value, FileContext& out) {
 }
 bool write(const std::filesystem::path& path, const Snapshot& s, std::string& error) {
     error.clear();
-    if (s.project.empty() || s.file.empty() || s.contents.size() > 10U * 1024U * 1024U || s.baseline.size() > 10U * 1024U * 1024U || s.openFiles.size() > 1024) { error = "Recovery snapshot is too large or incomplete"; return false; }
+    if (s.project.empty() || s.file.empty() || s.contents.size() > 16U * 1024U * 1024U || s.baseline.size() > 16U * 1024U * 1024U || s.openFiles.size() > 1024) { error = "Recovery snapshot is too large or incomplete"; return false; }
     std::error_code ec; std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) { error = "Cannot create recovery folder: " + ec.message(); return false; }
 #if !defined(_WIN32)
@@ -50,28 +51,23 @@ bool write(const std::filesystem::path& path, const Snapshot& s, std::string& er
         << ",\"line\":" << s.line << ",\"column\":" << s.column << ",\"firstLine\":" << std::max(s.firstLine, 0) << ",\"openFiles\":[";
     for (std::size_t i = 0; i < s.openFiles.size(); ++i) { const auto& f = s.openFiles[i]; if (i) out << ','; out << "{\"path\":" << quote(f.path) << ",\"line\":" << f.line << ",\"column\":" << f.column << ",\"firstLine\":" << std::max(f.firstLine,0) << '}'; }
     out << "]}";
-    if (out.tellp() > 24 * 1024 * 1024) { error = "Recovery snapshot is too large"; return false; }
-    auto temp = path; temp += ".tmp";
-    { std::ofstream file(temp, std::ios::binary | std::ios::trunc); const auto data = out.str(); file.write(data.data(), static_cast<std::streamsize>(data.size())); file.close();
-      if (!file) { std::filesystem::remove(temp, ec); error = "Could not write recovery snapshot"; return false; } }
-#if defined(_WIN32)
-    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { std::filesystem::remove(temp, ec); error = "Could not replace recovery snapshot"; return false; }
-#else
-    std::filesystem::rename(temp, path, ec);
-    if (ec) { auto message = ec.message(); std::filesystem::remove(temp, ec); error = "Could not replace recovery snapshot: " + message; return false; }
-#endif
+    if (out.tellp() > 200 * 1024 * 1024) { error = "Recovery snapshot is too large"; return false; }
+    bool created = false;
+    auto directory = workspace::Project::openOrCreate(path.parent_path(), created, error, false);
+    if (!error.empty()) return false;
+    if (!directory.writeFile(path.filename().generic_string(), out.str(), error)) { error = "Could not safely write recovery snapshot: " + error; return false; }
     return true;
 }
 bool read(const std::filesystem::path& path, Snapshot& snapshot, std::string& error) {
     std::error_code ec; const auto size = std::filesystem::file_size(path, ec);
-    if (ec || size > 24U * 1024U * 1024U) { error = "Recovery snapshot is unavailable or too large"; return false; }
+    if (ec || size > 200U * 1024U * 1024U) { error = "Recovery snapshot is unavailable or too large"; return false; }
     std::ifstream input(path, std::ios::binary); if (!input) { error = "Cannot read recovery snapshot"; return false; }
     std::string data((std::istreambuf_iterator<char>(input)), {}); editor::JsonError parseError; const auto json = editor::parseJson(data, parseError);
     Snapshot next; std::size_t first = 0;
     const auto* version = json ? json->find("version") : nullptr;
     if (!json || json->type != editor::JsonType::Object || !version || version->type != editor::JsonType::Number || version->numberValue != 1 ||
         !text(*json, "project", next.project) || !text(*json, "file", next.file) || !text(*json, "baseline", next.baseline) || !text(*json, "contents", next.contents) ||
-        next.project.empty() || next.file.empty() || next.baseline.size() > 10U * 1024U * 1024U || next.contents.size() > 10U * 1024U * 1024U ||
+        next.project.empty() || next.file.empty() || next.baseline.size() > 16U * 1024U * 1024U || next.contents.size() > 16U * 1024U * 1024U ||
         !number(*json, "line", next.line) || !number(*json, "column", next.column) || !number(*json, "firstLine", first)) { error = "Invalid recovery snapshot"; return false; }
     next.firstLine = static_cast<int>(first);
     const auto* files = json->find("openFiles"); if (!files || files->type != editor::JsonType::Array || files->children.size() > 1024) { error = "Invalid recovery context"; return false; }

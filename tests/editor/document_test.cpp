@@ -344,5 +344,53 @@ int main() {
     words.moveWordLeft();
     if (words.cursorColumn() != 7) return 63;
 
+    Document collapse = Document::fromUtf8("first\nsecond");
+    collapse.setCursor(1, 3); collapse.extendSelectionTo(0, 2); collapse.moveRight();
+    if (collapse.hasSelection() || collapse.cursorLine() != 1 || collapse.cursorColumn() != 3) return 64;
+    collapse.setCursor(0, 2); collapse.extendSelectionTo(1, 3); collapse.moveLeft();
+    if (collapse.hasSelection() || collapse.cursorLine() != 0 || collapse.cursorColumn() != 2) return 65;
+
+    Document boundaryHistory = Document::fromUtf8("a");
+    boundaryHistory.setCursor(0, 1); boundaryHistory.insert(U'b'); boundaryHistory.undo();
+    boundaryHistory.setCursor(0, 0); boundaryHistory.backspace(); boundaryHistory.outdentLines(); boundaryHistory.redo();
+    if (boundaryHistory.toUtf8() != "ab") return 66;
+    boundaryHistory.undo(); boundaryHistory.setCursor(0, 1); boundaryHistory.deleteForward(); boundaryHistory.redo();
+    if (boundaryHistory.toUtf8() != "ab") return 67;
+
+    Document block = Document::fromUtf8("a\nb\nc\nd");
+    block.setCursor(1, 0); block.extendSelectionTo(3, 0); block.moveLineUp();
+    if (block.toUtf8() != "b\nc\na\nd" || block.selectionUtf8() != "b\nc\n") return 68;
+    block.moveLineDown();
+    if (block.toUtf8() != "a\nb\nc\nd" || block.selectionUtf8() != "b\nc\n") return 69;
+    block.duplicateLine();
+    if (block.toUtf8() != "a\nb\nc\nb\nc\nd" || block.selectionUtf8() != "b\nc\n") return 70;
+    block.undo();
+    if (block.toUtf8() != "a\nb\nc\nd" || block.selectionUtf8() != "b\nc\n") return 71;
+
+    Document last = Document::fromUtf8("a\nb\nc");
+    last.setCursor(1, 0); last.extendSelectionTo(2, 0); last.moveLineDown();
+    if (last.toUtf8() != "a\nc\nb" || last.selectionUtf8() != "b") return 72;
+
+    Document smart = Document::fromUtf8("      value");
+    smart.setCursor(0, 11); smart.moveSmartHome();
+    if (smart.cursorColumn() != 6) return 73;
+    smart.moveSmartHome();
+    if (smart.cursorColumn() != 0) return 74;
+    smart.setCursor(0, 6); smart.moveSmartHome(true);
+    if (smart.selectionUtf8() != "      ") return 75;
+
+    std::string formatError, formatted;
+    const std::string windowsText = "\xef\xbb\xbf" "one\r\ntwo\r\n";
+    if (!Document::canEditLosslessly(windowsText, formatError)) return 76;
+    auto windowsDoc = Document::fromUtf8(windowsText);
+    windowsDoc.setCursor(1, 3); windowsDoc.insert(U'!');
+    if (!windowsDoc.serializeForFile(windowsText, formatted, formatError) ||
+        formatted != "\xef\xbb\xbf" "one\r\ntwo!\r\n") return 77;
+    const std::string oldMac = "one\rtwo\r";
+    auto oldMacDoc = Document::fromUtf8(oldMac);
+    if (!oldMacDoc.serializeForFile(oldMac, formatted, formatError) || formatted != oldMac) return 78;
+    if (Document::canEditLosslessly("one\r\ntwo\n", formatError) || formatError.empty()) return 79;
+    if (Document::canEditLosslessly(std::string("bad\xff", 4), formatError) || formatError.empty()) return 80;
+
     return 0;
 }

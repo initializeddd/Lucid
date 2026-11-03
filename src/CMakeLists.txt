@@ -14,7 +14,8 @@ set(LUCID_SHADERS
     "${PROJECT_SOURCE_DIR}/assets/shaders/ui_text.frag"
     "${PROJECT_SOURCE_DIR}/assets/shaders/fullscreen.vert"
     "${PROJECT_SOURCE_DIR}/assets/shaders/blur.frag"
-    "${PROJECT_SOURCE_DIR}/assets/shaders/welcome.frag")
+    "${PROJECT_SOURCE_DIR}/assets/shaders/background3d.vert"
+    "${PROJECT_SOURCE_DIR}/assets/shaders/background3d.frag")
 
 lucid_compile_shaders(LUCID_SHADER_HEADERS ${LUCID_SHADERS})
 
@@ -108,6 +109,7 @@ else()
 endif()
 
 add_custom_command(TARGET lucid POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${LUCID_ASSET_DESTINATION}/backgrounds"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "${PROJECT_SOURCE_DIR}/assets"
         "${LUCID_ASSET_DESTINATION}"
@@ -122,6 +124,29 @@ if(APPLE)
             COMMENT "Ad-hoc signing Lucid.app")
     endif()
 endif()
+
+# The executable's POST_BUILD copy handles an initial or explicitly requested
+# `lucid` build. Track assets separately as well so editing a model updates an
+# already-built application even when the executable itself does not relink.
+file(GLOB_RECURSE LUCID_ASSET_FILES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/assets/*")
+set(LUCID_ASSET_STAMP "${CMAKE_CURRENT_BINARY_DIR}/lucid-assets-$<CONFIG>.stamp")
+if(APPLE AND LUCID_CODESIGN)
+    add_custom_command(OUTPUT "${LUCID_ASSET_STAMP}"
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${LUCID_ASSET_DESTINATION}/backgrounds"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PROJECT_SOURCE_DIR}/assets" "${LUCID_ASSET_DESTINATION}"
+        COMMAND "${LUCID_CODESIGN}" --force --sign - --timestamp=none "$<TARGET_BUNDLE_DIR:lucid>"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${LUCID_ASSET_STAMP}"
+        DEPENDS lucid ${LUCID_ASSET_FILES}
+        COMMENT "Updating and signing Lucid assets")
+else()
+    add_custom_command(OUTPUT "${LUCID_ASSET_STAMP}"
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${LUCID_ASSET_DESTINATION}/backgrounds"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PROJECT_SOURCE_DIR}/assets" "${LUCID_ASSET_DESTINATION}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${LUCID_ASSET_STAMP}"
+        DEPENDS lucid ${LUCID_ASSET_FILES}
+        COMMENT "Updating Lucid assets")
+endif()
+add_custom_target(lucid_assets ALL DEPENDS "${LUCID_ASSET_STAMP}")
 
 install(TARGETS lucid
     BUNDLE DESTINATION .

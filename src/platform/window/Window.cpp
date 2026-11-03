@@ -68,6 +68,8 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
         return input::Key::Home;
     case GLFW_KEY_END:
         return input::Key::End;
+    case GLFW_KEY_F12:
+        return input::Key::F12;
     case GLFW_KEY_B: return input::Key::B;
     case GLFW_KEY_A:
         return input::Key::A;
@@ -218,6 +220,10 @@ Window::~Window() {
 
 bool Window::shouldClose() const noexcept {
     return glfwWindowShouldClose(m_window) == GLFW_TRUE;
+}
+
+void Window::cancelClose() noexcept {
+    glfwSetWindowShouldClose(m_window, GLFW_FALSE);
 }
 
 void Window::pollEvents() const {
@@ -397,7 +403,7 @@ std::vector<const char*> Window::requiredVulkanInstanceExtensions() {
     return std::vector<const char*>(extensions, extensions + count);
 }
 
-void Window::keyCallback(GLFWwindow* window, int key, int /*scancode*/, int action, int mods) {
+void Window::keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (self == nullptr || !self->m_keyCallback) {
         return;
@@ -405,6 +411,15 @@ void Window::keyCallback(GLFWwindow* window, int key, int /*scancode*/, int acti
 
     input::KeyEvent event;
     event.key = translateKey(key);
+    // GLFW key codes describe US key positions; shortcut letters should follow
+    // the active keyboard layout, just as typed text does.
+    if ((mods & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER)) != 0) {
+        if (const char* name = glfwGetKeyName(key, scancode); name && name[0] && !name[1]) {
+            const char c = name[0];
+            if (c >= 'a' && c <= 'z') event.key = translateKey(GLFW_KEY_A + c - 'a');
+            else if (c >= 'A' && c <= 'Z') event.key = translateKey(GLFW_KEY_A + c - 'A');
+        }
+    }
     event.action = translateAction(action);
     event.shift = (mods & GLFW_MOD_SHIFT) != 0;
     event.control = (mods & GLFW_MOD_CONTROL) != 0;

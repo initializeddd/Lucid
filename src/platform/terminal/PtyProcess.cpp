@@ -303,6 +303,7 @@ void PtyProcess::pumpOutput() {
     trimToSize(m_output, kMaxOutput);
 
     if (closed) {
+        if (!m_commandsDone && m_nextCommand > m_exitCodes.size()) m_exitCodes.push_back(-1);
         if (m_fd >= 0) {
             ::close(m_fd);
             m_fd = -1;

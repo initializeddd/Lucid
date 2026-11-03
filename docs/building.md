@@ -1,6 +1,6 @@
 # Building
 
-Lucid builds with CMake on macOS, Linux and Windows. The project needs CMake 3.24 or newer, a
+Lucid builds with CMake on macOS, Linux, Windows, FreeBSD and OpenBSD. The project needs CMake 3.24 or newer, a
 C++20 compiler, GLFW 3.3+, the Vulkan 1.2 headers and loader, and `glslangValidator`. GLFW is
 fetched automatically when a system installation is not found.
 
@@ -51,8 +51,7 @@ The install step copies the bundle and re-signs it, because replacing the execut
 catalog invalidates the previous ad-hoc signature. If you copy the bundle manually with `ditto`, run
 `codesign --force --deep --sign - /Applications/Lucid.app` afterwards.
 
-The macOS deployment target defaults to the host SDK, matching the Homebrew GLFW and Vulkan loader
-that are linked at build time. Set `-DCMAKE_OSX_DEPLOYMENT_TARGET=...` to override it, but the app
+The macOS deployment target defaults to 14.0; linked libraries may impose their own minimum. Set `-DCMAKE_OSX_DEPLOYMENT_TARGET=...` to override it, but the app
 cannot run below the minimum version of its linked dependencies. The bundle is not self-contained;
 bundle the dylibs or use a Developer ID build pipeline for distribution.
 
@@ -145,8 +144,12 @@ For an optimized build use `--config Release` and run `.\build\bin\Lucid.exe`.
 
 The executable embeds `packaging/windows/lucid.ico`. On Windows 11, Lucid applies a dark caption,
 text and border color with DWM while keeping the standard minimize, maximize and close controls.
-Compile functions and their PTY terminals currently run on macOS and Linux only; the Windows platform
+Compile functions and their PTY terminals currently run on macOS, Linux and BSD; the Windows platform
 layer reports that the terminal is unavailable.
+
+## FreeBSD and OpenBSD
+
+Native builds require CMake, Ninja, Git, GLFW, Vulkan headers and loader, glslang, and system crypto libraries. Install these with `pkg` on FreeBSD or `pkg_add` on OpenBSD, then configure with `-DCMAKE_PREFIX_PATH=/usr/local`. The release workflow builds and tests both systems in virtual machines; graphical desktop and driver coverage remains limited. The archives use system libraries.
 
 ## Icons
 

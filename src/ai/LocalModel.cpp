@@ -26,8 +26,13 @@ bool generate(const std::filesystem::path& modelPath, std::string_view request,
         error = "Could not load the local AI model";
         return false;
     }
-    const std::string prompt = "<|im_start|>system\nYou are a concise coding assistant. "
-                               "Offer suggestions, never claim to have edited files.<|im_end|>\n"
+    const std::string prompt = "<|im_start|>system\nYou are a concise coding assistant in the Lucid editor. "
+                               "Offer suggestions, never claim to have edited files. "
+                               "Lucid compile functions are written inside C or C++ block comments: "
+                               "start with @name, put each shell command on a line beginning with $, and finish with @end. "
+                               "For example: /*\n@build\n$cmake --build %project%/build\n@end\n*/. "
+                               "Optional platform suffixes include :macOS and :windows. "
+                               "Commands run from the project root and %project% expands to that root.<|im_end|>\n"
                                "<|im_start|>user\n" + std::string(request) +
                                "<|im_end|>\n<|im_start|>assistant\n";
     if (prompt.size() > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {

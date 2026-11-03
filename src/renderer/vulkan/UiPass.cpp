@@ -14,11 +14,10 @@
 #include "shaders/ui_rect.frag.h"
 #include "shaders/ui_text.vert.h"
 #include "shaders/ui_text.frag.h"
-#include "shaders/fullscreen.vert.h"
-#include "shaders/welcome.frag.h"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
@@ -195,20 +194,6 @@ void UiPass::createPipelineLayouts() {
         vkCreatePipelineLayout(m_device.handle(), &textInfo, nullptr,
                                &m_textPipelineLayout));
 
-    VkPushConstantRange welcomeRange{};
-    welcomeRange.stageFlags =
-        static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_VERTEX_BIT |
-                                        VK_SHADER_STAGE_FRAGMENT_BIT);
-    welcomeRange.offset = 0;
-    welcomeRange.size = sizeof(WelcomePushConstants);
-
-    VkPipelineLayoutCreateInfo welcomeInfo{};
-    welcomeInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    welcomeInfo.pushConstantRangeCount = 1;
-    welcomeInfo.pPushConstantRanges = &welcomeRange;
-    LUCID_VK_CHECK(
-        vkCreatePipelineLayout(m_device.handle(), &welcomeInfo, nullptr,
-                               &m_welcomePipelineLayout));
 }
 
 void UiPass::createPipelines() {
@@ -216,18 +201,12 @@ void UiPass::createPipelines() {
     VkShaderModule rectFrag = VK_NULL_HANDLE;
     VkShaderModule textVert = VK_NULL_HANDLE;
     VkShaderModule textFrag = VK_NULL_HANDLE;
-    VkShaderModule welcomeVert = VK_NULL_HANDLE;
-    VkShaderModule welcomeFrag = VK_NULL_HANDLE;
 
     try {
         rectVert = createShaderModule(m_device, ui_rect_vert_spv, sizeof(ui_rect_vert_spv));
         rectFrag = createShaderModule(m_device, ui_rect_frag_spv, sizeof(ui_rect_frag_spv));
         textVert = createShaderModule(m_device, ui_text_vert_spv, sizeof(ui_text_vert_spv));
         textFrag = createShaderModule(m_device, ui_text_frag_spv, sizeof(ui_text_frag_spv));
-        welcomeVert = createShaderModule(m_device, fullscreen_vert_spv,
-                                         sizeof(fullscreen_vert_spv));
-        welcomeFrag = createShaderModule(m_device, welcome_frag_spv,
-                                         sizeof(welcome_frag_spv));
 
         VkPipelineShaderStageCreateInfo rectStages[2]{};
         rectStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -346,22 +325,6 @@ void UiPass::createPipelines() {
         LUCID_VK_CHECK(vkCreateGraphicsPipelines(m_device.handle(), VK_NULL_HANDLE, 1,
                                                  &pipelineInfo, nullptr, &m_textPipeline));
 
-        VkPipelineShaderStageCreateInfo welcomeStages[2]{};
-        welcomeStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        welcomeStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        welcomeStages[0].module = welcomeVert;
-        welcomeStages[0].pName = "main";
-        welcomeStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        welcomeStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        welcomeStages[1].module = welcomeFrag;
-        welcomeStages[1].pName = "main";
-
-        pipelineInfo.pStages = welcomeStages;
-        pipelineInfo.pVertexInputState = &rectVertexInput;
-        pipelineInfo.layout = m_welcomePipelineLayout;
-        LUCID_VK_CHECK(vkCreateGraphicsPipelines(m_device.handle(), VK_NULL_HANDLE, 1,
-                                                 &pipelineInfo, nullptr,
-                                                 &m_welcomePipeline));
     } catch (...) {
         if (m_rectPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device.handle(), m_rectPipeline, nullptr);
@@ -371,16 +334,10 @@ void UiPass::createPipelines() {
             vkDestroyPipeline(m_device.handle(), m_textPipeline, nullptr);
             m_textPipeline = VK_NULL_HANDLE;
         }
-        if (m_welcomePipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device.handle(), m_welcomePipeline, nullptr);
-            m_welcomePipeline = VK_NULL_HANDLE;
-        }
         destroyShaderModule(m_device.handle(), rectVert);
         destroyShaderModule(m_device.handle(), rectFrag);
         destroyShaderModule(m_device.handle(), textVert);
         destroyShaderModule(m_device.handle(), textFrag);
-        destroyShaderModule(m_device.handle(), welcomeVert);
-        destroyShaderModule(m_device.handle(), welcomeFrag);
         throw;
     }
 
@@ -388,8 +345,6 @@ void UiPass::createPipelines() {
     destroyShaderModule(m_device.handle(), rectFrag);
     destroyShaderModule(m_device.handle(), textVert);
     destroyShaderModule(m_device.handle(), textFrag);
-    destroyShaderModule(m_device.handle(), welcomeVert);
-    destroyShaderModule(m_device.handle(), welcomeFrag);
 }
 
 void UiPass::createVertexBuffers() {
@@ -408,11 +363,6 @@ void UiPass::destroy() noexcept {
         buffer.destroy();
     }
 
-    if (m_welcomePipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device.handle(), m_welcomePipeline, nullptr);
-        m_welcomePipeline = VK_NULL_HANDLE;
-    }
-
     if (m_textPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device.handle(), m_textPipeline, nullptr);
         m_textPipeline = VK_NULL_HANDLE;
@@ -421,11 +371,6 @@ void UiPass::destroy() noexcept {
     if (m_rectPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device.handle(), m_rectPipeline, nullptr);
         m_rectPipeline = VK_NULL_HANDLE;
-    }
-
-    if (m_welcomePipelineLayout != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(m_device.handle(), m_welcomePipelineLayout, nullptr);
-        m_welcomePipelineLayout = VK_NULL_HANDLE;
     }
 
     if (m_textPipelineLayout != VK_NULL_HANDLE) {
@@ -963,12 +908,16 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         }
 
         float rightEdge = viewportWidth - margin;
-        if (state.hasDocument) {
-            const std::string position = std::to_string(state.cursorLine + 1) + ":" +
-                                         std::to_string(state.cursorColumn + 1);
-            const float positionWidth = measureText(position);
-            appendText(vertices, position, rightEdge - positionWidth, baseline, statusColor);
-            rightEdge -= positionWidth + 18.0F * contentScale;
+        const float positionReveal = std::clamp(state.statusPositionReveal, 0.0F, 1.0F);
+        if (!state.statusPosition.empty() && positionReveal > 0.0F) {
+            const float positionWidth = measureText(state.statusPosition);
+            auto positionColor = statusColor;
+            const float fade = std::clamp((positionReveal - 0.15F) / 0.85F, 0.0F, 1.0F);
+            positionColor[3] *= fade * fade * (3.0F - 2.0F * fade);
+            appendText(vertices, state.statusPosition, rightEdge - positionWidth,
+                       baseline + (1.0F - positionReveal) * 4.0F * contentScale,
+                       positionColor);
+            rightEdge -= (positionWidth + 18.0F * contentScale) * positionReveal;
         }
 
         const std::string version = "v" + std::string(kVersionString);
@@ -1104,8 +1053,6 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
 
     TextRange welcomeRange{0, 0, fullScissor};
     bool hasWelcomeText = false;
-    const float backgroundDim = std::clamp(state.backgroundDim, 0.0F, 1.0F);
-    const bool hasWelcomeBackground = state.backgroundMotion;
 #if defined(__APPLE__)
     const bool useCommandGlyph = m_font.glyph(0x2318).hasPixels;
     const bool useShiftGlyph = m_font.glyph(0x21E7).hasPixels;
@@ -1125,6 +1072,9 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
     enum class FileIconKind {
         Generic,
         Code,
+        Script,
+        Web,
+        Style,
         Header,
         Json,
         Markdown,
@@ -1134,9 +1084,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         Cmake,
         Git,
         Text,
+        Application,
     };
 
     const auto fileIconKind = [](std::string_view path) {
+        while (!path.empty() && (path.back() == '/' || path.back() == '\\')) path.remove_suffix(1);
         const std::size_t slash = path.find_last_of("/\\");
         std::string name(
             path.substr(slash == std::string_view::npos ? 0 : slash + 1));
@@ -1152,6 +1104,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         };
         const auto equals = [&](std::string_view value) { return name == value; };
 
+        if (endsWith(".app") || endsWith(".exe") || endsWith(".com") || endsWith(".appimage")) return FileIconKind::Application;
+
         if (equals("cmakelists.txt") || endsWith(".cmake")) {
             return FileIconKind::Cmake;
         }
@@ -1160,13 +1114,16 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             return FileIconKind::Git;
         }
         if (equals(".clang-format") || equals(".clang-tidy") ||
-            equals(".editorconfig") || endsWith(".env")) {
+            equals(".editorconfig") || equals(".env") || name.starts_with(".env.")) {
             return FileIconKind::Config;
         }
         if (endsWith(".h") || endsWith(".hh") || endsWith(".hpp") ||
             endsWith(".hxx") || endsWith(".inl") || endsWith(".ipp")) {
             return FileIconKind::Header;
         }
+        if (endsWith(".html") || endsWith(".htm") || endsWith(".vue") || endsWith(".svelte")) return FileIconKind::Web;
+        if (endsWith(".css") || endsWith(".scss") || endsWith(".sass") || endsWith(".less")) return FileIconKind::Style;
+        if (endsWith(".py") || endsWith(".pyw") || endsWith(".js") || endsWith(".jsx") || endsWith(".ts") || endsWith(".tsx") || endsWith(".rb") || endsWith(".lua")) return FileIconKind::Script;
         if (endsWith(".c") || endsWith(".cc") || endsWith(".cpp") ||
             endsWith(".cxx") || endsWith(".m") || endsWith(".mm") ||
             endsWith(".py") || endsWith(".pyw") || endsWith(".js") ||
@@ -1210,6 +1167,29 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         }
         return FileIconKind::Generic;
     };
+    const auto fileIconLabel = [](std::string_view path) -> std::string_view {
+        const auto slash = path.find_last_of("/\\");
+        const auto dot = path.find_last_of('.');
+        if (dot == std::string_view::npos || (slash != std::string_view::npos && dot < slash)) return {};
+        std::string ext(path.substr(dot));
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext == ".c") return "C";
+        if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") return "C++";
+        if (ext == ".py" || ext == ".pyw") return "PY";
+        if (ext == ".js" || ext == ".jsx") return "JS";
+        if (ext == ".ts" || ext == ".tsx") return "TS";
+        if (ext == ".rs") return "RS";
+        if (ext == ".go") return "GO";
+        if (ext == ".java") return "JA";
+        if (ext == ".kt" || ext == ".kts") return "KT";
+        if (ext == ".swift") return "SW";
+        if (ext == ".cs") return "C#";
+        if (ext == ".php") return "PHP";
+        if (ext == ".rb") return "RB";
+        if (ext == ".lua") return "LUA";
+        if (ext == ".sql") return "SQL";
+        return {};
+    };
 
     const ui::theme::Color noFill{0.0F, 0.0F, 0.0F, 0.0F};
     const auto addIconRect = [&](std::vector<WelcomeRectSpec>& target, float x0,
@@ -1220,34 +1200,38 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         target.push_back(WelcomeRectSpec{x0, y0, x1, y1, radius, borderWidth, 0.0F,
                                          opacity, fill, border});
     };
-    const auto addFileOutline = [&](std::vector<WelcomeRectSpec>& target, float x,
-                                    float y, float width, float height,
-                                    float opacity, const ui::theme::Color& color) {
-        const float borderWidth =
-            std::max(1.0F * contentScale, height * 0.055F);
-        addIconRect(target, x, y, x + width, y + height, height * 0.14F,
-                    borderWidth, opacity, noFill, color);
-    };
-    const auto addFileIcon = [&](std::vector<WelcomeRectSpec>& target, float x,
-                                 float y, float width, float height, float opacity,
-                                 const ui::theme::Color& color) {
-        addFileOutline(target, x, y, width, height, opacity, color);
-        const float lineHeight =
-            std::max(1.0F * contentScale, height * 0.055F);
-        const auto line = [&](float left, float top, float right) {
-            addIconRect(target, x + width * left, y + height * top,
-                        x + width * right, y + height * top + lineHeight,
-                        lineHeight * 0.5F, 0.0F, opacity, color, color);
-        };
-        line(0.24F, 0.30F, 0.62F);
-        line(0.24F, 0.47F, 0.74F);
-        line(0.24F, 0.64F, 0.54F);
-    };
     const auto addFileTypeIcon = [&](std::vector<WelcomeRectSpec>& target, float x,
                                      float y, float width, float height,
-                                     float opacity, const ui::theme::Color& color,
-                                     FileIconKind kind) {
-        addFileOutline(target, x, y, width, height, opacity, color);
+                                     float opacity, const ui::theme::Color& fallback,
+                                     FileIconKind kind, std::string_view label) {
+        ui::theme::Color color = fallback;
+        switch (kind) {
+        case FileIconKind::Code: case FileIconKind::Header: case FileIconKind::Application: color = ui::theme::kAccent; break;
+        case FileIconKind::Script: case FileIconKind::Json: color = ui::theme::kSyntaxType; break;
+        case FileIconKind::Web: case FileIconKind::Git: color = ui::theme::kSyntaxNumber; break;
+        case FileIconKind::Style: case FileIconKind::Image: color = ui::theme::kSyntaxKeyword; break;
+        case FileIconKind::Shell: color = ui::theme::kSyntaxString; break;
+        case FileIconKind::Cmake: color = ui::theme::kSyntaxPreprocessor; break;
+        case FileIconKind::Config: case FileIconKind::Markdown: case FileIconKind::Text:
+        case FileIconKind::Generic: break;
+        }
+        ui::theme::Color tile = color;
+        tile.a *= 0.12F;
+        addIconRect(target, x, y, x + width, y + height, height * 0.22F,
+                    0.0F, opacity, tile, tile);
+        if (!label.empty()) {
+            const float labelWidth = measureText(label);
+            const float scale = std::min(0.78F, width * 0.82F / std::max(labelWidth, 1.0F));
+            const float centerX = x + width * 0.5F, centerY = y + height * 0.5F;
+            const auto first = vertices.size();
+            auto ink = toGpuColor(color); ink[3] *= opacity;
+            appendText(vertices, label, centerX - labelWidth * 0.5F, centerY + fontCenter, ink);
+            for (std::size_t i = first; i < vertices.size(); ++i) {
+                vertices[i].x = centerX + (vertices[i].x - centerX) * scale;
+                vertices[i].y = centerY + (vertices[i].y - centerY) * scale;
+            }
+            return;
+        }
         const float thickness =
             std::max(1.0F * contentScale, height * 0.055F);
         const auto hline = [&](float left, float top, float right) {
@@ -1275,8 +1259,15 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         };
 
         switch (kind) {
+        case FileIconKind::Application:
+            hline(0.22F, 0.27F, 0.78F); hline(0.22F, 0.70F, 0.78F);
+            vline(0.22F, 0.27F, 0.70F); vline(0.72F, 0.27F, 0.70F);
+            hline(0.22F, 0.41F, 0.78F); dotAt(0.36F, 0.34F, thickness * 1.4F);
+            break;
         case FileIconKind::Generic:
-            addFileIcon(target, x, y, width, height, opacity, color);
+            hline(0.28F, 0.32F, 0.70F);
+            hline(0.28F, 0.49F, 0.70F);
+            hline(0.28F, 0.66F, 0.54F);
             break;
         case FileIconKind::Code:
             vline(0.24F, 0.30F, 0.70F);
@@ -1285,6 +1276,27 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             vline(0.74F, 0.30F, 0.70F);
             hline(0.64F, 0.30F, 0.74F);
             hline(0.64F, 0.70F, 0.74F);
+            break;
+        case FileIconKind::Script:
+            hline(0.30F, 0.28F, 0.70F);
+            vline(0.26F, 0.28F, 0.49F);
+            hline(0.30F, 0.46F, 0.68F);
+            vline(0.68F, 0.46F, 0.71F);
+            hline(0.26F, 0.68F, 0.71F);
+            break;
+        case FileIconKind::Web:
+            hline(0.25F, 0.30F, 0.75F);
+            hline(0.25F, 0.66F, 0.75F);
+            vline(0.25F, 0.30F, 0.69F);
+            vline(0.72F, 0.30F, 0.69F);
+            hline(0.25F, 0.40F, 0.75F);
+            dotAt(0.38F, 0.34F, std::max(1.2F * contentScale, height * 0.08F));
+            break;
+        case FileIconKind::Style:
+            hline(0.25F, 0.32F, 0.73F);
+            hline(0.25F, 0.50F, 0.62F);
+            hline(0.25F, 0.68F, 0.73F);
+            dotAt(0.62F, 0.50F, std::max(2.2F * contentScale, height * 0.15F));
             break;
         case FileIconKind::Header:
             vline(0.36F, 0.28F, 0.72F);
@@ -1367,7 +1379,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             std::max(1.0F * contentScale, height * 0.05F);
         const float radius = std::max(1.0F * contentScale, height * 0.13F);
         ui::theme::Color bodyFill = color;
-        bodyFill.a *= 0.16F;
+        bodyFill.a *= 0.65F;
         addIconRect(target, x, y + tabHeight, x + width, y + height, radius,
                     borderWidth, opacity, bodyFill, color);
         addIconRect(target, x + width * 0.06F, y,
@@ -1385,34 +1397,26 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                     float y, float width, float height, float opacity,
                                     const ui::theme::Color& color,
                                     const ui::theme::Color& badgeColor) {
-        const float borderWidth =
-            std::max(1.0F * contentScale, height * 0.055F);
-        const float radius = std::max(1.0F * contentScale, height * 0.14F);
-        ui::theme::Color bodyFill = color;
-        bodyFill.a *= 0.12F;
-        addIconRect(target, x, y, x + width, y + height, radius, borderWidth,
-                    opacity, bodyFill, color);
-        const float barHeight = height * 0.30F;
-        addIconRect(target, x + borderWidth * 0.5F, y + borderWidth * 0.5F,
-                    x + width - borderWidth * 0.5F, y + barHeight,
-                    radius * 0.6F, 0.0F, opacity, color, color);
-        const float dot = std::max(2.0F * contentScale, height * 0.16F);
-        const float dotY = y + (barHeight - dot) * 0.5F;
-        addIconRect(target, x + width * 0.16F, dotY,
-                    x + width * 0.16F + dot, dotY + dot, dot * 0.5F, 0.0F,
-                    opacity, badgeColor, badgeColor);
-        ui::theme::Color contentColor = color;
-        contentColor.a *= 0.55F;
-        const float contentLine =
-            std::max(1.0F * contentScale, height * 0.045F);
-        addIconRect(target, x + width * 0.20F, y + height * 0.61F,
-                    x + width * 0.56F, y + height * 0.61F + contentLine,
-                    contentLine * 0.5F, 0.0F, opacity, contentColor,
-                    contentColor);
-        addIconRect(target, x + width * 0.20F, y + height * 0.75F,
-                    x + width * 0.42F, y + height * 0.75F + contentLine,
-                    contentLine * 0.5F, 0.0F, opacity, contentColor,
-                    contentColor);
+        const float stroke = std::max(1.0F * contentScale, height * 0.055F);
+        const float radius = std::max(1.0F * contentScale, height * 0.10F);
+        ui::theme::Color fill = color;
+        fill.a *= 0.07F;
+        addIconRect(target, x + width * 0.08F, y + height * 0.12F,
+                    x + width * 0.92F, y + height * 0.92F,
+                    radius, stroke, opacity, fill, color);
+        ui::theme::Color rail = badgeColor;
+        rail.a *= 0.9F;
+        addIconRect(target, x + width * 0.23F, y + height * 0.27F,
+                    x + width * 0.29F, y + height * 0.75F,
+                    stroke * 0.5F, 0.0F, opacity, rail, rail);
+        ui::theme::Color text = color;
+        text.a *= 0.7F;
+        addIconRect(target, x + width * 0.40F, y + height * 0.34F,
+                    x + width * 0.76F, y + height * 0.34F + stroke,
+                    stroke * 0.5F, 0.0F, opacity, text, text);
+        addIconRect(target, x + width * 0.40F, y + height * 0.57F,
+                    x + width * 0.65F, y + height * 0.57F + stroke,
+                    stroke * 0.5F, 0.0F, opacity, text, text);
     };
     const auto addPlusBadge = [&](std::vector<WelcomeRectSpec>& target, float x,
                                   float y, float size, float opacity,
@@ -1430,11 +1434,16 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                           int columns, float left,
                                           bool alignLeft,
                                           const std::array<float, 4>& textColor) {
-        constexpr std::array<WelcomeShortcut, 18> shortcuts{{
+        constexpr std::array<WelcomeShortcut, 21> shortcuts{{
             {true, false, "K", "Open file"},
             {true, false, "E", "Switch file"},
             {true, false, ",", "Settings"},
             {true, false, "F", "Find"},
+            {true, false, "S", "Save"},
+            {true, false, "R", "Run"},
+            {true, true, "F", "Search project"},
+            {false, false, "F12", "Definition"},
+            {false, true, "F12", "References"},
             {true, true, "Space", "Complete"},
             {true, true, "A", "Ask AI"},
             {true, true, "L", "Clean code"},
@@ -1445,8 +1454,6 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             {true, true, "B", "Breakpoint"},
             {true, true, "Y", "Recovery"},
             {true, true, "R", "Functions"},
-            {true, false, "R", "Run"},
-            {true, false, "S", "Save"},
             {true, false, "W", "Close file"},
             {true, true, "U", "Contrast"},
         }};
@@ -1495,21 +1502,51 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const float tableLeft = alignLeft ? left : centerX - tableWidth * 0.5F;
 
         const int totalRows = (static_cast<int>(shortcuts.size()) + columns - 1) / columns;
-        const int visibleRows = std::max(1, static_cast<int>((viewportHeight - top - 30.0F * contentScale) / rowHeight));
-        const int scroll = std::clamp(state.welcomeShortcutScroll, 0, std::max(0, totalRows - visibleRows));
-        if (visibleRows < totalRows) {
+        const float dividerTop = top + 2.0F * rowHeight;
+        const float lineY = dividerTop + rowHeight * 0.5F;
+        const float middle = tableLeft + tableWidth * 0.5F;
+        const float gap = 12.0F * contentScale;
+        if (middle - gap > tableLeft)
+            addIconRect(welcomeRects, tableLeft, lineY, middle - gap, lineY + contentScale,
+                        0.0F, 0.0F, 1.0F, ui::theme::kBorder, ui::theme::kBorder);
+        if (middle + gap < tableLeft + tableWidth)
+            addIconRect(welcomeRects, middle + gap, lineY, tableLeft + tableWidth, lineY + contentScale,
+                        0.0F, 0.0F, 1.0F, ui::theme::kBorder, ui::theme::kBorder);
+        const float pixel = 1.5F * contentScale;
+        const float unfold = std::clamp(state.welcomeShortcutProgress, 0.0F, 1.0F);
+        const float angle = unfold * 3.14159265358979323846F;
+        for (int step = 0; step < 3; ++step) {
+            const float originalY = (1.0F - static_cast<float>(step)) * pixel;
+            for (int side : {-1, 1}) {
+                const float originalX = static_cast<float>(side * step) * pixel;
+                const float dx = originalX * std::cos(angle) - originalY * std::sin(angle);
+                const float dy = originalX * std::sin(angle) + originalY * std::cos(angle);
+                addIconRect(welcomeRects, middle + dx - pixel * 0.5F, lineY + dy - pixel * 0.5F,
+                            middle + dx + pixel * 0.5F, lineY + dy + pixel * 0.5F,
+                            0.0F, 0.0F, 1.0F, ui::theme::kTextMuted, ui::theme::kTextMuted);
+            }
+        }
+        const int visibleRows = std::max(0, static_cast<int>((viewportHeight - dividerTop - rowHeight - 20.0F * contentScale) / rowHeight));
+        const int scroll = std::clamp(state.welcomeShortcutScroll, 0, std::max(0, totalRows - 2 - visibleRows));
+        if (unfold > 0.01F && visibleRows < totalRows - 2) {
             const std::string_view hint = "Scroll or use arrow keys for more shortcuts";
-            appendText(vertices, hint, (viewportWidth - measureText(hint)) * 0.5F, viewportHeight - 12.0F * contentScale, hintColor);
+            auto fadingHint = hintColor; fadingHint[3] *= unfold;
+            appendText(vertices, hint, (viewportWidth - measureText(hint)) * 0.5F, viewportHeight - 12.0F * contentScale, fadingHint);
         }
         std::size_t index = 0;
         std::size_t rowIndex = 0;
         while (index < shortcuts.size()) {
             const int rowSize = std::min<int>(
                 columns, static_cast<int>(shortcuts.size() - index));
-            if (static_cast<int>(rowIndex) < scroll || static_cast<int>(rowIndex) >= scroll + visibleRows) {
+            const int row = static_cast<int>(rowIndex);
+            if (row >= 2 && (unfold <= 0.001F || row < 2 + scroll || row >= 2 + scroll + visibleRows)) {
                 index += static_cast<std::size_t>(rowSize); ++rowIndex; continue;
             }
-            const float rowTop = top + static_cast<float>(static_cast<int>(rowIndex) - scroll) * rowHeight;
+            const float rowProgress = row < 2 ? 1.0F : std::clamp(unfold * 1.5F - static_cast<float>(row - 2 - scroll) * 0.08F, 0.0F, 1.0F);
+            const float rowOpacity = rowProgress * rowProgress * (3.0F - 2.0F * rowProgress);
+            const float rowTop = row < 2 ? top + static_cast<float>(row) * rowHeight : dividerTop + rowHeight + static_cast<float>(row - 2 - scroll) * rowHeight - (1.0F - rowOpacity) * 8.0F * contentScale;
+            auto rowTextColor = textColor; rowTextColor[3] *= rowOpacity;
+            auto rowHintColor = hintColor; rowHintColor[3] *= rowOpacity;
             const float keyTop = rowTop + (rowHeight - keyHeight) * 0.5F;
             const float baseline = keyTop + keyHeight * 0.5F + fontCenter;
             float x = tableLeft;
@@ -1519,15 +1556,15 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                        std::string_view fallback) {
                 welcomeRects.push_back(WelcomeRectSpec{
                     x, keyTop, x + width, keyTop + keyHeight,
-                    3.0F * contentScale, 1.0F * contentScale, 0.0F, 0.85F,
+                    3.0F * contentScale, 1.0F * contentScale, 0.0F, 0.85F * rowOpacity,
                     ui::theme::kSurface, ui::theme::kBorder});
                 const float textWidth =
                     glyphAvailable ? measureText(glyph) : measureText(fallback);
                 const float textX = x + (width - textWidth) * 0.5F;
                 if (glyphAvailable) {
-                    appendText(vertices, glyph, textX, baseline, textColor);
+                    appendText(vertices, glyph, textX, baseline, rowTextColor);
                 } else {
-                    appendText(vertices, fallback, textX, baseline, textColor);
+                    appendText(vertices, fallback, textX, baseline, rowTextColor);
                 }
                 x += width + keyGap;
             };
@@ -1546,7 +1583,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                               kCommandFallback);
                 }
                 addKeycap(keyWidth(shortcut.key), false, {}, shortcut.key);
-                appendText(vertices, shortcut.label, x, baseline, hintColor);
+                appendText(vertices, shortcut.label, x, baseline, rowHintColor);
             }
 
             index += static_cast<std::size_t>(rowSize);
@@ -1554,6 +1591,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         }
     };
 
+    const std::size_t welcomeRectStart = welcomeRects.size();
     if (state.showWelcome && !state.hasProject) {
         const ui::WelcomeLayout layout =
             ui::welcomeLayout(viewportWidth, viewportHeight, contentScale);
@@ -1680,8 +1718,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const std::size_t emptyFirst = vertices.size();
 
         const auto emptyLayout = ui::welcomeLayout(viewportWidth, viewportHeight, contentScale);
-        const int shortcutRows = (18 + emptyLayout.hintColumns - 1) / emptyLayout.hintColumns;
-        const float blockHeight = lineHeight * 3.0F + static_cast<float>(shortcutRows) * 24.0F * contentScale;
+        const float blockHeight = lineHeight * 3.0F + 3.0F * 24.0F * contentScale;
         const float centerY = std::max(lineHeight * 2.0F, (viewportHeight - blockHeight) * 0.5F + lineHeight * 2.0F);
         const std::array<float, 4> titleColor =
             toGpuColor(ui::theme::kTextMuted);
@@ -1744,6 +1781,27 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         if (vertices.size() > emptyFirst) {
             welcomeRange = makeRange(emptyFirst, fullScissor);
             hasWelcomeText = true;
+        }
+    }
+
+    // Animate only the welcome content; editor and overlay controls remain sharp.
+    const float startup = std::clamp(state.startupProgress, 0.0F, 1.0F);
+    if (hasWelcomeText && startup < 1.0F) {
+        const float scale = 0.97F + 0.03F * startup;
+        const float offsetY = (1.0F - startup) * 12.0F * contentScale;
+        const float centerX = viewportWidth * 0.5F, centerY = viewportHeight * 0.5F;
+        for (std::size_t i = welcomeRange.firstVertex; i < welcomeRange.firstVertex + welcomeRange.vertexCount; ++i) {
+            vertices[i].x = centerX + (vertices[i].x - centerX) * scale;
+            vertices[i].y = centerY + (vertices[i].y - centerY) * scale + offsetY;
+        }
+        for (std::size_t i = welcomeRectStart; i < welcomeRects.size(); ++i) {
+            auto& rect = welcomeRects[i];
+            rect.x0 = centerX + (rect.x0 - centerX) * scale;
+            rect.x1 = centerX + (rect.x1 - centerX) * scale;
+            rect.y0 = centerY + (rect.y0 - centerY) * scale + offsetY;
+            rect.y1 = centerY + (rect.y1 - centerY) * scale + offsetY;
+            rect.opacity *= startup;
+            rect.blur = std::max(rect.blur, (1.0F - startup) * 3.0F * contentScale);
         }
     }
 
@@ -1931,7 +1989,10 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
 
                 const float selectionOpacity =
                     std::clamp(state.suggestionSelectionOpacity, 0.0F, 1.0F) * barOpacity;
-                if (selectionOpacity > 0.01F && state.suggestionSelectionRow >= -0.5F) {
+                if (selectionOpacity > 0.01F && state.selectedSuggestion >= 0 &&
+                    static_cast<std::size_t>(state.selectedSuggestion) < count &&
+                    state.suggestions[static_cast<std::size_t>(state.selectedSuggestion)].kind != ui::SuggestionKind::ReadOnlyText &&
+                    state.suggestionSelectionRow >= -0.5F) {
                     const float selectedTop =
                         suggestionTop + state.suggestionSelectionRow * suggestionLineHeight;
                     const float rowX0 = std::clamp(suggestionX0 + suggestionInset, 0.0F,
@@ -1966,6 +2027,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                     const bool selected =
                         static_cast<int>(index) == state.selectedSuggestion;
                     const float reveal = rowReveal(index);
+                    const float edgeAbove = index == 0 ? std::clamp(state.suggestionMoreAbove, 0.0F, 1.0F) : 0.0F;
+                    const float edgeBelow = index + 1 == count ? std::clamp(state.suggestionMoreBelow, 0.0F, 1.0F) : 0.0F;
                     const float rowAlpha =
                         barOpacity * std::clamp(reveal, 0.0F, 1.0F);
                     const float rowTop = suggestionTop +
@@ -1982,8 +2045,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                     const float suggestionTextX =
                         iconX + iconWidth + 8.0F * contentScale;
                     const std::size_t rowFirst = vertices.size();
+                    const std::size_t iconFirst = suggestionIcons.size();
 
-                    if (suggestion.kind == ui::SuggestionKind::Function ||
+                    if (suggestion.kind == ui::SuggestionKind::ReadOnlyText) {
+                        appendText(vertices, suggestion.path, pathX, suggestionBaseline, primaryColor);
+                    } else if (suggestion.kind == ui::SuggestionKind::Function ||
                         suggestion.kind == ui::SuggestionKind::Task) {
                         float pen = pathX;
                         if (suggestion.kind == ui::SuggestionKind::Function)
@@ -2011,8 +2077,9 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                           iconHeight, rowAlpha, ui::theme::kAccent,
                                           noFill);
                         } else {
-                            addFileIcon(suggestionIcons, iconX, iconTop, iconWidth,
-                                        iconHeight, rowAlpha, ui::theme::kAccent);
+                            addFileTypeIcon(suggestionIcons, iconX, iconTop, iconWidth,
+                                            iconHeight, rowAlpha, ui::theme::kAccent,
+                                            fileIconKind(suggestion.path), fileIconLabel(suggestion.path));
                         }
                         addPlusBadge(
                             suggestionIcons, iconX + iconWidth * 0.60F,
@@ -2036,7 +2103,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                 iconHeight, rowAlpha,
                                 selected ? ui::theme::kAccent : ui::theme::kTextMuted,
                                 ui::theme::kAccent);
-                        } else if (directory) {
+                        } else if (directory && fileIconKind(suggestion.path) != FileIconKind::Application) {
                             addFolderIcon(
                                 suggestionIcons, iconX, iconTop, iconWidth, iconHeight,
                                 rowAlpha,
@@ -2047,7 +2114,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                 suggestionIcons, iconX, iconTop, iconWidth, iconHeight,
                                 rowAlpha,
                                 selected ? ui::theme::kAccent : ui::theme::kTextMuted,
-                                fileIconKind(suggestion.path));
+                                fileIconKind(suggestion.path), fileIconLabel(suggestion.path));
                         }
                         float pen = suggestionTextX;
                         const std::size_t slash = suggestion.path.find_last_of('/');
@@ -2065,6 +2132,16 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                             suggestion.path.back() != '/') {
                             appendText(vertices, "/", pen, suggestionBaseline, mutedColor);
                         }
+                    }
+
+                    // The content itself fades toward an edge with more results. This
+                    // works over the animated background without an opaque overlay.
+                    for (std::size_t v = rowFirst; v < vertices.size(); ++v) {
+                        const float y = std::clamp((vertices[v].y - rowTop) / suggestionLineHeight, 0.0F, 1.0F);
+                        vertices[v].a *= 1.0F - 0.58F * (edgeAbove * (1.0F - y) + edgeBelow * y);
+                    }
+                    for (std::size_t icon = iconFirst; icon < suggestionIcons.size(); ++icon) {
+                        suggestionIcons[icon].opacity *= 1.0F - 0.22F * std::max(edgeAbove, edgeBelow);
                     }
 
                     if (rowAlpha > 0.01F && vertices.size() > rowFirst &&
@@ -2253,11 +2330,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const std::array<float, 4> accentText = toGpuColor(ui::theme::kAccent);
         const ui::theme::Color statusSwatch =
             state.compileTerminalRunning ? ui::theme::kPrimary
-                                         : ui::theme::kTextMuted;
+                : state.compileTerminalFailed ? ui::theme::kError : ui::theme::kTextMuted;
         const std::array<float, 4> statusColor = toGpuColor(statusSwatch);
 
         const std::string_view statusText =
-            state.compileTerminalRunning ? "running" : "finished";
+            state.compileTerminalRunning ? "running" : state.compileTerminalFailed ? "failed" : "finished";
         float statusX0 = panel.x1 - padding;
         if (!standalone) {
             const float statusWidth =
@@ -2322,14 +2399,25 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const int maxOutputLines =
             std::max(1, static_cast<int>((output.y1 - output.y0) / terminalLineHeight));
         const int firstOutputLine =
-            std::max(0, static_cast<int>(outputLines.size()) - maxOutputLines);
+            std::max(0, static_cast<int>(outputLines.size()) - maxOutputLines - state.compileOutputScroll);
         const float outputMaxWidth = output.x1 - output.x0;
-        float outputBaseline = output.y0 + fontCenter + 3.0F * contentScale;
+        float outputBaseline = output.y0 + terminalLineHeight * 0.5F + fontCenter;
         for (int index = firstOutputLine;
-             index < static_cast<int>(outputLines.size()); ++index) {
+             index < std::min(static_cast<int>(outputLines.size()), firstOutputLine + maxOutputLines); ++index) {
             std::string_view line = outputLines[static_cast<std::size_t>(index)];
+            const std::size_t lineOffset = static_cast<std::size_t>(line.data() - outputText.data());
             while (!line.empty() && measureText(line) > outputMaxWidth) {
                 line.remove_suffix(1);
+            }
+            const std::size_t selectionStart = std::max(state.compileSelectionStart, lineOffset);
+            const std::size_t selectionEnd = std::min(state.compileSelectionEnd, lineOffset + line.size());
+            if (selectionStart < selectionEnd) {
+                const float x0 = output.x0 + measureText(line.substr(0, selectionStart - lineOffset));
+                const float x1 = output.x0 + measureText(line.substr(0, selectionEnd - lineOffset));
+                const float rowTop = output.y0 + static_cast<float>(index - firstOutputLine) * terminalLineHeight;
+                terminalRects.push_back(WelcomeRectSpec{x0, rowTop, std::min(x1, output.x1),
+                    std::min(rowTop + terminalLineHeight, output.y1), 0.0F, 0.0F, 0.0F,
+                    opacity, ui::theme::kSelection, ui::theme::kSelection});
             }
             appendText(vertices, line, output.x0, outputBaseline, mutedText);
             outputBaseline += terminalLineHeight;
@@ -2365,7 +2453,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                     opacity, ui::theme::kCaret, ui::theme::kCaret});
             }
         } else {
-            appendText(vertices, "Process finished. Click the red light to close.",
+            appendText(vertices, state.compileTerminalFailed ? "A command failed. Review the output above." : "Process finished. Click the red light to close.",
                        input.x0, (input.y0 + input.y1) * 0.5F + fontCenter,
                        mutedText);
         }
@@ -2766,33 +2854,6 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         drawRect(commandBuffer, dotPushConstants);
     }
 
-    if (hasWelcomeBackground && m_welcomePipeline != VK_NULL_HANDLE) {
-        WelcomePushConstants welcomePushConstants{};
-        welcomePushConstants.viewport[0] = viewportWidth;
-        welcomePushConstants.viewport[1] = viewportHeight;
-        welcomePushConstants.time = state.animationTime;
-        welcomePushConstants.opacity = 0.30F - 0.12F * backgroundDim;
-        welcomePushConstants.softness = backgroundDim;
-        welcomePushConstants.dim = 1.0F - 0.45F * backgroundDim;
-        const std::array<float, 4> primary = toGpuColor(ui::theme::kPrimary);
-        const std::array<float, 4> secondary =
-            toGpuColor(ui::theme::kLogoForeground);
-        std::copy(primary.begin(), primary.end(), welcomePushConstants.primary);
-        std::copy(secondary.begin(), secondary.end(),
-                  welcomePushConstants.secondary);
-
-        vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          m_welcomePipeline);
-        vkCmdPushConstants(commandBuffer, m_welcomePipelineLayout,
-                           static_cast<VkShaderStageFlags>(
-                               VK_SHADER_STAGE_VERTEX_BIT |
-                               VK_SHADER_STAGE_FRAGMENT_BIT),
-                           0, sizeof(welcomePushConstants),
-                           &welcomePushConstants);
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-    }
-
     for (const WelcomeRectSpec& spec : welcomeRects) {
         RectPushConstants rectPushConstants{};
         fillRectPushConstants(rectPushConstants, spec.x0, spec.y0, spec.x1, spec.y1,
@@ -2802,7 +2863,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
     }
 
     if (hasWelcomeText) {
-        drawTextRange(welcomeRange, 0.0F, 1.0F);
+        drawTextRange(welcomeRange, (1.0F - startup) * 3.0F, startup);
     }
 
     if (state.commandVisible) {

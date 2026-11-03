@@ -12,7 +12,7 @@ public:
     Project() = default;
 
     static Project openOrCreate(const std::filesystem::path& path, bool& created,
-                                std::string& error);
+                                std::string& error, bool eagerIndex = true);
 
     [[nodiscard]] const std::filesystem::path& root() const noexcept { return m_root; }
     [[nodiscard]] std::string name() const;
@@ -31,8 +31,8 @@ public:
     [[nodiscard]] bool readFile(std::string_view relative, std::string& content,
                                 std::string& error) const;
     [[nodiscard]] bool writeFile(std::string_view relative, std::string_view content,
-                                 std::string& error);
-    [[nodiscard]] bool createFile(std::string_view relative, std::string& error);
+                                 std::string& error, const std::string* expected = nullptr);
+    [[nodiscard]] bool createFile(std::string_view relative, std::string& error, bool allowExisting = true);
     [[nodiscard]] bool createDirectory(std::string_view relative, std::string& error);
     [[nodiscard]] bool deleteFile(std::string_view relative, std::string& error);
 
@@ -42,6 +42,7 @@ private:
     std::filesystem::path m_root;
     std::vector<std::string> m_files;
     std::vector<std::string> m_directories;
+    bool m_autoRefresh = true;
 };
 
 } // namespace lucid::workspace

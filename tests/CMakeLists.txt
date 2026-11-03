@@ -208,3 +208,38 @@ add_test(NAME workspace.replica COMMAND lucid_replica_tests)
 if(UNIX)
     add_test(NAME packaging.installer COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/packaging/installer_test.sh" "${PROJECT_SOURCE_DIR}/packaging/linux/install.sh")
 endif()
+
+add_executable(lucid_lsp_tests editor/lsp_test.cpp)
+target_link_libraries(lucid_lsp_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_lsp_tests)
+add_test(NAME editor.lsp COMMAND lucid_lsp_tests)
+
+add_executable(lucid_project_search_tests workspace/project_search_test.cpp)
+target_link_libraries(lucid_project_search_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_project_search_tests)
+add_test(NAME workspace.project_search COMMAND lucid_project_search_tests)
+
+add_executable(lucid_git_remote_tests workspace/git_remote_test.cpp)
+target_link_libraries(lucid_git_remote_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_git_remote_tests)
+add_test(NAME workspace.git_remote COMMAND lucid_git_remote_tests)
+
+add_executable(lucid_session_tests workspace/session_test.cpp)
+target_link_libraries(lucid_session_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_session_tests)
+add_test(NAME workspace.session COMMAND lucid_session_tests)
+
+add_executable(lucid_lsp_edits_tests editor/lsp_edits_test.cpp)
+target_link_libraries(lucid_lsp_edits_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_lsp_edits_tests)
+add_test(NAME editor.lsp_edits COMMAND lucid_lsp_edits_tests)
+
+add_executable(lucid_mesh_tests renderer/mesh_test.cpp)
+target_link_libraries(lucid_mesh_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_mesh_tests)
+add_test(NAME renderer.mesh COMMAND lucid_mesh_tests "${PROJECT_SOURCE_DIR}/assets/backgrounds/city-transit" "${PROJECT_SOURCE_DIR}/assets/backgrounds/lunar-horizon" "${PROJECT_SOURCE_DIR}/assets/backgrounds/mountain-parallax" "${PROJECT_SOURCE_DIR}/assets/backgrounds/ocean-lighthouse" "${PROJECT_SOURCE_DIR}/assets/backgrounds/rainy-street" "${PROJECT_SOURCE_DIR}/assets/backgrounds/orbital-station" "${PROJECT_SOURCE_DIR}/assets/backgrounds/forest-fireflies" "${PROJECT_SOURCE_DIR}/assets/backgrounds/drafting-grid" "${PROJECT_SOURCE_DIR}/assets/backgrounds/retro-landscape")
+
+add_executable(lucid_scene_camera_tests renderer/camera_test.cpp)
+target_link_libraries(lucid_scene_camera_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_scene_camera_tests)
+add_test(NAME renderer.scene_camera COMMAND lucid_scene_camera_tests)

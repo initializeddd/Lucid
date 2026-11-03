@@ -170,6 +170,12 @@ SettingsResult parseSettings(std::string_view text) {
                 return result;
             }
             settings.backgroundMotion = member.boolValue;
+        } else if (member.key == "backgroundScene") {
+            if (member.type != editor::JsonType::Number || member.numberValue < 0 || member.numberValue > 9 || std::floor(member.numberValue) != member.numberValue) {
+                result.error = "backgroundScene must be an integer from 0 to 9"; return result;
+            }
+            settings.backgroundScene = static_cast<int>(member.numberValue);
+            if (settings.backgroundScene == 3) settings.backgroundScene = 0;
         } else if (member.key == "highContrast") {
             if (member.type != editor::JsonType::Bool) { result.error = "highContrast must be true or false"; return result; }
             settings.highContrast = member.boolValue;
@@ -281,6 +287,7 @@ std::string defaultSettingsJson() {
            "    \"cursorBlink\": true,\n"
            "    \"cursorStyle\": \"line\",\n"
            "    \"backgroundMotion\": true,\n"
+           "    \"backgroundScene\": 0,\n"
            "    \"highContrast\": false,\n"
            "    \"zoomFactor\": 1.0,\n"
            "    \"iconTheme\": \"classic\",\n"
@@ -305,6 +312,7 @@ std::string serializeSettings(const EditorSettings& settings) {
            << "\",\n";
     stream << "    \"backgroundMotion\": "
            << (settings.backgroundMotion ? "true" : "false") << ",\n";
+    stream << "    \"backgroundScene\": " << settings.backgroundScene << ",\n";
     stream << "    \"highContrast\": " << (settings.highContrast ? "true" : "false") << ",\n";
     stream << "    \"zoomFactor\": " << std::fixed << std::setprecision(2)
            << settings.zoomFactor << ",\n";

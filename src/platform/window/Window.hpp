@@ -48,6 +48,7 @@ public:
     Window& operator=(Window&&) = delete;
 
     [[nodiscard]] bool shouldClose() const noexcept;
+    void cancelClose() noexcept;
     void pollEvents() const;
 
     [[nodiscard]] GLFWwindow* handle() const noexcept { return m_window; }

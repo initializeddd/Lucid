@@ -39,5 +39,19 @@ int main() {
     const auto multiRequests = multiple.takeOutbound();
     if (multiRequests.find("/tmp/one.cpp") == std::string::npos || multiRequests.find("/tmp/two.cpp") == std::string::npos) return 25;
     if (!multiple.setBreakpoints("/tmp/two.cpp", {9}, error) || multiple.takeOutbound().find("\"line\":9") == std::string::npos) return 26;
+    if (!multiple.receive(frame(R"({"type":"response","request_seq":3,"success":true,"body":{"breakpoints":[{"verified":false,"message":"Missing symbols"}]}})"), error)) return 27;
+    if (!multiple.receive(frame(R"({"type":"response","request_seq":6,"success":true,"body":{"breakpoints":[{"verified":true}]}})"), error) || multiple.breakpointWarning().find("Missing symbols") == std::string::npos) return 28;
+    if (!multiple.receive(frame(R"({"type":"response","request_seq":4,"success":true,"body":{"breakpoints":[{"verified":false,"message":"Outdated"}]}})"), error) || multiple.breakpointWarning().find("Outdated") != std::string::npos) return 29;
+    if (!multiple.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"breakpoint","threadId":1}})"), error)) return 30;
+    if (!multiple.receive(frame(R"({"type":"event","event":"terminated"})"), error) || multiple.state() != State::Ended || !multiple.stack().empty() || !multiple.variables().empty()) return 31;
+    if (!multiple.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"late","threadId":1}})"), error) || multiple.state() != State::Ended) return 32;
+    Session disconnected;
+    disconnected.start("/tmp/program", "/tmp", "/tmp/file.cpp", {});
+    (void)disconnected.takeOutbound();
+    if (!disconnected.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"pause","threadId":7}})"), error)) return 33;
+    disconnected.transportClosed("Adapter disconnected", false);
+    if (disconnected.state() != State::Failed || disconnected.message() != "Adapter disconnected" ||
+        !disconnected.stack().empty() || !disconnected.variables().empty() || !disconnected.takeOutbound().empty()) return 34;
+    if (disconnected.resume("continue", error)) return 35;
     return 0;
 }

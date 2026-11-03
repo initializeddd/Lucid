@@ -1,9 +1,13 @@
 #include "workspace/Project.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/xattr.h>
+#endif
 
 int main() {
     namespace fs = std::filesystem;
@@ -36,6 +40,11 @@ int main() {
     if (!project.exists("src/main.cpp") || !project.isDirectory("src")) {
         return 5;
     }
+    bool deferredCreated = false;
+    auto deferred = Project::openOrCreate(base / "demo", deferredCreated, error, false);
+    if (!error.empty() || deferredCreated || !deferred.files().empty()) return 26;
+    deferred.refresh();
+    if (std::find(deferred.files().begin(), deferred.files().end(), "src/main.cpp") == deferred.files().end()) return 27;
 
     project.refresh();
     bool found = false;
@@ -53,6 +62,57 @@ int main() {
         content != "int main() {}\n") {
         return 7;
     }
+    const auto executable = base / "demo/src/main.cpp";
+#if !defined(_WIN32)
+    fs::permissions(executable, fs::perms::owner_exec, fs::perm_options::add, filesystemError);
+#endif
+    if (filesystemError || !project.writeFile("src/main.cpp", "updated\n", error) ||
+        !project.readFile("src/main.cpp", content, error) || content != "updated\n") return 20;
+    const std::string stale = "old contents";
+    if (project.writeFile("src/main.cpp", "must not replace\n", error, &stale) || error.empty() ||
+        !project.readFile("src/main.cpp", content, error) || content != "updated\n") return 23;
+    const std::string expected = content;
+    if (!project.writeFile("src/main.cpp", "updated again\n", error, &expected) ||
+        !project.readFile("src/main.cpp", content, error) || content != "updated again\n") return 24;
+    if (!project.createFile("src/main.cpp", error) ||
+        !project.readFile("src/main.cpp", content, error) || content != "updated again\n") return 25;
+    if (project.createFile("src/main.cpp", error, false) || error.empty() ||
+        !project.readFile("src/main.cpp", content, error) || content != "updated again\n") return 32;
+#if !defined(_WIN32)
+    const auto hardLink = base / "demo/src/linked.cpp";
+    fs::create_hard_link(executable, hardLink, filesystemError);
+    if (!filesystemError) {
+        if (project.writeFile("src/main.cpp", "replacement", error) || error.empty() ||
+            !project.readFile("src/main.cpp", content, error) || content != "updated again\n") return 28;
+        fs::remove(hardLink, filesystemError);
+        if (filesystemError) return 29;
+    }
+    filesystemError.clear();
+#endif
+#if defined(__linux__) || defined(__APPLE__)
+#if defined(__APPLE__)
+    const char* attribute = "dev.lucid.test";
+    const int setResult = setxattr(executable.c_str(), attribute, "kept", 4, 0, 0);
+#else
+    const char* attribute = "user.lucid-test";
+    const int setResult = setxattr(executable.c_str(), attribute, "kept", 4, 0);
+#endif
+    if (setResult == 0) {
+        if (!project.writeFile("src/main.cpp", "metadata test\n", error)) return 30;
+        char value[8]{};
+#if defined(__APPLE__)
+        const auto size = getxattr(executable.c_str(), attribute, value, sizeof(value), 0, 0);
+#else
+        const auto size = getxattr(executable.c_str(), attribute, value, sizeof(value));
+#endif
+        if (size != 4 || std::string(value, 4) != "kept") return 31;
+    }
+#endif
+#if !defined(_WIN32)
+    if ((fs::status(executable).permissions() & fs::perms::owner_exec) == fs::perms::none) return 21;
+#endif
+    for (const auto& entry : fs::directory_iterator(executable.parent_path()))
+        if (entry.path().filename().string().starts_with(".lucid-save-")) return 22;
 
     if (!project.createFile("docs/notes.txt", error) ||
         !project.exists("docs/notes.txt")) {

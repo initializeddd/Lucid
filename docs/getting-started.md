@@ -21,8 +21,7 @@ cmake --install build/release --prefix /Applications
 
 `cmake --install` re-signs the bundle after copying it, because changing the bundle invalidates the
 ad-hoc signature. You can also copy it with `ditto`; sign it again afterwards if you modify the
-bundle. The deployment target defaults to the host SDK because the Homebrew GLFW/Vulkan libraries
-are not bundled.
+bundle. The deployment target defaults to macOS 14 unless overridden; locally built bundles may require installed Homebrew libraries.
 
 Windows builds produce `build\bin\Debug\Lucid.exe`. Linux builds install a launcher with
 `cmake --install build --prefix ~/.local`.
@@ -54,9 +53,7 @@ the suggestion list.
 
 ## 4. Change settings
 
-Press `Ctrl+,` (Command+, on macOS). Lucid opens a settings panel with theme presets, primary color swatches,
-animation speed, zoom, cursor styles and editor toggles. **Edit settings...** opens a project named
-`Settings` with a `settings.json` file for advanced changes.
+Press `Ctrl+,` (Command+, on macOS). Lucid opens the settings menu with theme, primary color, text size, cursor, icon, editor, animation and AI options. **Open settings file** opens `settings.json` for advanced changes.
 
 ```json
 {
@@ -81,7 +78,7 @@ animation speed, zoom, cursor styles and editor toggles. **Edit settings...** op
 | `highlightCurrentLine` | `true`, `false` | Tint the caret row |
 | `cursorBlink` | `true`, `false` | Blink the editor caret |
 | `cursorStyle` | `line`, `block`, `underscore`, `kitty` | Draw the caret as a line, block, underscore or a line with ears |
-| `backgroundMotion` | `true`, `false` | Show the soft animated aurora behind the editor and empty surfaces; it darkens and softens while a file is open |
+| `backgroundMotion` | `true`, `false` | Show the selected animated 3D scene; it softens while a file is open |
 | `zoomFactor` | `0.5` to `3.0` | Scale text, layout and hit testing |
 | `theme` | `lucid-dark`, `graphite`, `lucid-light` | Apply a built-in palette |
 | `primary` | `#RRGGBB` | Override the theme accent and selection tint; omit to use the theme default |
@@ -173,9 +170,9 @@ changed.
 | `%fileName%` | open file name |
 | `%relative%` | open file path relative to the project root |
 | `%line%` | line where the compile function starts |
-| `%platform%` | `macOS`, `windows` or `linux` |
+| `%platform%` | `macOS`, `windows`, `linux`, `freebsd` or `openbsd` |
 
-Unknown variables are left unchanged. Commands execute with `/bin/sh` on macOS and Linux. Compile
+Unknown variables are left unchanged. Commands execute with `/bin/sh` on macOS, Linux and BSD. Compile
 terminals are not yet available on Windows.
 
 ## Common messages
@@ -185,7 +182,7 @@ terminals are not yet available on Windows.
 | `Open a project first` | Open the project folder with `Ctrl+O` before opening a file or running commands |
 | `Compile function ... is not available on this platform` | The block has a platform suffix for another OS |
 | `Compile function ... has no commands` | Add at least one line beginning with `$` before `@end` |
-| `Compile terminals are not supported on this platform yet` | The PTY terminal is currently macOS/Linux-only |
+| `Compile terminals are not supported on this platform yet` | The PTY terminal is unavailable on Windows |
 
 ## Useful macOS menu items
 

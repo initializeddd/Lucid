@@ -57,6 +57,9 @@ FetchContent_Declare(llama
     URL_HASH SHA256=06b6a3a1c2d12becc05d02c701274ab1f6d033399b4a20a166b919289e19233c
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(llama)
+# This pinned llama.cpp version uses UTF-8 literals as char strings. MSVC's
+# C++20 char8_t mode changes their type, unlike the library's intended C++17.
+set_target_properties(llama PROPERTIES CXX_STANDARD 17)
 
 set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)

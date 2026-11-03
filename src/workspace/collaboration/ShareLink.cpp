@@ -5,7 +5,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <bcrypt.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <stdlib.h>
 #else
 #include <cerrno>
@@ -28,7 +28,7 @@ bool newShareToken(std::string& token, std::string& error) {
     std::array<unsigned char, 32> random{};
 #if defined(_WIN32)
     if (BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) { error = "Could not create a secure session token"; return false; }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
     arc4random_buf(random.data(), random.size());
 #else
     std::size_t written = 0;

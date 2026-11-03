@@ -127,6 +127,26 @@ bool AdapterProcess::start(const std::string& executable, const std::vector<std:
     });
     m_windows = state; m_alive = true; return true;
 #else
+#if defined(__OpenBSD__)
+    // OpenBSD can report spawn success even when exec later fails in the child.
+    // Check PATH first so a missing adapter can be reported to the user.
+    bool found = false;
+    if (executable.find('/') != std::string::npos) {
+        found = ::access(executable.c_str(), X_OK) == 0;
+    } else {
+        const char* path = std::getenv("PATH");
+        std::string_view paths = path ? path : "/bin:/usr/bin";
+        do {
+            const auto end = paths.find(':');
+            const auto directory = paths.substr(0, end);
+            const auto candidate = (directory.empty() ? std::string(".") : std::string(directory)) + "/" + executable;
+            if (::access(candidate.c_str(), X_OK) == 0) { found = true; break; }
+            if (end == std::string_view::npos) break;
+            paths.remove_prefix(end + 1);
+        } while (true);
+    }
+    if (!found) { error = "Could not find debug adapter: " + executable; return false; }
+#endif
     int sockets[2]; if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) { error = "Could not create debugger connection"; return false; }
     for (int fd : sockets) (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
 #if defined(SO_NOSIGPIPE)

@@ -15,11 +15,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Lucid contributors"
             VALUE "FileDescription", "Lucid (Beta) code editor"
-            VALUE "FileVersion", "0.2.1-lucid.2"
+            VALUE "FileVersion", "0.2.1-beta.2"
             VALUE "InternalName", "Lucid"
             VALUE "OriginalFilename", "Lucid.exe"
             VALUE "ProductName", "Lucid (Beta)"
-            VALUE "ProductVersion", "0.2.1-lucid.2"
+            VALUE "ProductVersion", "0.2.1-beta.2"
         END
     END
     BLOCK "VarFileInfo"

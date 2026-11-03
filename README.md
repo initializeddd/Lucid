@@ -32,7 +32,7 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Beta software.** Version `v0.2.1-lucid.2` includes features at different stages of maturity.
+> **Beta software.** Version `v0.2.1-beta.2` includes features at different stages of maturity.
 > File formats and behavior may change. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
 ## At a glance
@@ -73,7 +73,7 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-Download [Lucid v0.2.1-lucid.2](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-lucid.2). The repository and release are private and require GitHub access.
+Download [Lucid v0.2.1-beta.2](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2). The repository and release are private and require GitHub access.
 
 | Platform | Artifacts | Notes |
 | --- | --- | --- |

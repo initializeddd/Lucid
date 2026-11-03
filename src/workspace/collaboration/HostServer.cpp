@@ -7,11 +7,12 @@
 #include <map>
 #include <thread>
 #if !defined(_WIN32)
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <poll.h>
-#include <sys/socket.h>
 #include <unistd.h>
 #include <cerrno>
 #endif

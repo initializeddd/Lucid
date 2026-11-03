@@ -7,6 +7,7 @@
 #include <limits>
 #include <sstream>
 #if defined(_WIN32)
+#define NOMINMAX
 #include <windows.h>
 #endif
 namespace lucid::workspace::recovery {

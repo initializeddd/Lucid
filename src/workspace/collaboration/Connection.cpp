@@ -3,12 +3,14 @@
 #include "workspace/collaboration/SharedDocument.hpp"
 #include <chrono>
 #if !defined(_WIN32)
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
-#include <sys/socket.h>
 #include <unistd.h>
 #endif
 namespace lucid::workspace::collaboration {

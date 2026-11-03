@@ -9,8 +9,10 @@
 #include <string>
 #include <thread>
 #if !defined(_WIN32)
-#include <arpa/inet.h>
+#include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #endif
 using namespace lucid::workspace;

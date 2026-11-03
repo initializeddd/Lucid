@@ -345,6 +345,7 @@ private:
     bool m_cursorBlink = true;
     editor::CursorStyle m_cursorStyle = editor::CursorStyle::Line;
     bool m_backgroundMotion = true;
+    bool m_allowBackgroundSceneOverride = true;
     float m_backgroundDim = 0.0F;
     std::string m_statusPosition;
     float m_statusPositionReveal = 0.0F;

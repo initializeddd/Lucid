@@ -5,6 +5,14 @@ All notable changes to Lucid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1-lucid.2] - 2026-11-03
+
+### Fixed
+
+- Reduced overshoot in menu selection highlighting.
+- Improved Gaussian blur and scene resolution on standard-density displays.
+- Let a selected background override a startup preview and enable background motion when selecting a scene.
+
 ## [0.2.1-lucid.1] - 2026-11-03
 
 ### Added
@@ -96,7 +104,8 @@ First public beta. Download builds for macOS, Linux and Windows from the
 
 - Initial public foundation: Vulkan renderer, window layer, editor core and build system.
 
-[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.2.1-lucid.1...HEAD
+[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.2.1-lucid.2...HEAD
+[0.2.1-lucid.2]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-lucid.2
 [0.2.1-lucid.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-lucid.1
 [0.2.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.0-beta.1
 [0.1.0-beta.4]: https://github.com/initializeddd/Lucid/releases/tag/v0.1.0-beta.4

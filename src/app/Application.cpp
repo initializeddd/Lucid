@@ -3134,7 +3134,12 @@ void Application::applyCommand(bool forceFolder) {
             if (selected == -1) { if (m_backgroundScenePage > 0) --m_backgroundScenePage; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (selected == -2) { ++m_backgroundScenePage; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (selected >= 0 && static_cast<std::size_t>(selected) < backgroundNames.size()) {
-                m_settings.backgroundScene = selected; applySettings(m_settings); persistSettings();
+                m_allowBackgroundSceneOverride = false;
+                m_settings.backgroundScene = selected;
+                m_settings.backgroundMotion = true;
+                applySettings(m_settings);
+                const bool saved = persistSettings();
+                if (saved) setStatus(std::string("Background: ") + backgroundNames[static_cast<std::size_t>(selected)], false);
                 refreshSuggestions(); setCommandStatus(m_statusText, m_statusIsError);
             }
         } else if (m_settingsMenuPage == 0) {
@@ -5616,7 +5621,7 @@ void Application::updateSuggestionAnimation(double deltaSeconds) {
     const auto springStep = [](float& value, float& velocity, float target,
                                float stepDelta) {
         constexpr float omega = 26.0F;
-        constexpr float damping = 0.42F;
+        constexpr float damping = 1.0F;
         constexpr float maxStep = 1.0F / 240.0F;
         float remaining = stepDelta;
         while (remaining > 0.0F) {
@@ -5800,7 +5805,7 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     // A transient override allows visual smoke tests without changing the
     // user's saved background preference.
     if (const char* sceneOverride = std::getenv("LUCID_BACKGROUND_SCENE");
-        sceneOverride && sceneOverride[0] >= '0' && sceneOverride[0] <= '9' && sceneOverride[1] == '\0')
+        m_allowBackgroundSceneOverride && sceneOverride && sceneOverride[0] >= '0' && sceneOverride[0] <= '9' && sceneOverride[1] == '\0')
         state.backgroundScene = sceneOverride[0] - '0';
     if (state.backgroundScene == 3) state.backgroundScene = 0;
     state.backgroundDim = m_backgroundDim;

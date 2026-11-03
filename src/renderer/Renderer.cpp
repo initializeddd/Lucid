@@ -153,7 +153,11 @@ struct Renderer::Impl {
                 vk::BlurAxis::Vertical);
             if (std::any_of(backgroundScenes.begin(), backgroundScenes.end(), [](const auto& scene) { return static_cast<bool>(scene); })) {
                 try {
-                    const VkExtent2D backgroundExtent{std::max(1U, extent.width / 4U), std::max(1U, extent.height / 4U)};
+                    // Keep pixel-art pixels similar in logical size on both
+                    // standard-density and Retina/high-DPI displays.
+                    const auto pixelScale = static_cast<std::uint32_t>(
+                        std::clamp(std::lround(window.contentScale() * 2.0F), 2L, 4L));
+                    const VkExtent2D backgroundExtent{std::max(1U, extent.width / pixelScale), std::max(1U, extent.height / pixelScale)};
                     backgroundTargets[index] = std::make_unique<vk::Background3DTarget>(device, swapchain.format(), backgroundExtent);
                     backgroundPipelines[index] = std::make_unique<vk::Background3DPipeline>(device, backgroundTargets[index]->renderPass());
                     backgroundDirectPasses[index] = std::make_unique<vk::BlurPass>(device, swapchain.renderPass(), swapchain.format(), extent,
@@ -298,7 +302,7 @@ struct Renderer::Impl {
             static_cast<std::size_t>(sceneIndex) < backgroundScenes.size() && backgroundScenes[static_cast<std::size_t>(sceneIndex)] &&
             backgroundTargets[currentFrame] && backgroundPipelines[currentFrame] &&
             backgroundDirectPasses[currentFrame] && backgroundScenePasses[currentFrame];
-        const float backgroundBlurRadius = 12.0F * contentScale * std::clamp(state.backgroundDim, 0.0F, 1.0F);
+        const float backgroundBlurRadius = 16.0F * contentScale * std::clamp(state.backgroundDim, 0.0F, 1.0F);
         const bool blurBackground3D = renderBackground3D && backgroundBlurRadius > 0.01F &&
             backgroundBlurTargets[currentFrame] && backgroundHorizontalPasses[currentFrame] &&
             backgroundBlurDirectPasses[currentFrame] && backgroundBlurScenePasses[currentFrame];
@@ -388,7 +392,7 @@ struct Renderer::Impl {
 
             const float commandAmount =
                 std::clamp(state.opacity, 0.0F, 1.0F);
-            const float blurRadius = 14.0F * contentScale * commandAmount;
+            const float blurRadius = 18.0F * contentScale * commandAmount;
 
             VkRenderPassBeginInfo horizontalInfo{};
             horizontalInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;

@@ -4,6 +4,14 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version to use for preflight packages
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.version || github.ref_name }}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -82,14 +90,14 @@ jobs:
           mkdir -p dist
           packaging/macos/bundle-libraries.sh build/bin/Lucid.app
           ditto -c -k --keepParent \
-            build/bin/Lucid.app "dist/Lucid-${GITHUB_REF_NAME}-macOS.zip"
-          DMGBUILD="$RUNNER_TEMP/dmgbuild/bin/dmgbuild" packaging/macos/create-dmg.sh build/bin/Lucid.app "dist/Lucid-${GITHUB_REF_NAME}-macOS.dmg"
+            build/bin/Lucid.app "dist/Lucid-${RELEASE_TAG}-macOS.zip"
+          DMGBUILD="$RUNNER_TEMP/dmgbuild/bin/dmgbuild" packaging/macos/create-dmg.sh build/bin/Lucid.app "dist/Lucid-${RELEASE_TAG}-macOS.dmg"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          name="Lucid-${GITHUB_REF_NAME}-Linux"
+          name="Lucid-${RELEASE_TAG}-Linux"
           stage="${RUNNER_TEMP}/${name}"
           mkdir -p "${stage}/lib" dist
           cp build/bin/lucid "${stage}/"
@@ -114,7 +122,7 @@ jobs:
             exit 1
           fi
           tar -czf "dist/${name}.tar.gz" -C "${stage}" .
-          sed "s/@LUCID_RELEASE_TAG@/${GITHUB_REF_NAME}/g" packaging/linux/install.sh > dist/install.sh
+          sed "s/@LUCID_RELEASE_TAG@/${RELEASE_TAG}/g" packaging/linux/install.sh > dist/install.sh
 
       - name: Install WiX (Windows)
         if: runner.os == 'Windows'
@@ -133,14 +141,14 @@ jobs:
           Copy-Item $exe.FullName $stage
           Copy-Item "$($exe.DirectoryName)\assets" $stage -Recurse
           Compress-Archive -Path "$stage\Lucid.exe", "$stage\assets" `
-            -DestinationPath "dist\Lucid-$env:GITHUB_REF_NAME-Windows.zip"
+            -DestinationPath "dist\Lucid-$env:RELEASE_TAG-Windows.zip"
           $wix = (Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset*\bin\heat.exe" | Select-Object -First 1).DirectoryName
           if (-not $wix) { throw "WiX 3 was not found" }
           & "$wix\heat.exe" dir $stage -cg Payload -dr INSTALLFOLDER -srd -sreg -sfrag -ag -var var.SourceDir -out "$env:RUNNER_TEMP\Payload.wxs"
           if ($LASTEXITCODE -ne 0) { throw "WiX harvest failed" }
           & "$wix\candle.exe" -arch x64 "-dSourceDir=$stage" packaging/windows/Lucid.wxs "$env:RUNNER_TEMP\Payload.wxs" -out "$env:RUNNER_TEMP\"
           if ($LASTEXITCODE -ne 0) { throw "WiX compilation failed" }
-          & "$wix\light.exe" "$env:RUNNER_TEMP\Lucid.wixobj" "$env:RUNNER_TEMP\Payload.wixobj" -out "dist\Lucid-$env:GITHUB_REF_NAME-Windows.msi"
+          & "$wix\light.exe" "$env:RUNNER_TEMP\Lucid.wixobj" "$env:RUNNER_TEMP\Payload.wixobj" -out "dist\Lucid-$env:RELEASE_TAG-Windows.msi"
           if ($LASTEXITCODE -ne 0) { throw "WiX linking failed" }
 
       - name: Upload artifacts
@@ -152,21 +160,21 @@ jobs:
 
   package-freebsd:
     name: Package FreeBSD
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: vmactions/freebsd-vm@v1
         with:
           release: '14.3'
-          envs: 'GITHUB_REF_NAME'
+          envs: 'RELEASE_TAG'
           prepare: |
             pkg install -y cmake ninja git glfw vulkan-headers vulkan-loader glslang openssl
           run: |
             cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
             cmake --build build-bsd --parallel 2
             ctest --test-dir build-bsd --output-on-failure
-            sh packaging/bsd/package.sh "$GITHUB_REF_NAME"
+            sh packaging/bsd/package.sh "$RELEASE_TAG"
       - uses: actions/upload-artifact@v4
         with:
           name: package-FreeBSD
@@ -175,20 +183,20 @@ jobs:
 
   package-openbsd:
     name: Package OpenBSD
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: vmactions/openbsd-vm@v1
         with:
-          envs: 'GITHUB_REF_NAME'
+          envs: 'RELEASE_TAG'
           prepare: |
             pkg_add cmake ninja git glfw vulkan-headers vulkan-loader glslang
           run: |
             cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
             cmake --build build-bsd --parallel 2
             ctest --test-dir build-bsd --output-on-failure
-            sh packaging/bsd/package.sh "$GITHUB_REF_NAME"
+            sh packaging/bsd/package.sh "$RELEASE_TAG"
       - uses: actions/upload-artifact@v4
         with:
           name: package-OpenBSD

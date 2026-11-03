@@ -29,6 +29,7 @@ case "$expected" in *[!0123456789abcdefABCDEF]*|'') echo 'Invalid release checks
 [ "${#expected}" -eq 64 ] || { echo 'Invalid release checksum.' >&2; exit 1; }
 if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$tmp/$archive"); actual=${actual%% *}
 elif command -v sha256 >/dev/null 2>&1; then actual=$(sha256 -q "$tmp/$archive")
+elif command -v shasum >/dev/null 2>&1; then actual=$(shasum -a 256 "$tmp/$archive"); actual=${actual%% *}
 else echo 'A SHA-256 checksum utility is required.' >&2; exit 1; fi
 [ "$actual" = "$expected" ] || { echo 'Release checksum mismatch.' >&2; exit 1; }
 mkdir "$tmp/payload"

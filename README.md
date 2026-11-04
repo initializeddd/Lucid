@@ -13,15 +13,9 @@
 Keyboard-first. Path-native. Drawn entirely on the GPU.
 
 [![CI](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/badge/docs-initializeddd.github.io%2FLucid-787EFF)](https://initializeddd.github.io/Lucid/)
-[![CodeQL](https://github.com/initializeddd/Lucid/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/initializeddd/Lucid/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/initializeddd/Lucid/badge)](https://securityscorecards.dev/viewer/?uri=github.com/initializeddd/Lucid)
 [![Status](https://img.shields.io/badge/status-beta-787EFF)](#downloads)
 [![License](https://img.shields.io/github/license/initializeddd/Lucid?color=787EFF)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/initializeddd/Lucid?color=787EFF&include_prereleases)](https://github.com/initializeddd/Lucid/releases)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-787EFF)](#platform-support)
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-787EFF)](https://en.cppreference.com/w/cpp/20)
-[![Discussions](https://img.shields.io/badge/discussions-open-787EFF)](https://github.com/initializeddd/Lucid/discussions)
 
 [Download](#downloads) · [Docs](https://initializeddd.github.io/Lucid/) · [Getting started](docs/getting-started.md) · [Build from source](#build-from-source) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md) · [Discussions](https://github.com/initializeddd/Lucid/discussions)
 
@@ -36,19 +30,21 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Beta software.** Version `v0.2.1-beta.2` includes features at different stages of maturity.
-> File formats and behavior may change. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
+> **Beta software.** Features are at different stages of maturity, and file formats and behavior
+> may change. This README describes the current source tree; the downloadable
+> `v0.2.1-beta.2` release may differ. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
-## Screenshots
+## Lucid in action
 
-![The Lucid editor showing a C++ file](docs/assets/screenshots/editor.png)
+**Welcome screen**
 
-![The Lucid start surface](docs/assets/screenshots/start.png)
+![Lucid's welcome screen with the animated ocean lighthouse background](docs/assets/screenshots/lighthouse-welcome.gif)
 
-![Opening a C++ file and scrolling through the code](docs/assets/screenshots/demo.gif)
+**Editing a file**
 
-A short [MP4 version](docs/assets/screenshots/demo.mp4) is available for reduced-motion or
-lower-bandwidth viewing.
+![A C++ file open in Lucid over the softly blurred lighthouse background](docs/assets/screenshots/lighthouse-editor.gif)
+
+These short, sampled animations show the lighthouse scene in the welcome screen and editor.
 
 ## At a glance
 
@@ -680,6 +676,5 @@ early ideas. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull reque
 
 Lucid is released under the [MIT License](LICENSE).
 
-The bundled JetBrains Mono font is licensed under the
-[SIL Open Font License 1.1](assets/fonts/JetBrainsMono-OFL.txt). Third-party notices for the
-local AI stack are in [assets/licenses](assets/licenses/).
+See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled and fetched components, the font,
+and the separately downloaded local AI model.

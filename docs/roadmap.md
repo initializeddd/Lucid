@@ -1,6 +1,11 @@
 # Roadmap
 
-## 0.1 — Foundation
+These are development themes, not promised release dates or version numbers. The checklists
+describe the current source tree; a published beta can have a different feature set. See the
+[changelog](https://github.com/initializeddd/Lucid/blob/main/CHANGELOG.md) for released versions
+and their changes.
+
+## Foundation
 
 - [x] Project structure and build system
 - [x] GLFW window with a Vulkan surface
@@ -8,7 +13,7 @@
 - [x] Resize handling and a dark, sRGB-aware clear pass
 - [x] Validation layer wiring
 
-## 0.2 — First pixels
+## Rendering foundations
 
 - [ ] Render hardware interface (`renderer/rhi`)
 - [ ] Pipeline cache
@@ -18,7 +23,7 @@
 - [x] Glyph atlas and text rendering prototype
 - [ ] Theme loading from `assets/themes`
 
-## 0.3 — Editor shell
+## Editor shell
 
 - [x] UTF-8 document model with cursor and keyboard editing
 - [x] Shift-keyboard and mouse-drag text selection
@@ -41,7 +46,7 @@
 - [x] Windows executable icon, version resource and Windows 11 DWM caption colors
 - [x] Linux desktop entry and installed application icon
 
-## 0.4 — Path-native workspace
+## Path-native workspace
 
 - [x] Project prompt that opens or creates a project root
 - [x] File prompt with fuzzy path suggestions
@@ -53,7 +58,7 @@
 - [x] Persisted recent projects and session restore (clean exits; crash recovery is separate)
 - [ ] Large-project index updates without a full refresh
 
-## 0.5 — Daily driver
+## Daily workflows
 
 - [x] Multiple documents through a temporary switcher without a permanent tab bar
 - [ ] Split editors
@@ -82,7 +87,8 @@ make the missing work explicit while retaining the path-first interface and opti
 2. **Development tools:** extend the existing comment-driven compile windows for builds and test
    results; provide Git status, diffs, staging, commits and merge conflict resolution. Do not add a
    general-purpose terminal.
-3. **Language support:** extend C/C++ clangd integration for additional languages, rename support and discoverable language setup.
+3. **Language support:** extend C/C++ clangd integration for additional languages, rename support
+   and discoverable language setup.
 4. **Debugging:** debug-adapter integration, launch configurations, breakpoints, variables,
    call stacks and stepping.
 5. **Extensibility and accessibility:** a documented module API, themes, configurable

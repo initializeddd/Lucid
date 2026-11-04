@@ -3,11 +3,11 @@
 ## Supported versions
 
 Lucid is pre-1.0. Security fixes are applied to the latest `main` branch and the most recent
-release.
+published beta release.
 
 | Version | Supported |
 | --- | :---: |
-| Latest release | ✅ |
+| Most recent published beta | ✅ |
 | `main` | ✅ |
 | Older releases | ❌ |
 
@@ -22,8 +22,8 @@ Use GitHub's private vulnerability reporting:
 3. Include the affected version or commit, reproduction steps and expected impact.
 
 Maintainers will acknowledge the report as soon as possible and coordinate a fix and disclosure.
-If private vulnerability reporting is unavailable, open a draft security advisory in the
-repository's **Security** tab or contact the maintainer through GitHub.
+If the report button is unavailable, contact a maintainer privately through an existing private
+channel and ask how to report it. Do not include vulnerability details in a public message.
 
 Please avoid sharing sensitive details in an issue or discussion.
 

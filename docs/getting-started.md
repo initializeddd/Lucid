@@ -2,9 +2,30 @@
 
 Lucid is a project-based editor. Open a project folder first, then open files inside it.
 
-## 1. Build and launch
+## 1. Install and launch
 
-macOS:
+Download [Lucid v0.2.1-beta.2](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2)
+for your platform, or browse all [releases](https://github.com/initializeddd/Lucid/releases). The
+beta release page includes `SHA256SUMS.txt` for checking the downloaded files.
+
+To verify a download, calculate its SHA-256 digest and compare it with the line for that filename
+in `SHA256SUMS.txt`. On macOS use `shasum -a 256 <filename>`; on Linux use
+`sha256sum <filename>`; on Windows PowerShell use `Get-FileHash -Algorithm SHA256 <filename>`.
+
+| Platform | Get started |
+| --- | --- |
+| macOS | Open the DMG or extract the ZIP, then launch `Lucid.app`. The app is ad-hoc signed and is not notarized. |
+| Windows | Run the MSI or extract the ZIP and launch `Lucid.exe`. The MSI requires administrator access. |
+| Linux | Extract the Linux archive and run `./lucid`. A working Vulkan driver is required. |
+| FreeBSD or OpenBSD | Extract the matching archive and run `./lucid`; install GLFW, Vulkan and system cryptography libraries first. |
+
+Beta builds are not signed with distribution certificates. macOS Gatekeeper and Windows
+SmartScreen may display a warning. BSD graphical desktop testing is still limited.
+
+### Build from source
+
+For the full platform-specific instructions, see [Building](building.md). To build on macOS,
+clone the repository and run these commands from its root:
 
 ```sh
 brew install cmake ninja glfw glslang molten-vk vulkan-loader vulkan-headers
@@ -23,7 +44,7 @@ cmake --install build/release --prefix /Applications
 ad-hoc signature. You can also copy it with `ditto`; sign it again afterwards if you modify the
 bundle. The deployment target defaults to macOS 14 unless overridden; locally built bundles may require installed Homebrew libraries.
 
-Windows builds produce `build\bin\Debug\Lucid.exe`. Linux builds install a launcher with
+Windows builds produce `build\bin\Lucid.exe`. Linux builds install a launcher with
 `cmake --install build --prefix ~/.local`.
 
 ## 2. Open a project

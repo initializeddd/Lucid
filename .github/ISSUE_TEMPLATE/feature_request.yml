@@ -40,6 +40,9 @@ body:
         - macOS
         - Linux
         - Windows
+        - FreeBSD
+        - OpenBSD
+        - Other
 
   - type: checkboxes
     id: checks

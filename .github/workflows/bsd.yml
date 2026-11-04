@@ -31,13 +31,6 @@ jobs:
           prepare: |
             pkg_add cmake ninja git glfw vulkan-headers vulkan-loader glslang
           run: |
-            export TMPDIR="$PWD/.tmp"
-            mkdir -p "$TMPDIR"
-            mount | grep ' /tmp ' || true
             cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
             cmake --build build-bsd --parallel 2
-            set +e
-            ./build-bsd/bin/lucid_git_review_tests; echo "git_review exit:$?"
-            ./build-bsd/bin/lucid_lsp_tests; echo "lsp exit:$?"
-            set -e
             ctest --test-dir build-bsd --output-on-failure

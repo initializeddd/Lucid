@@ -21,5 +21,15 @@ int main(int argc, char** argv) {
     if (process.alive() || process.send("x", error)) { std::cerr << "Closed adapter accepted input"; return 7; }
     if (!process.start(argv[1], {}, error)) { std::cerr << "Restart failed: " << error; return 8; }
     process.close();
-    return process.alive() ? 9 : 0;
+    if (process.alive()) return 9;
+#if defined(_WIN32)
+    if (!process.start(argv[1], {"--diagnostic-failure"}, error)) return 10;
+    const auto failureDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (process.poll(chunk, error) && std::chrono::steady_clock::now() < failureDeadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (error.find("fixture diagnostic failure") == std::string::npos || error.find("42") == std::string::npos) {
+        std::cerr << "Missing adapter diagnostics: " << error; return 11;
+    }
+#endif
+    return 0;
 }

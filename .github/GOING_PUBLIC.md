@@ -3,31 +3,40 @@
 Use this list before flipping `initializeddd/Lucid` from private to public. Some items can only be
 enabled after the repository is public (branch protection, CodeQL, Scorecard, Pages on a free plan).
 
+> **Status (2026-11-04):** The repository remains private. CI is green on macOS, Linux, Windows,
+> FreeBSD, and OpenBSD. `docs/assets/social-preview.png` is prepared but still needs to be uploaded
+> manually. The remaining unchecked items are gated on making the repository public or are launch
+> and distribution follow-up.
+
 ## 1. Repository settings
 
-- [ ] Set the repository description:
+- [x] Set the repository description:
       `Lucid (Beta) — a minimal, GPU-accelerated code editor built on Vulkan.`
-- [ ] Set the homepage to `https://initializeddd.github.io/Lucid/` (or your custom domain).
+- [x] Set the homepage to `https://initializeddd.github.io/Lucid/` (or your custom domain).
 - [ ] Upload `docs/assets/social-preview.png` under **Settings → General → Social preview**.
-- [ ] Review topics: `code-editor`, `cpp`, `cross-platform`, `glfw`, `gpu`, `moltenvk`, `vulkan`,
+      The file is prepared at 1280×640 and uses no purple gradients.
+- [x] Review topics: `code-editor`, `cpp`, `cross-platform`, `glfw`, `gpu`, `moltenvk`, `vulkan`,
       `developer-tools`, `text-editor`, `keyboard-first`, `native`, `macos`, `linux`, `windows`.
-- [ ] Keep **Issues** and **Discussions** enabled. Decide whether to enable the **Wiki** (docs are
+- [x] Keep **Issues** and **Discussions** enabled. Decide whether to enable the **Wiki** (docs are
       the single source today).
-- [ ] Enable **Projects** if you want a public roadmap board.
-- [ ] Confirm **Allow forking** is enabled for a public project.
-- [ ] Check that **Releases** are visible and the latest stable and latest pre-release are correct.
+- [x] Enable **Projects** if you want a public roadmap board.
+- [x] Confirm **Allow forking** is enabled for a public project.
+      Forking is enabled by default; GitHub rejects the explicit flag for user-owned repositories.
+- [x] Check that **Releases** are visible and the latest stable and latest pre-release are correct.
+      Reviewed: latest stable `v0.1.0-beta.4`, latest pre-release `v0.2.1-beta.2`.
 
 ## 2. Security and access
 
 - [ ] Enable **Private vulnerability reporting** (Settings → Code security).
-- [ ] Enable **Dependabot alerts** and **Dependabot security updates**.
+- [x] Enable **Dependabot alerts** and **Dependabot security updates**.
 - [ ] Enable **Secret scanning** and **Push protection**.
 - [ ] Enable **CodeQL** default setup or keep the committed `codeql.yml` workflow.
+      The workflow is committed but skipped while the repository is private.
 - [ ] After the repository is public, add a **branch protection rule** or **ruleset** for `main`:
       require a pull request, one review, the `CI` and `Docs` checks, linear history, and block
       force pushes and deletions.
 - [ ] Consider requiring signed commits and a signed-off-by trailer.
-- [ ] Review **Environments**, **Deploy keys**, **Webhooks**, **GitHub Apps** and **Actions secrets**
+- [x] Review **Environments**, **Deploy keys**, **Webhooks**, **GitHub Apps** and **Actions secrets**
       for anything that should not be exposed.
 - [ ] Confirm the `Scorecard` workflow starts publishing results after the repository is public.
 - [ ] Enable **Private vulnerability reporting** before the first public release announcement.
@@ -38,31 +47,35 @@ enabled after the repository is public (branch protection, CodeQL, Scorecard, Pa
 - [ ] Set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**.
 - [ ] Run the `Docs` workflow or push a change under `docs/` to deploy.
 - [ ] Verify `https://initializeddd.github.io/Lucid/` loads and the screenshots render.
-- [ ] Update `site_url` in `mkdocs.yml` if you use a custom domain.
-- [ ] If you use a custom domain, add `docs/CNAME` and configure the DNS records.
-- [ ] Check that the README and `docs/` links do not point at private-only pages.
+- [x] Update `site_url` in `mkdocs.yml` if you use a custom domain.
+      Already set to `https://initializeddd.github.io/Lucid/`; no custom domain is used.
+- [x] If you use a custom domain, add `docs/CNAME` and configure the DNS records.
+      Not applicable: no custom domain.
+- [x] Check that the README and `docs/` links do not point at private-only pages.
 
 ## 4. Content cleanup
 
-- [ ] Search for private-only wording:
+- [x] Search for private-only wording:
       `rg -n "private repository|requires GitHub access|current private" README.md SECURITY.md docs .github`
-- [ ] Confirm the README screenshots and `docs/assets/screenshots/` files are current.
-- [ ] Update `CHANGELOG.md` with the release that will be public.
+- [x] Confirm the README screenshots and `docs/assets/screenshots/` files are current.
+- [x] Update `CHANGELOG.md` with the release that will be public.
 - [ ] Confirm third-party notices are complete (`assets/licenses/`, `assets/fonts/`).
 - [ ] Confirm generated background assets are redistributable.
 - [ ] Remove internal notes, TODOs and experiments that should not be public.
-- [ ] Check for secrets in history: `gitleaks detect --source . --verbose` (install with
+- [x] Check for secrets in history: `gitleaks detect --source . --verbose` (install with
       `brew install gitleaks`).
-- [ ] Check repository size: `git-sizer --verbose` and `find . -type f -size +5M`.
-- [ ] Rotate any credential that ever appeared in history. Public history is permanent.
+- [x] Check repository size: `git-sizer --verbose` and `find . -type f -size +5M`.
+- [x] Rotate any credential that ever appeared in history. Public history is permanent.
+      No credentials were found by `gitleaks`.
 
 ## 5. CI and releases
 
-- [ ] Confirm `CI` passes on macOS, Linux and Windows.
-- [ ] Confirm `BSD` passes.
-- [ ] Confirm `Docs` builds with `mkdocs build --strict`.
+- [x] Confirm `CI` passes on macOS, Linux and Windows.
+- [x] Confirm `BSD` passes.
+- [x] Confirm `Docs` builds with `mkdocs build --strict`.
 - [ ] Confirm `CodeQL` and `Scorecard` are green after the repository is public.
-- [ ] Confirm the release workflow produces the expected artifacts and SHA-256 checksums.
+- [x] Confirm the release workflow produces the expected artifacts and SHA-256 checksums.
+      The workflow now creates `SHA256SUMS.txt`; the latest stable release predates that change.
 - [ ] Decide whether to add code signing/notarization for macOS and Windows.
 - [ ] Consider adding build provenance (`actions/attest-build-provenance`) and an SBOM.
 - [ ] Tag the first public release and write public release notes.
@@ -91,7 +104,9 @@ enabled after the repository is public (branch protection, CodeQL, Scorecard, Pa
 
 ## 8. Final pre-flight
 
-Run these from a clean checkout before changing visibility:
+Run these from a clean checkout before changing visibility. The pushed commit is clean, but the
+local working tree currently contains unrelated uncommitted feature work; do not include it in the
+public launch unless it is reviewed and committed.
 
 ```sh
 git status

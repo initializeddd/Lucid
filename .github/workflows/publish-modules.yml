@@ -32,3 +32,14 @@ jobs:
           oras push ghcr.io/initializeddd/lucid-module-catalog:latest
           --artifact-type application/vnd.lucid.catalog.v1
           modules/catalog.json:application/vnd.lucid.catalog.v1+json
+      - name: Verify published packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_dir="$(mktemp -d)"
+          oras pull ghcr.io/initializeddd/lucid-module-cpp-starter:1.0.0 --output "$verify_dir/module"
+          oras pull ghcr.io/initializeddd/lucid-module-catalog:latest --output "$verify_dir/catalog"
+          cmp modules/lucid-cpp-starter/module.json "$verify_dir/module/modules/lucid-cpp-starter/module.json"
+          cmp modules/catalog.json "$verify_dir/catalog/modules/catalog.json"
+          oras manifest fetch ghcr.io/initializeddd/lucid-module-cpp-starter:1.0.0 | python3 -c 'import json,sys; x=json.load(sys.stdin); assert len(x["layers"]) == 1 and x["layers"][0]["mediaType"] == "application/vnd.lucid.module.v1+json"'
+          oras manifest fetch ghcr.io/initializeddd/lucid-module-catalog:latest | python3 -c 'import json,sys; x=json.load(sys.stdin); assert len(x["layers"]) == 1 and x["layers"][0]["mediaType"] == "application/vnd.lucid.catalog.v1+json"'

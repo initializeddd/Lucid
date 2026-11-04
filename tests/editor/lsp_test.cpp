@@ -1,6 +1,7 @@
 #include "editor/lsp/Client.hpp"
 #include "editor/lsp/TextEdits.hpp"
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,41 @@ int main() {
     const auto sample = std::filesystem::absolute(std::filesystem::path("lucid test#file.cpp"));
     if (!pathFromFileUri(fileUri(sample), decoded) || decoded != sample || pathFromFileUri("file:///tmp/%00bad", decoded) || pathFromFileUri("https://example.com/x", decoded)) return 14;
 #if !defined(_WIN32)
+    {
+        const auto fakeDir = std::filesystem::temp_directory_path() /
+            ("lucid-lsp-capabilities-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(fakeDir);
+        const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"completionProvider":{},"definitionProvider":true,"declarationProvider":true,"referencesProvider":false,"documentFormattingProvider":{},"documentRangeFormattingProvider":false}}})";
+        { std::ofstream script(fakeDir / "clangd"); script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/cat > '" << (fakeDir / "received").string() << "'\n"; }
+        std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
+        const char* old = std::getenv("PATH"); const bool hadPath = old != nullptr; const std::string oldPath = old ? old : "";
+        if (setenv("PATH", fakeDir.c_str(), 1) != 0) return 30;
+        Client capabilities; std::string error; std::vector<std::string> messages;
+        const bool started = capabilities.start(fakeDir, error);
+        if (hadPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
+        if (!started) return 31;
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!capabilities.ready() && std::chrono::steady_clock::now() < limit) {
+            if (!capabilities.poll(messages, error)) return 32;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::uint64_t requestId = 123;
+        if (!capabilities.ready() || !capabilities.supports("textDocument/completion") || !capabilities.supports("textDocument/definition") || !capabilities.supports("textDocument/declaration") ||
+            !capabilities.supports("textDocument/formatting") || capabilities.supports("textDocument/references") ||
+            capabilities.supports("textDocument/rangeFormatting") || capabilities.request("textDocument/references", "{}", requestId, error) ||
+            requestId != 0 || error.find("does not support") == std::string::npos) return 33;
+        if (!capabilities.request("textDocument/definition", "{}", requestId, error) || !capabilities.cancel(requestId, error)) return 35;
+        bool receivedCancel = false;
+        while (std::chrono::steady_clock::now() < limit) {
+            messages.clear(); if (!capabilities.poll(messages, error)) return 37;
+            std::ifstream recorded(fakeDir / "received"); const std::string data((std::istreambuf_iterator<char>(recorded)), {});
+            if (data.find("\"method\":\"$/cancelRequest\"") != std::string::npos && data.find("\"params\":{\"id\":" + std::to_string(requestId) + "}") != std::string::npos) { receivedCancel = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!receivedCancel) return 36;
+        capabilities.close(); std::filesystem::remove_all(fakeDir);
+        if (capabilities.supports("textDocument/completion")) return 34;
+    }
     {
         const auto fakeDir = std::filesystem::temp_directory_path() /
             ("lucid-lsp-timeout-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -58,7 +94,12 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         wrongEncoding.close(); std::filesystem::remove_all(fakeDir);
-        if (!rejected || error.find("unsupported position encoding") == std::string::npos) return 25;
+        if (!rejected || error.find("unsupported position encoding") == std::string::npos) {
+            std::fprintf(stderr, "encoding test failed: rejected=%d error='%s' messages=%zu\n",
+                         rejected ? 1 : 0, error.c_str(), messages.size());
+            for (const auto& message : messages) std::fprintf(stderr, "  message: %s\n", message.c_str());
+            return 25;
+        }
     }
 #endif
     if (!std::getenv("LUCID_TEST_CLANGD")) return 0;
@@ -93,6 +134,23 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (!response || !diagnostic) return 9;
+    if (client.supports("textDocument/declaration")) {
+        if (!client.request("textDocument/declaration", params, id, error)) return 38;
+        bool declarationReceived = false;
+        while (!declarationReceived && std::chrono::steady_clock::now() < deadline) {
+            messages.clear(); if (!client.poll(messages, error)) return 39;
+            for (const auto& message : messages) {
+                lucid::editor::JsonError jsonError; const auto value = lucid::editor::parseJson(message, jsonError);
+                const auto* responseId = value ? value->find("id") : nullptr;
+                if (responseId && responseId->type == lucid::editor::JsonType::Number && responseId->numberValue == static_cast<double>(id)) {
+                    if (value->find("error") || !value->find("result")) return 40;
+                    declarationReceived = true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!declarationReceived) return 41;
+    }
     if (!client.change("int lucidExample();\nint main() { lucidEx }\n", error)) return 10;
     const std::string completion = "{\"textDocument\":{\"uri\":\"" + uri + "\"},\"position\":{\"line\":1,\"character\":20}}";
     if (!client.request("textDocument/completion", completion, id, error)) return 11;

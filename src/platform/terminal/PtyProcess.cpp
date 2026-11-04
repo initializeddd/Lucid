@@ -35,6 +35,7 @@ namespace {
 
 constexpr std::size_t kMaxRawOutput = 256U * 1024U;
 constexpr std::size_t kMaxOutput = 64U * 1024U;
+constexpr const char kDisableEcho[] = "stty -echo 2>/dev/null || true\n";
 
 [[nodiscard]] std::string makeMarker() {
     static std::atomic<std::uint64_t> counter{0};
@@ -190,6 +191,7 @@ bool PtyProcess::start(std::string workingDirectory,
     m_fd = master;
     m_pid = static_cast<int>(pid);
     m_alive = true;
+    write(kDisableEcho);
     sendNextCommand();
     return true;
 #endif
@@ -352,6 +354,7 @@ void PtyProcess::pumpOutput() {
     }
 
     m_output = sanitizeOutput(m_rawOutput);
+    if (m_output.starts_with(kDisableEcho)) m_output.erase(0, sizeof(kDisableEcho) - 1);
     trimToSize(m_output, kMaxOutput);
 
     if (closed) {
@@ -359,6 +362,7 @@ void PtyProcess::pumpOutput() {
             m_exitCodes.push_back(-1);
             m_rawOutput += "\n[Compile shell exited before reporting the command result]\n";
             m_output = sanitizeOutput(m_rawOutput);
+            if (m_output.starts_with(kDisableEcho)) m_output.erase(0, sizeof(kDisableEcho) - 1);
             trimToSize(m_output, kMaxOutput);
         }
         if (m_fd >= 0) {

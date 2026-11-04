@@ -42,6 +42,7 @@ private:
     int m_pid = -1;
     bool m_alive = false;
     bool m_commandsDone = false;
+    bool m_waitingForEcho = false;
     std::size_t m_nextCommand = 0;
     std::vector<std::string> m_commands;
     std::vector<int> m_exitCodes;

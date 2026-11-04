@@ -1,6 +1,7 @@
 #include "workspace/git/GitReview.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -91,10 +92,17 @@ int main() {
     if (emptyCommand("config core.hooksPath hooks") || gitCommit(emptyRoot, preview, "Rejected commit", commitOutput, error) || error.empty()) return 33;
     GitCommitPreview afterHook;
     if (!gitCommitPreview(emptyRoot, afterHook, error) || afterHook.indexTree != preview.indexTree || emptyCommand("config core.hooksPath /dev/null")) return 34;
-    { std::ofstream hook(emptyRoot / "hooks/pre-commit"); hook << "#!/bin/sh\nhead -c 2200000 /dev/zero | tr '\\000' x\n"; }
-    if (emptyCommand("config core.hooksPath hooks") || !gitCommit(emptyRoot, preview, "Initial commit", commitOutput, error) ||
-        commitOutput.find("[Git output truncated after 2 MiB]") == std::string::npos ||
-        emptyCommand("log -1 --format=%s | grep -q 'Initial commit'")) return 35;
+    { std::ofstream hook(emptyRoot / "hooks/pre-commit"); hook << "#!/bin/sh\ndd if=/dev/zero bs=2200000 count=1 2>/dev/null | tr '\\000' x\n"; }
+    if (emptyCommand("config core.hooksPath hooks")) return 35;
+    if (!gitCommit(emptyRoot, preview, "Initial commit", commitOutput, error)) {
+        std::fprintf(stderr, "large hook commit failed: %s\n", error.c_str());
+        return 35;
+    }
+    if (commitOutput.find("[Git output truncated after 2 MiB]") == std::string::npos) {
+        std::fprintf(stderr, "large hook output was not truncated: %zu bytes\n", commitOutput.size());
+        return 35;
+    }
+    if (emptyCommand("log -1 --format=%s | grep -q 'Initial commit'")) return 35;
     std::filesystem::remove_all(root); return 0;
 #endif
 }

@@ -22,16 +22,8 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | oras login ghcr.io --username '${{ github.actor }}' --password-stdin
-      - name: Publish starter module
-        run: >-
-          oras push ghcr.io/initializeddd/lucid-module-cpp-starter:1.0.0
-          --artifact-type application/vnd.lucid.module.v1
-          modules/lucid-cpp-starter/module.json:application/vnd.lucid.module.v1+json
-      - name: Publish module catalog
-        run: >-
-          oras push ghcr.io/initializeddd/lucid-module-catalog:latest
-          --artifact-type application/vnd.lucid.catalog.v1
-          modules/catalog.json:application/vnd.lucid.catalog.v1+json
+      - name: Publish modules and generate catalog
+        run: python3 tools/modules/publish.py --publish
       - name: Verify published packages
         shell: bash
         run: |

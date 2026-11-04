@@ -123,6 +123,7 @@ endif()
 
 add_executable(lucid_text_search_tests editor/text_search_test.cpp)
 target_link_libraries(lucid_text_search_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_text_search_tests)
 add_test(NAME editor.text_search COMMAND lucid_text_search_tests)
 
 add_executable(lucid_app_icon_tests platform/app_icon_test.cpp)

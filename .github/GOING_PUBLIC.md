@@ -18,8 +18,8 @@ complete the public-only security and documentation checks immediately after the
 - [x] Set the homepage to `https://initializeddd.github.io/Lucid/` (or your custom domain).
 - [ ] Upload `docs/assets/social-preview.png` under **Settings → General → Social preview**.
       The 1280×640 image features a render of Lucid's ocean lighthouse scene and uses no purple
-      gradients. Safari was signed out of
-      GitHub when checked on 2026-11-04, so the private repository settings were inaccessible.
+      gradients. Safari was signed out of GitHub when checked on 2026-11-04, so the private
+      repository settings were inaccessible.
       GitHub's repository metadata still reports the owner avatar as its open-graph image.
 - [x] Review topics: `code-editor`, `cpp`, `cross-platform`, `glfw`, `gpu`, `moltenvk`, `vulkan`,
       `developer-tools`, `text-editor`, `keyboard-first`, `native`, `macos`, `linux`, `windows`.
@@ -69,7 +69,8 @@ complete the public-only security and documentation checks immediately after the
 - [x] Search for private-only wording:
       `rg -n "private repository|requires GitHub access|current private" README.md SECURITY.md docs .github`
 - [x] Review published GitHub release notes for obsolete privacy wording and duplicate text.
-      Notes were updated on 2026-11-04; release tags, assets and pre-release flags were unchanged.
+      Notes were updated on 2026-11-04 without changing release tags or assets. The older beta
+      releases were subsequently marked as pre-releases.
 - [x] Add two distinct animated views using the ocean lighthouse background to the README and
       documentation. The welcome and editor views were captured from Lucid on 2026-11-04; each
       uses eight sampled frames rather than a continuous screen recording.
@@ -112,6 +113,9 @@ complete the public-only security and documentation checks immediately after the
 - [ ] Confirm `CI` passes on macOS, Linux and Windows for the commit to be published.
 - [ ] Confirm `BSD` passes for the commit to be published.
 - [ ] Confirm `Docs` builds with `mkdocs build --strict` for the commit to be published.
+      On 2026-11-04, the documentation-only review commit `8dbab4e` built locally on macOS and
+      passed 42 tests and the strict docs build. Its GitHub CI and BSD jobs did not start because
+      GitHub reported a failed payment or spending-limit issue. Repeat checks for the final commit.
 - [ ] Confirm `CodeQL` and `Scorecard` are green after the repository is public.
 - [x] Confirm the release workflow produces the expected artifacts and SHA-256 checksums.
       The workflow now creates `SHA256SUMS.txt`; older beta releases predate that change.

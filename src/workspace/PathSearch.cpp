@@ -1,7 +1,9 @@
 #include "workspace/PathSearch.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -12,6 +14,7 @@ struct ScoredPath {
     std::string_view path;
     int score = 0;
 };
+constexpr int kNoMatch = std::numeric_limits<int>::min();
 
 [[nodiscard]] char lowerAscii(char value) noexcept {
     if (value >= 'A' && value <= 'Z') {
@@ -89,7 +92,7 @@ struct ScoredPath {
     }
 
     if (queryIndex != query.size()) {
-        return -1;
+        return kNoMatch;
     }
 
     if (equalsIgnoreCase(path, query)) {
@@ -108,6 +111,7 @@ struct ScoredPath {
 
 std::vector<std::string_view> filterPaths(const std::vector<std::string>& paths,
                                           std::string_view query, std::size_t limit) {
+    if (limit == 0) return {};
     std::vector<ScoredPath> scored;
     scored.reserve(paths.size());
 
@@ -118,12 +122,13 @@ std::vector<std::string_view> filterPaths(const std::vector<std::string>& paths,
         }
 
         const int score = scorePath(path, query);
-        if (score >= 0) {
+        if (score != kNoMatch) {
             scored.push_back(ScoredPath{path, score});
         }
     }
 
-    std::sort(scored.begin(), scored.end(), [](const ScoredPath& left, const ScoredPath& right) {
+    const auto count = std::min(limit, scored.size());
+    std::partial_sort(scored.begin(), scored.begin() + static_cast<std::ptrdiff_t>(count), scored.end(), [](const ScoredPath& left, const ScoredPath& right) {
         if (left.score != right.score) {
             return left.score > right.score;
         }
@@ -133,9 +138,7 @@ std::vector<std::string_view> filterPaths(const std::vector<std::string>& paths,
         return left.path < right.path;
     });
 
-    if (scored.size() > limit) {
-        scored.resize(limit);
-    }
+    scored.resize(count);
 
     std::vector<std::string_view> result;
     result.reserve(scored.size());
@@ -147,6 +150,7 @@ std::vector<std::string_view> filterPaths(const std::vector<std::string>& paths,
 
 std::vector<std::string_view> filterChildPaths(const std::vector<std::string>& paths,
                                                std::string_view query, std::size_t limit) {
+    if (limit == 0) return {};
     const auto slash = query.find_last_of('/');
     const auto parent = slash == std::string_view::npos ? std::string_view{} : query.substr(0, slash + 1);
     const auto fragment = slash == std::string_view::npos ? query : query.substr(slash + 1);
@@ -157,14 +161,15 @@ std::vector<std::string_view> filterChildPaths(const std::vector<std::string>& p
         const auto child = value.substr(parent.size());
         if (child.empty() || child.find('/') != std::string_view::npos) continue;
         const int score = fragment.empty() ? 0 : scorePath(child, fragment);
-        if (score >= 0) scored.push_back({value, score});
+        if (score != kNoMatch) scored.push_back({value, score});
     }
-    std::sort(scored.begin(), scored.end(), [](const ScoredPath& a, const ScoredPath& b) {
+    const auto count = std::min(limit, scored.size());
+    std::partial_sort(scored.begin(), scored.begin() + static_cast<std::ptrdiff_t>(count), scored.end(), [](const ScoredPath& a, const ScoredPath& b) {
         if (a.score != b.score) return a.score > b.score;
         if (a.path.size() != b.path.size()) return a.path.size() < b.path.size();
         return a.path < b.path;
     });
-    if (scored.size() > limit) scored.resize(limit);
+    scored.resize(count);
     std::vector<std::string_view> result;
     result.reserve(scored.size());
     for (const auto& item : scored) result.push_back(item.path);

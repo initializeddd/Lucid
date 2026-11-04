@@ -43,6 +43,11 @@ int main() {
         final.tasks.front().solution != "Added regression test" ||
         final.tasks.front().debugFunction != "main" || final.tasks.front().debugSource != "src/main.cpp" ||
         final.tasks.front().debugBreakpoints != std::vector<int>{3, 7}) return 16;
+    auto invalid = final; invalid.tasks.front().debugBreakpoints = {0};
+    if (saveTasks(project, invalid, error) || error.empty()) return 17;
+    TaskBoard unchanged; if (!loadTasks(project, unchanged, error) ||
+        unchanged.tasks.front().solution != "Added regression test" ||
+        unchanged.tasks.front().debugBreakpoints != std::vector<int>{3, 7}) return 18;
     { std::ofstream bad(directory / ".lucid/tasks.json", std::ios::trunc); bad << "invalid"; }
     if (loadTasks(project, restored, error) || error.empty()) return 11;
     std::filesystem::remove_all(directory);

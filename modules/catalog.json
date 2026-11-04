@@ -1,0 +1,11 @@
+{
+  "modules": [
+    {
+      "id": "lucid-cpp-starter",
+      "name": "C++ Starter",
+      "description": "Insert small C++ starting points without leaving the editor.",
+      "package": "initializeddd/lucid-module-cpp-starter",
+      "version": "1.0.0"
+    }
+  ]
+}

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 
@@ -9,6 +10,24 @@ namespace lucid::editor {
 namespace {
 
 constexpr char32_t kReplacementCharacter = U'\uFFFD';
+
+// The renderer displays each tab as four character cells.
+std::size_t visualColumn(std::u32string_view line, std::size_t column) {
+    std::size_t width = 0;
+    for (std::size_t i = 0; i < std::min(column, line.size()); ++i)
+        width += line[i] == U'\t' ? 4U : 1U;
+    return width;
+}
+
+std::size_t columnAtVisual(std::u32string_view line, std::size_t target) {
+    std::size_t width = 0;
+    for (std::size_t i = 0; i < line.size(); ++i) {
+        const std::size_t advance = line[i] == U'\t' ? 4U : 1U;
+        if (target < width + (advance + 1U) / 2U) return i;
+        width += advance;
+    }
+    return line.size();
+}
 
 [[nodiscard]] bool isContinuationByte(unsigned char byte) noexcept {
     return (byte & 0xC0U) == 0x80U;
@@ -279,7 +298,7 @@ void Document::setCursor(std::size_t lineIndex, std::size_t column) {
     m_cursorLine = lineIndex;
     m_cursorColumn = column;
     clampCursor();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 }
 
 void Document::selectAll() {
@@ -288,7 +307,7 @@ void Document::selectAll() {
     m_selectionAnchorColumn = 0;
     m_cursorLine = m_lines.size() - 1;
     m_cursorColumn = m_lines[m_cursorLine].size();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 }
 
 void Document::extendSelectionTo(std::size_t lineIndex, std::size_t column) {
@@ -300,13 +319,40 @@ void Document::extendSelectionTo(std::size_t lineIndex, std::size_t column) {
     m_cursorLine = lineIndex;
     m_cursorColumn = column;
     clampCursor();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
+}
+
+bool Document::surroundSelection(char32_t open, char32_t close) {
+    if (!hasSelection()) return false;
+    const auto start = selectionStart(), end = selectionEnd();
+    const bool reverse = m_cursorLine == start.line && m_cursorColumn == start.column;
+    beforeEdit();
+    m_lines[end.line].insert(end.column, 1, close);
+    m_lines[start.line].insert(start.column, 1, open);
+    const TextPosition innerStart{start.line, start.column + 1};
+    const TextPosition innerEnd{end.line, end.column + (start.line == end.line ? 1U : 0U)};
+    const auto cursor = reverse ? innerStart : innerEnd;
+    const auto anchor = reverse ? innerEnd : innerStart;
+    m_cursorLine = cursor.line; m_cursorColumn = cursor.column;
+    m_selectionAnchorLine = anchor.line; m_selectionAnchorColumn = anchor.column;
+    m_selectionActive = true; resetPreferredColumn(); markEdited();
+    return true;
 }
 
 void Document::insert(char32_t codepoint) {
     if (codepoint < 0x20U || codepoint == 0x7FU ||
         (codepoint >= 0xD800U && codepoint <= 0xDFFFU) || codepoint > 0x10FFFFU) {
         return;
+    }
+
+    if (hasSelection()) {
+        const auto start = selectionStart();
+        const auto end = selectionEnd();
+        if (start.line == end.line && end.column == start.column + 1 &&
+            m_lines[start.line][start.column] == codepoint) {
+            setCursor(end.line, end.column);
+            return;
+        }
     }
 
     beforeEdit();
@@ -319,6 +365,18 @@ void Document::insert(char32_t codepoint) {
 void Document::insertSpaces(std::size_t count) {
     if (count == 0) {
         return;
+    }
+
+    if (hasSelection()) {
+        const auto start = selectionStart();
+        const auto end = selectionEnd();
+        if (start.line == end.line && end.column - start.column == count &&
+            std::all_of(m_lines[start.line].begin() + static_cast<std::ptrdiff_t>(start.column),
+                        m_lines[start.line].begin() + static_cast<std::ptrdiff_t>(end.column),
+                        [](char32_t character) { return character == U' '; })) {
+            setCursor(end.line, end.column);
+            return;
+        }
     }
 
     beforeEdit();
@@ -353,6 +411,17 @@ void Document::newline() {
     markEdited();
 }
 
+bool Document::replaceAllUtf8(std::string_view text) {
+    auto replacement = Document::fromUtf8(text);
+    if (replacement.toUtf8() != text) return false;
+    if (toUtf8() == text) return true;
+    beforeEdit();
+    m_lines = std::move(replacement.m_lines);
+    m_selectionActive = false;
+    clampCursor(); resetPreferredColumn(); markEdited();
+    return true;
+}
+
 void Document::pasteUtf8(std::string_view text) {
     std::u32string pasted = decodeUtf8(text);
     if (pasted.empty()) {
@@ -374,6 +443,16 @@ void Document::pasteUtf8(std::string_view text) {
         }
     }
 
+    if (normalized.empty()) return;
+
+    // Replacing a selection with the same text only moves the caret. In
+    // particular, it must not mark a saved file dirty or discard redo history.
+    if (hasSelection() && selectionUtf8() == encodeUtf8(normalized)) {
+        const TextPosition end = selectionEnd();
+        setCursor(end.line, end.column);
+        return;
+    }
+
     beforeEdit();
     (void)eraseSelection();
 
@@ -392,23 +471,22 @@ void Document::pasteUtf8(std::string_view text) {
 
     const std::size_t insertionLine = m_cursorLine;
     std::size_t partStart = firstNewline + 1;
-    std::size_t insertedLines = 0;
+    std::vector<std::u32string> inserted;
     while (partStart <= normalized.size()) {
         const std::size_t nextNewline = normalized.find(U'\n', partStart);
         const std::size_t partEnd =
             nextNewline == std::u32string::npos ? normalized.size() : nextNewline;
-        std::u32string part = normalized.substr(partStart, partEnd - partStart);
-        m_lines.insert(m_lines.begin() +
-                           static_cast<std::ptrdiff_t>(insertionLine + insertedLines + 1),
-                       std::move(part));
-        ++insertedLines;
+        inserted.emplace_back(normalized.substr(partStart, partEnd - partStart));
         if (nextNewline == std::u32string::npos) {
             break;
         }
         partStart = nextNewline + 1;
     }
 
-    m_cursorLine = insertionLine + insertedLines;
+    m_cursorLine = insertionLine + inserted.size();
+    m_lines.insert(m_lines.begin() + static_cast<std::ptrdiff_t>(insertionLine + 1),
+                   std::make_move_iterator(inserted.begin()),
+                   std::make_move_iterator(inserted.end()));
     m_lines[m_cursorLine] += tail;
     m_cursorColumn = m_lines[m_cursorLine].size() - tail.size();
     markEdited();
@@ -443,7 +521,7 @@ void Document::insertJsonBlock(char32_t open, char32_t close,
 
     ++m_cursorLine;
     m_cursorColumn = innerIndent.size();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     clearSelection();
     markEdited();
 }
@@ -453,7 +531,7 @@ bool Document::insertJsonQuote() {
     if (!hasSelection() && m_cursorColumn < line.size() &&
         line[m_cursorColumn] == U'"') {
         ++m_cursorColumn;
-        m_preferredColumn = m_cursorColumn;
+        resetPreferredColumn();
         return true;
     }
 
@@ -476,7 +554,7 @@ bool Document::insertJsonQuote() {
     (void)eraseSelection();
     m_lines[m_cursorLine].insert(m_cursorColumn, 2, U'"');
     ++m_cursorColumn;
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     markEdited();
     return true;
 }
@@ -488,7 +566,7 @@ bool Document::movePast(char32_t codepoint) {
     const std::u32string& line = m_lines[m_cursorLine];
     if (m_cursorColumn < line.size() && line[m_cursorColumn] == codepoint) {
         ++m_cursorColumn;
-        m_preferredColumn = m_cursorColumn;
+        resetPreferredColumn();
         return true;
     }
     return false;
@@ -518,27 +596,50 @@ void Document::duplicateLine() {
 }
 
 void Document::deleteLine() {
-    if (m_lines.size() == 1 && m_lines[0].empty() && !hasSelection()) return;
+    const auto [first, last] = selectedLineRange();
+    if (m_lines.size() == 1 && m_lines[0].empty()) return;
     beforeEdit();
     m_selectionActive = false;
 
-    if (m_lines.size() == 1) {
-        m_lines[0].clear();
+    if (first == 0 && last + 1 == m_lines.size()) {
+        m_lines.assign(1, std::u32string{});
+        m_cursorLine = 0;
         m_cursorColumn = 0;
-        m_preferredColumn = 0;
+        resetPreferredColumn();
         markEdited();
         return;
     }
 
-    m_lines.erase(m_lines.begin() + static_cast<std::ptrdiff_t>(m_cursorLine));
-    if (m_cursorLine >= m_lines.size()) {
+    m_lines.erase(m_lines.begin() + static_cast<std::ptrdiff_t>(first),
+                  m_lines.begin() + static_cast<std::ptrdiff_t>(last + 1));
+    if (first >= m_lines.size()) {
         m_cursorLine = m_lines.size() - 1;
         m_cursorColumn = m_lines[m_cursorLine].size();
     } else {
+        m_cursorLine = first;
         m_cursorColumn = 0;
     }
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     markEdited();
+}
+
+void Document::joinLines() {
+    const auto [first, selectedLast] = selectedLineRange();
+    const auto last = selectedLast == first ? std::min(first + 1, m_lines.size() - 1) : selectedLast;
+    if (first == last) return;
+    beforeEdit();
+    auto& target = m_lines[first];
+    const auto caret = target.size();
+    for (std::size_t i = first + 1; i <= last; ++i) {
+        const auto start = m_lines[i].find_first_not_of(U" \t");
+        if (start == std::u32string::npos) continue;
+        if (!target.empty() && target.back() != U' ' && target.back() != U'\t') target.push_back(U' ');
+        target.append(m_lines[i], start, std::u32string::npos);
+    }
+    m_lines.erase(m_lines.begin() + static_cast<std::ptrdiff_t>(first + 1),
+                  m_lines.begin() + static_cast<std::ptrdiff_t>(last + 1));
+    m_selectionActive = false; m_cursorLine = first; m_cursorColumn = caret;
+    resetPreferredColumn(); markEdited();
 }
 
 void Document::insertLineBelow() {
@@ -550,7 +651,7 @@ void Document::insertLineBelow() {
         m_lines.begin() + static_cast<std::ptrdiff_t>(m_cursorLine + 1), indentation);
     ++m_cursorLine;
     m_cursorColumn = indentation.size();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     markEdited();
 }
 
@@ -561,7 +662,7 @@ void Document::insertLineAbove() {
         0, m_lines[m_cursorLine].find_first_not_of(U" \t"));
     m_lines.insert(m_lines.begin() + static_cast<std::ptrdiff_t>(m_cursorLine), indentation);
     m_cursorColumn = indentation.size();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     markEdited();
 }
 
@@ -599,7 +700,7 @@ void Document::toggleLineComment() {
         adjust(m_cursorLine, m_cursorColumn);
         adjust(m_selectionAnchorLine, m_selectionAnchorColumn);
         if (m_cursorLine == lineIndex) {
-            m_preferredColumn = m_cursorColumn;
+            resetPreferredColumn();
         }
     };
     const auto adjustErase = [this](std::size_t lineIndex, std::size_t position,
@@ -618,7 +719,7 @@ void Document::toggleLineComment() {
         adjust(m_cursorLine, m_cursorColumn);
         adjust(m_selectionAnchorLine, m_selectionAnchorColumn);
         if (m_cursorLine == lineIndex) {
-            m_preferredColumn = m_cursorColumn;
+            resetPreferredColumn();
         }
     };
 
@@ -660,7 +761,7 @@ void Document::indentLines(std::size_t spaces) {
     };
     adjust(m_cursorLine, m_cursorColumn);
     adjust(m_selectionAnchorLine, m_selectionAnchorColumn);
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 
     for (std::size_t lineIndex = first; lineIndex <= last; ++lineIndex) {
         m_lines[lineIndex].insert(0, spaces, U' ');
@@ -709,7 +810,7 @@ void Document::outdentLines(std::size_t spaces) {
         adjust(lineIndex, m_cursorLine, m_cursorColumn, removed);
         adjust(lineIndex, m_selectionAnchorLine, m_selectionAnchorColumn, removed);
     }
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     markEdited();
 }
 
@@ -725,7 +826,7 @@ void Document::moveLineUp() {
     --m_cursorLine;
     if (m_selectionActive) --m_selectionAnchorLine;
     clampCursor();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     markEdited();
 }
 
@@ -743,7 +844,7 @@ void Document::moveLineDown() {
     if (m_cursorLine >= m_lines.size()) { m_cursorLine = m_lines.size() - 1; m_cursorColumn = m_lines.back().size(); }
     if (m_selectionActive && m_selectionAnchorLine >= m_lines.size()) { m_selectionAnchorLine = m_lines.size() - 1; m_selectionAnchorColumn = m_lines.back().size(); }
     clampCursor();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
     markEdited();
 }
 
@@ -760,7 +861,7 @@ std::pair<std::size_t, std::size_t> Document::selectedLineRange() const {
     return {start.line, last};
 }
 
-void Document::backspace() {
+void Document::backspace(std::size_t indentWidth) {
     if (!hasSelection() && m_cursorLine == 0 && m_cursorColumn == 0) return;
     beforeEdit();
     if (eraseSelection()) {
@@ -768,8 +869,19 @@ void Document::backspace() {
     }
 
     if (m_cursorColumn > 0) {
-        m_lines[m_cursorLine].erase(m_cursorColumn - 1, 1);
-        --m_cursorColumn;
+        auto& line = m_lines[m_cursorLine];
+        std::size_t remove = 1;
+        if (indentWidth > 1 && line[m_cursorColumn - 1] == U' ' &&
+            std::all_of(line.begin(), line.begin() + static_cast<std::ptrdiff_t>(m_cursorColumn),
+                        [](char32_t c) { return c == U' ' || c == U'\t'; })) {
+            const auto visual = visualColumn(line, m_cursorColumn);
+            const auto previousStop = ((visual - 1) / indentWidth) * indentWidth;
+            while (remove < m_cursorColumn && visual - remove > previousStop &&
+                   line[m_cursorColumn - remove - 1] == U' ') ++remove;
+        }
+        line.erase(m_cursorColumn - remove, remove);
+        m_cursorColumn -= remove;
+        resetPreferredColumn();
         markEdited();
         return;
     }
@@ -824,7 +936,45 @@ void Document::moveWordLeft(bool extendSelection) {
             while (m_cursorColumn > 0 && text[m_cursorColumn - 1] != U' ' && text[m_cursorColumn - 1] != U'\t' && word(text[m_cursorColumn - 1]) == kind) --m_cursorColumn;
         }
     }
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
+}
+
+void Document::moveDocumentStart(bool extendSelection) {
+    if (extendSelection) extendSelectionTo(0, 0); else setCursor(0, 0);
+}
+
+void Document::moveDocumentEnd(bool extendSelection) {
+    const auto line = m_lines.size() - 1, column = m_lines.back().size();
+    if (extendSelection) extendSelectionTo(line, column); else setCursor(line, column);
+}
+
+void Document::moveParagraphUp(bool extendSelection) {
+    const auto blank = [this](std::size_t line) { return m_lines[line].find_first_not_of(U" \t") == std::u32string::npos; };
+    std::size_t line = m_cursorLine;
+    if (!blank(line)) {
+        while (line > 0 && !blank(line - 1)) --line;
+        if (line != m_cursorLine || m_cursorColumn != 0) {
+            if (extendSelection) extendSelectionTo(line, 0); else setCursor(line, 0);
+            return;
+        }
+    }
+    while (line > 0 && blank(line - 1)) --line;
+    if (line > 0) --line;
+    while (line > 0 && !blank(line - 1)) --line;
+    if (extendSelection) extendSelectionTo(line, 0); else setCursor(line, 0);
+}
+
+void Document::moveParagraphDown(bool extendSelection) {
+    const auto blank = [this](std::size_t line) { return m_lines[line].find_first_not_of(U" \t") == std::u32string::npos; };
+    std::size_t line = m_cursorLine;
+    while (line + 1 < m_lines.size() && !blank(line)) ++line;
+    if (line + 1 == m_lines.size() && !blank(line)) {
+        if (extendSelection) extendSelectionTo(line, m_lines[line].size()); else setCursor(line, m_lines[line].size());
+        return;
+    }
+    while (line + 1 < m_lines.size() && blank(line)) ++line;
+    const auto column = blank(line) ? m_lines[line].size() : 0;
+    if (extendSelection) extendSelectionTo(line, column); else setCursor(line, column);
 }
 
 void Document::moveWordRight(bool extendSelection) {
@@ -841,7 +991,7 @@ void Document::moveWordRight(bool extendSelection) {
         }
         while (m_cursorColumn < text.size() && (text[m_cursorColumn] == U' ' || text[m_cursorColumn] == U'\t')) ++m_cursorColumn;
     }
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 }
 
 void Document::moveLeft(bool extendSelection) {
@@ -858,7 +1008,7 @@ void Document::moveLeft(bool extendSelection) {
         --m_cursorLine;
         m_cursorColumn = m_lines[m_cursorLine].size();
     }
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 }
 
 void Document::moveRight(bool extendSelection) {
@@ -875,7 +1025,12 @@ void Document::moveRight(bool extendSelection) {
         ++m_cursorLine;
         m_cursorColumn = 0;
     }
+    resetPreferredColumn();
+}
+
+void Document::resetPreferredColumn() {
     m_preferredColumn = m_cursorColumn;
+    m_preferredColumnIsVisual = false;
 }
 
 void Document::moveUp(bool extendSelection) {
@@ -889,8 +1044,12 @@ void Document::moveUp(bool extendSelection) {
         return;
     }
 
+    if (!m_preferredColumnIsVisual) {
+        m_preferredColumn = visualColumn(m_lines[m_cursorLine], m_cursorColumn);
+        m_preferredColumnIsVisual = true;
+    }
     --m_cursorLine;
-    m_cursorColumn = std::min(m_preferredColumn, m_lines[m_cursorLine].size());
+    m_cursorColumn = columnAtVisual(m_lines[m_cursorLine], m_preferredColumn);
 }
 
 void Document::moveDown(bool extendSelection) {
@@ -904,8 +1063,12 @@ void Document::moveDown(bool extendSelection) {
         return;
     }
 
+    if (!m_preferredColumnIsVisual) {
+        m_preferredColumn = visualColumn(m_lines[m_cursorLine], m_cursorColumn);
+        m_preferredColumnIsVisual = true;
+    }
     ++m_cursorLine;
-    m_cursorColumn = std::min(m_preferredColumn, m_lines[m_cursorLine].size());
+    m_cursorColumn = columnAtVisual(m_lines[m_cursorLine], m_preferredColumn);
 }
 
 void Document::moveHome(bool extendSelection) {
@@ -915,7 +1078,7 @@ void Document::moveHome(bool extendSelection) {
         clearSelection();
     }
     m_cursorColumn = 0;
-    m_preferredColumn = 0;
+    m_preferredColumn = 0; m_preferredColumnIsVisual = false;
 }
 
 void Document::moveSmartHome(bool extendSelection) {
@@ -924,7 +1087,7 @@ void Document::moveSmartHome(bool extendSelection) {
     const auto first = text.find_first_not_of(U" \t");
     const auto indentation = first == std::u32string::npos ? text.size() : first;
     m_cursorColumn = m_cursorColumn == indentation ? 0 : indentation;
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 }
 
 void Document::moveEnd(bool extendSelection) {
@@ -934,7 +1097,7 @@ void Document::moveEnd(bool extendSelection) {
         clearSelection();
     }
     m_cursorColumn = m_lines[m_cursorLine].size();
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 }
 
 Document::Snapshot Document::snapshot() const {
@@ -943,6 +1106,8 @@ Document::Snapshot Document::snapshot() const {
     value.cursorLine = m_cursorLine;
     value.cursorColumn = m_cursorColumn;
     value.preferredColumn = m_preferredColumn;
+    value.preferredColumnIsVisual = m_preferredColumnIsVisual;
+    value.contentState = m_contentState;
     value.anchorLine = m_selectionAnchorLine;
     value.anchorColumn = m_selectionAnchorColumn;
     value.selectionActive = m_selectionActive;
@@ -954,46 +1119,87 @@ void Document::restore(const Snapshot& value) {
     m_cursorLine = value.cursorLine;
     m_cursorColumn = value.cursorColumn;
     m_preferredColumn = value.preferredColumn;
+    m_preferredColumnIsVisual = value.preferredColumnIsVisual;
+    m_contentState = value.contentState;
     m_selectionAnchorLine = value.anchorLine;
     m_selectionAnchorColumn = value.anchorColumn;
     m_selectionActive = value.selectionActive;
     clampCursor();
 }
 
-void Document::beforeEdit() {
+std::size_t Document::snapshotBytes(const Snapshot& value) noexcept {
+    // Use logical sizes so the accounting survives copying a Document, whose
+    // string and vector capacities may differ from the original's capacities.
+    std::size_t bytes = sizeof(Snapshot) + value.lines.size() * sizeof(std::u32string);
+    for (const auto& line : value.lines) bytes += line.size() * sizeof(char32_t);
+    return bytes;
+}
+
+void Document::pushHistory(std::vector<Snapshot>& history, std::size_t& bytes, Snapshot value) {
     constexpr std::size_t kMaxUndo = 200;
-    if (m_undo.size() >= kMaxUndo) {
-        m_undo.erase(m_undo.begin());
+    constexpr std::size_t kMaxHistoryBytes = 64U * 1024U * 1024U;
+    const auto size = snapshotBytes(value);
+    while (!history.empty() && (history.size() >= kMaxUndo || size > kMaxHistoryBytes || bytes > kMaxHistoryBytes - size)) {
+        bytes -= snapshotBytes(history.front());
+        history.erase(history.begin());
     }
-    m_undo.push_back(snapshot());
-    m_redo.clear();
+    bytes += size; history.push_back(std::move(value));
+}
+
+void Document::beforeEdit() {
+    pushHistory(m_undo, m_undoBytes, snapshot());
+    m_redo.clear(); m_redoBytes = 0;
 }
 
 void Document::undo() {
     if (m_undo.empty()) {
         return;
     }
-    m_redo.push_back(snapshot());
+    pushHistory(m_redo, m_redoBytes, snapshot());
     restore(m_undo.back());
+    m_undoBytes -= snapshotBytes(m_undo.back());
     m_undo.pop_back();
     ++m_revision;
-    m_dirty = true;
+    m_dirty = !m_hasSavedState || m_contentState != m_savedState;
 }
 
 void Document::redo() {
     if (m_redo.empty()) {
         return;
     }
-    m_undo.push_back(snapshot());
+    pushHistory(m_undo, m_undoBytes, snapshot());
     restore(m_redo.back());
+    m_redoBytes -= snapshotBytes(m_redo.back());
     m_redo.pop_back();
     ++m_revision;
-    m_dirty = true;
+    m_dirty = !m_hasSavedState || m_contentState != m_savedState;
 }
 
 void Document::deleteSelection() {
     if (!hasSelection()) return;
     beforeEdit();
+    (void)eraseSelection();
+}
+
+void Document::deleteWord(bool forward) { deleteWithMovement(forward, true); }
+void Document::deleteToLineBoundary(bool forward) { deleteWithMovement(forward, false); }
+
+void Document::deleteWithMovement(bool forward, bool word) {
+    if (hasSelection()) { deleteSelection(); return; }
+    const auto originalLine = m_cursorLine, originalColumn = m_cursorColumn;
+    const auto preferred = m_preferredColumn;
+    const bool preferredVisual = m_preferredColumnIsVisual;
+    if (word) {
+        if (forward) moveWordRight(true); else moveWordLeft(true);
+    } else {
+        if (forward) moveEnd(true); else moveHome(true);
+    }
+    const auto endLine = m_cursorLine, endColumn = m_cursorColumn;
+    setCursor(originalLine, originalColumn);
+    m_preferredColumn = preferred; m_preferredColumnIsVisual = preferredVisual;
+    if (endLine == originalLine && endColumn == originalColumn) return;
+    beforeEdit();
+    extendSelectionTo(endLine, endColumn);
     (void)eraseSelection();
 }
 
@@ -1031,8 +1237,9 @@ bool Document::eraseSelection() {
 
 void Document::markEdited() {
     ++m_revision;
+    m_contentState = m_nextContentState++;
     m_dirty = true;
-    m_preferredColumn = m_cursorColumn;
+    resetPreferredColumn();
 }
 
 void Document::clampCursor() {

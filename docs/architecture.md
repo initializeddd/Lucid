@@ -6,7 +6,7 @@ Lucid is a C++20 desktop editor with a GLFW window and a Vulkan renderer. The ap
 
 `src/app/Application` routes keyboard, mouse and native menu events, manages the open project and documents, and builds `ui::FrameState` for rendering. The document model stores Unicode text, cursor and selection state, undo/redo and serialization information. A temporary switcher keeps inactive documents and their editing context without permanent tabs.
 
-File writes check for external modifications, preserve supported metadata and create local history before replacing an existing file. Recovery snapshots are periodic and separate from clean-exit session records. These protections have limits: see [Sessions and recovery](../README.md#sessions-and-recovery) and [Recovery snapshots](../README.md#recovery-snapshots).
+File writes check for external modifications, preserve supported metadata and create local history before replacing an existing file. Recovery snapshots are periodic and separate from clean-exit session records. These protections have limits: see [Sessions and recovery](https://github.com/initializeddd/Lucid/blob/main/README.md#sessions-and-recovery) and [Recovery snapshots](https://github.com/initializeddd/Lucid/blob/main/README.md#recovery-snapshots).
 
 ## Rendering and interaction
 
@@ -18,9 +18,9 @@ File writes check for external modifications, preserve supported metadata and cr
 
 `src/workspace` contains project indexing, project-wide search and reviewed replacement, Git operations, tasks, recovery and session persistence. Index and function scans run asynchronously. Search and replace use bounded results and check for changed files; multi-file replacement is not an atomic undo transaction.
 
-C/C++ comment blocks define compile functions executed by the platform process layer. Output appears in a selectable compile window. The LLDB debug-adapter client supplies breakpoint and stepping workflows; platform coverage and functionality remain limited as described in the [README](../README.md#debugging).
+C/C++ comment blocks define compile functions executed by the platform process layer. Output appears in a selectable compile window. The LLDB debug-adapter client supplies breakpoint and stepping workflows; platform coverage and functionality remain limited as described in the [README](https://github.com/initializeddd/Lucid/blob/main/README.md#debugging).
 
-The language-server client starts an installed `clangd` for C/C++ completion, diagnostics, navigation, references and formatting. Local fallback completion remains available without it. See [Language intelligence](../README.md#language-intelligence) for the current scope.
+The language-server client starts an installed `clangd` for C/C++ completion, diagnostics, navigation, references and formatting. Local fallback completion remains available without it. See [Language intelligence](https://github.com/initializeddd/Lucid/blob/main/README.md#language-intelligence) for the current scope.
 
 ## AI, modules and collaboration
 
@@ -30,4 +30,4 @@ Modules currently provide declarative text insertion only; requested privileged 
 
 ## Packaging and validation
 
-CMake builds the app, shaders and tests. GitHub Actions builds macOS, Linux, Windows, FreeBSD and OpenBSD release artifacts. macOS and Windows distribution signatures are not provided. BSD builds use system libraries and have limited graphical validation. See [Building](building.md), the [README](../README.md#downloads) and [changelog](../CHANGELOG.md) for requirements and release status.
+CMake builds the app, shaders and tests. GitHub Actions builds macOS, Linux, Windows, FreeBSD and OpenBSD release artifacts. macOS and Windows distribution signatures are not provided. BSD builds use system libraries and have limited graphical validation. See [Building](building.md), the [README](https://github.com/initializeddd/Lucid/blob/main/README.md#downloads) and [changelog](https://github.com/initializeddd/Lucid/blob/main/CHANGELOG.md) for requirements and release status.

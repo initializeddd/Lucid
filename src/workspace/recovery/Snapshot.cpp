@@ -13,6 +13,8 @@
 #endif
 namespace lucid::workspace::recovery {
 namespace {
+constexpr std::size_t kMaxPosition = 100000000;
+constexpr std::size_t kMaxSnapshotBytes = 200U * 1024U * 1024U;
 std::string quote(std::string_view value) {
     static constexpr char hex[] = "0123456789abcdef"; std::string out = "\"";
     for (unsigned char c : value) {
@@ -28,7 +30,7 @@ bool text(const editor::JsonValue& json, const char* name, std::string& out) {
 }
 bool number(const editor::JsonValue& json, const char* name, std::size_t& out) {
     const auto* v = json.find(name);
-    if (!v || v->type != editor::JsonType::Number || v->numberValue < 0 || v->numberValue > 100000000 || std::floor(v->numberValue) != v->numberValue) return false;
+    if (!v || v->type != editor::JsonType::Number || v->numberValue < 0 || v->numberValue > kMaxPosition || std::floor(v->numberValue) != v->numberValue) return false;
     out = static_cast<std::size_t>(v->numberValue); return true;
 }
 bool context(const editor::JsonValue& value, FileContext& out) {
@@ -39,7 +41,11 @@ bool context(const editor::JsonValue& value, FileContext& out) {
 }
 bool write(const std::filesystem::path& path, const Snapshot& s, std::string& error) {
     error.clear();
-    if (s.project.empty() || s.file.empty() || s.contents.size() > 16U * 1024U * 1024U || s.baseline.size() > 16U * 1024U * 1024U || s.openFiles.size() > 1024) { error = "Recovery snapshot is too large or incomplete"; return false; }
+    if (s.project.empty() || s.file.empty() || s.contents.size() > maxRecoveredContentsSize || s.baseline.size() > workspace::Project::maxFileSize || s.openFiles.size() > 1024) { error = "Recovery snapshot is too large or incomplete"; return false; }
+    if (s.line > kMaxPosition || s.column > kMaxPosition || s.firstLine > static_cast<int>(kMaxPosition) ||
+        std::any_of(s.openFiles.begin(), s.openFiles.end(), [](const auto& file) {
+            return file.path.empty() || file.line > kMaxPosition || file.column > kMaxPosition || file.firstLine > static_cast<int>(kMaxPosition);
+        })) { error = "Invalid recovery context"; return false; }
     std::error_code ec; std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) { error = "Cannot create recovery folder: " + ec.message(); return false; }
 #if !defined(_WIN32)
@@ -51,7 +57,7 @@ bool write(const std::filesystem::path& path, const Snapshot& s, std::string& er
         << ",\"line\":" << s.line << ",\"column\":" << s.column << ",\"firstLine\":" << std::max(s.firstLine, 0) << ",\"openFiles\":[";
     for (std::size_t i = 0; i < s.openFiles.size(); ++i) { const auto& f = s.openFiles[i]; if (i) out << ','; out << "{\"path\":" << quote(f.path) << ",\"line\":" << f.line << ",\"column\":" << f.column << ",\"firstLine\":" << std::max(f.firstLine,0) << '}'; }
     out << "]}";
-    if (out.tellp() > 200 * 1024 * 1024) { error = "Recovery snapshot is too large"; return false; }
+    if (out.tellp() > static_cast<std::streamoff>(kMaxSnapshotBytes)) { error = "Recovery snapshot is too large"; return false; }
     bool created = false;
     auto directory = workspace::Project::openOrCreate(path.parent_path(), created, error, false);
     if (!error.empty()) return false;
@@ -60,14 +66,22 @@ bool write(const std::filesystem::path& path, const Snapshot& s, std::string& er
 }
 bool read(const std::filesystem::path& path, Snapshot& snapshot, std::string& error) {
     std::error_code ec; const auto size = std::filesystem::file_size(path, ec);
-    if (ec || size > 200U * 1024U * 1024U) { error = "Recovery snapshot is unavailable or too large"; return false; }
+    if (ec || size > kMaxSnapshotBytes) { error = "Recovery snapshot is unavailable or too large"; return false; }
     std::ifstream input(path, std::ios::binary); if (!input) { error = "Cannot read recovery snapshot"; return false; }
-    std::string data((std::istreambuf_iterator<char>(input)), {}); editor::JsonError parseError; const auto json = editor::parseJson(data, parseError);
+    std::string data; char buffer[65536];
+    while (input) {
+        input.read(buffer, sizeof(buffer));
+        const auto count = static_cast<std::size_t>(input.gcount());
+        if (count > kMaxSnapshotBytes - data.size()) { error = "Recovery snapshot is unavailable or too large"; return false; }
+        data.append(buffer, count);
+    }
+    if (input.bad() || !input.eof()) { error = "Cannot read recovery snapshot"; return false; }
+    editor::JsonError parseError; const auto json = editor::parseJson(data, parseError);
     Snapshot next; std::size_t first = 0;
     const auto* version = json ? json->find("version") : nullptr;
     if (!json || json->type != editor::JsonType::Object || !version || version->type != editor::JsonType::Number || version->numberValue != 1 ||
         !text(*json, "project", next.project) || !text(*json, "file", next.file) || !text(*json, "baseline", next.baseline) || !text(*json, "contents", next.contents) ||
-        next.project.empty() || next.file.empty() || next.baseline.size() > 16U * 1024U * 1024U || next.contents.size() > 16U * 1024U * 1024U ||
+        next.project.empty() || next.file.empty() || next.baseline.size() > workspace::Project::maxFileSize || next.contents.size() > maxRecoveredContentsSize ||
         !number(*json, "line", next.line) || !number(*json, "column", next.column) || !number(*json, "firstLine", first)) { error = "Invalid recovery snapshot"; return false; }
     next.firstLine = static_cast<int>(first);
     const auto* files = json->find("openFiles"); if (!files || files->type != editor::JsonType::Array || files->children.size() > 1024) { error = "Invalid recovery context"; return false; }

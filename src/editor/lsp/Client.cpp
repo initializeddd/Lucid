@@ -39,6 +39,7 @@ bool Client::start(const std::filesystem::path& root, std::string& error) {
     if (!m_process.start("clangd", {"--background-index"}, error)) { error = "Could not start clangd: " + error; return false; }
     const auto uri = debug::jsonString(fileUri(root));
     if (!send("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"processId\":null,\"rootUri\":" + uri + ",\"capabilities\":{\"general\":{\"positionEncodings\":[\"utf-16\"]},\"textDocument\":{\"publishDiagnostics\":{\"versionSupport\":true}}}}}", error)) { close(); return false; }
+    m_initializationDeadline = std::chrono::steady_clock::now() + m_initializationTimeout;
     return true;
 }
 bool Client::open(const std::filesystem::path& file, std::string_view language, std::string_view text, std::string& error) {
@@ -69,6 +70,13 @@ bool Client::poll(std::vector<std::string>& messages, std::string& error) {
         const auto* id = json->find("id"); const auto* method = json->find("method");
         if (!m_ready && id && id->type == JsonType::Number && id->numberValue == 1 && !method) {
             if (json->find("error")) { error = "clangd initialization failed"; return false; }
+            const auto* result = json->find("result");
+            const auto* capabilities = result && result->type == JsonType::Object ? result->find("capabilities") : nullptr;
+            if (!capabilities || capabilities->type != JsonType::Object) { error = "Invalid language server initialization response"; return false; }
+            const auto* encoding = capabilities->find("positionEncoding");
+            if (encoding && (encoding->type != JsonType::String || encoding->stringValue != "utf-16")) {
+                error = "Language server uses an unsupported position encoding"; return false;
+            }
             if (!send("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", error)) return false;
             m_ready = true;
         } else if (method && id) {
@@ -77,7 +85,11 @@ bool Client::poll(std::vector<std::string>& messages, std::string& error) {
             if (!send("{\"jsonrpc\":\"2.0\",\"id\":" + identifier + ",\"error\":{\"code\":-32601,\"message\":\"Method not supported\"}}", error)) return false;
         } else messages.push_back(std::move(body));
     }
+    if (!m_ready && std::chrono::steady_clock::now() >= m_initializationDeadline) {
+        error = "Language server did not finish starting; check clangd and try again";
+        close(); return false;
+    }
     return true;
 }
-void Client::close() { m_process.close(); m_decoder.reset(); m_document.clear(); m_ready = false; m_version = 0; m_nextId = 2; }
+void Client::close() { m_process.close(); m_decoder.reset(); m_document.clear(); m_ready = false; m_version = 0; m_nextId = 2; m_initializationDeadline = {}; }
 }

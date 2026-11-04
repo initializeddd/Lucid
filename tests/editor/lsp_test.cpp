@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -12,6 +13,54 @@ int main() {
     std::filesystem::path decoded;
     const auto sample = std::filesystem::absolute(std::filesystem::path("lucid test#file.cpp"));
     if (!pathFromFileUri(fileUri(sample), decoded) || decoded != sample || pathFromFileUri("file:///tmp/%00bad", decoded) || pathFromFileUri("https://example.com/x", decoded)) return 14;
+#if !defined(_WIN32)
+    {
+        const auto fakeDir = std::filesystem::temp_directory_path() /
+            ("lucid-lsp-timeout-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(fakeDir);
+        { std::ofstream script(fakeDir / "clangd"); script << "#!/bin/sh\nexec /bin/sleep 5\n"; }
+        std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
+        const char* existingPath = std::getenv("PATH");
+        const std::string oldPath = existingPath ? existingPath : "";
+        if (setenv("PATH", fakeDir.c_str(), 1) != 0) return 20;
+        Client stalled(std::chrono::milliseconds(50)); std::string error; std::vector<std::string> messages;
+        const bool started = stalled.start(fakeDir, error);
+        if (existingPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
+        if (!started) return 21;
+        bool timedOut = false;
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < limit) {
+            if (!stalled.poll(messages, error)) { timedOut = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::filesystem::remove_all(fakeDir);
+        if (!timedOut || stalled.alive() || error.find("did not finish starting") == std::string::npos) return 22;
+    }
+    {
+        const auto fakeDir = std::filesystem::temp_directory_path() /
+            ("lucid-lsp-encoding-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(fakeDir);
+        const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8"}}})";
+        { std::ofstream script(fakeDir / "clangd");
+          script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/sleep 5\n"; }
+        std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
+        const char* pathValue = std::getenv("PATH"); const bool hadPath = pathValue != nullptr;
+        const std::string oldPath = pathValue ? pathValue : "";
+        if (setenv("PATH", fakeDir.c_str(), 1) != 0) return 23;
+        Client wrongEncoding; std::string error; std::vector<std::string> messages;
+        const bool started = wrongEncoding.start(fakeDir, error);
+        if (hadPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
+        if (!started) return 24;
+        bool rejected = false;
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < limit) {
+            if (!wrongEncoding.poll(messages, error)) { rejected = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        wrongEncoding.close(); std::filesystem::remove_all(fakeDir);
+        if (!rejected || error.find("unsupported position encoding") == std::string::npos) return 25;
+    }
+#endif
     if (!std::getenv("LUCID_TEST_CLANGD")) return 0;
     Client client; std::string error; std::vector<std::string> messages;
     const auto root = std::filesystem::temp_directory_path();
@@ -71,5 +120,24 @@ int main() {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    return formatted ? 0 : 19;
+    if (!formatted) return 19;
+    const std::string rangeSource = "int first(){return 1;}\nint second(){return 2;}\n";
+    if (!client.change(rangeSource, error)) return 26;
+    const std::string rangeFormatting = "{\"textDocument\":{\"uri\":\"" + uri + "\"},\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":22}},\"options\":{\"tabSize\":4,\"insertSpaces\":true}}";
+    if (!client.request("textDocument/rangeFormatting", rangeFormatting, id, error)) return 27;
+    bool rangeFormatted = false;
+    while (!rangeFormatted && std::chrono::steady_clock::now() < deadline) {
+        messages.clear(); if (!client.poll(messages, error)) return 28;
+        for (const auto& message : messages) {
+            lucid::editor::JsonError parseError; const auto parsed = lucid::editor::parseJson(message, parseError);
+            const auto* responseId = parsed ? parsed->find("id") : nullptr;
+            if (!responseId || responseId->type != lucid::editor::JsonType::Number || responseId->numberValue != static_cast<double>(id)) continue;
+            const auto* result = parsed->find("result"); std::string output;
+            if (!result || !applyTextEdits(rangeSource, *result, output, error) || output == rangeSource ||
+                output.find("int second(){return 2;}") == std::string::npos) return 29;
+            rangeFormatted = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return rangeFormatted ? 0 : 30;
 }

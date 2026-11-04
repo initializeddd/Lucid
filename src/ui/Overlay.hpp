@@ -38,6 +38,16 @@ struct CompileTerminalLayout {
     Rect input;
 };
 
+struct CompletionListLayout {
+    float y = 0.0F;
+    float height = 0.0F;
+    std::size_t first = 0;
+    std::size_t count = 0;
+};
+
+[[nodiscard]] CompletionListLayout completionListLayout(float editorTop, float editorBottom,
+    float cursorTop, float lineHeight, float padding, std::size_t items, std::size_t selected) noexcept;
+
 struct SettingsPanelLayout {
     Rect panel;
     Rect title;
@@ -81,6 +91,7 @@ compileTerminalLayout(float viewportWidth, float viewportHeight,
 settingsPanelLayout(float viewportWidth, float viewportHeight) noexcept;
 
 [[nodiscard]] float commandBarTop(float viewportHeight) noexcept;
+[[nodiscard]] float commandSuggestionGap(float viewportHeight) noexcept;
 
 [[nodiscard]] DiagnosticCardLayout offsetDiagnosticCard(DiagnosticCardLayout layout,
                                                         float offsetX,

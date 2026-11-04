@@ -334,15 +334,15 @@ void appendFunction(std::string& output, const ProjectFunction& function, bool l
         return 1000;
     }
     if (name.starts_with(query)) {
-        return 900 - static_cast<int>(name.size());
+        return 900 - static_cast<int>(std::min<std::size_t>(name.size(), 100));
     }
     const std::size_t nameMatch = name.find(query);
     if (nameMatch != std::string::npos) {
-        return 760 - static_cast<int>(nameMatch);
+        return 760 - static_cast<int>(std::min<std::size_t>(nameMatch, 100));
     }
     const std::size_t fileMatch = file.find(query);
     if (fileMatch != std::string::npos) {
-        return 420 - static_cast<int>(fileMatch);
+        return 420 - static_cast<int>(std::min<std::size_t>(fileMatch, 100));
     }
     const int fuzzyName = subsequenceScore(name, query);
     if (fuzzyName >= 0) {
@@ -483,7 +483,8 @@ std::vector<std::size_t> searchFunctions(const std::vector<ProjectFunction>& fun
         }
     }
 
-    std::sort(ranked.begin(), ranked.end(),
+    const auto count = std::min(limit, ranked.size());
+    std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(count), ranked.end(),
               [&functions](const auto& left, const auto& right) {
                   if (left.first != right.first) {
                       return left.first > right.first;
@@ -493,13 +494,15 @@ std::vector<std::size_t> searchFunctions(const std::vector<ProjectFunction>& fun
                   if (leftFunction.name != rightFunction.name) {
                       return leftFunction.name < rightFunction.name;
                   }
-                  return leftFunction.file < rightFunction.file;
+                  if (leftFunction.file != rightFunction.file) return leftFunction.file < rightFunction.file;
+                  if (leftFunction.line != rightFunction.line) return leftFunction.line < rightFunction.line;
+                  return left.second < right.second;
               });
 
     std::vector<std::size_t> result;
-    result.reserve(std::min(limit, ranked.size()));
+    result.reserve(count);
     for (const auto& entry : ranked) {
-        if (result.size() >= limit) {
+        if (result.size() >= count) {
             break;
         }
         result.push_back(entry.second);

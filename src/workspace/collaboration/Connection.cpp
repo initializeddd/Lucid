@@ -45,7 +45,7 @@ bool Connection::connect(std::string_view linkText, std::string_view name, std::
     }
     freeaddrinfo(result);
     if (m_fd < 0) { error = "Could not connect to a private overlay host"; return false; }
-    const std::string hello = "{\"type\":\"join\",\"version\":1,\"name\":" + debug::jsonString(name) + ",\"token\":" + debug::jsonString(link.token) + "}";
+    const std::string hello = "{\"type\":\"join\",\"version\":3,\"name\":" + debug::jsonString(name) + ",\"token\":" + debug::jsonString(link.token) + "}";
     if (!send(hello, error)) { close(); return false; }
     error.clear(); return true;
 #endif
@@ -61,6 +61,7 @@ bool Connection::poll(std::vector<std::string>& messages, std::string& error) {
     (void)messages; error = "Joining is not yet available on Windows"; return false;
 #else
     if (m_fd < 0) { error = "Not connected"; return false; }
+    const auto initialMessageCount = messages.size();
     while (!m_pending.empty()) {
 #if defined(MSG_NOSIGNAL)
         const auto n = ::send(m_fd, m_pending.data(), m_pending.size(), MSG_NOSIGNAL);
@@ -78,7 +79,7 @@ bool Connection::poll(std::vector<std::string>& messages, std::string& error) {
         if (n > 0) { if (!m_decoder.append(std::string_view(buffer, static_cast<std::size_t>(n)), messages, error)) { close(); return false; } continue; }
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { error.clear(); return true; }
-        const bool delivered = !messages.empty();
+        const bool delivered = messages.size() > initialMessageCount;
         error = delivered ? std::string{} : "Session connection closed"; close(); return delivered;
     }
 #endif

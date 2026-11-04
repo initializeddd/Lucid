@@ -151,15 +151,16 @@ for i in range(12):
 # A pitched canvas tent, facing the fire and the viewer. The entrance is a
 # separate dark triangle so it reads clearly even at pixel-art resolution.
 tent_x, tent_y = 1.0, 0.7
+tent=bpy.data.objects.new('Tent',None); scene.collection.objects.link(tent)
 v=[(tent_x-1.1,tent_y-.8,.04),(tent_x+1.1,tent_y-.8,.04),(tent_x,tent_y-.8,1.65),
    (tent_x-1.1,tent_y+.8,.04),(tent_x+1.1,tent_y+.8,.04),(tent_x,tent_y+.8,1.65)]
 mesh=bpy.data.meshes.new('Canvas tent'); mesh.from_pydata(v,[],[(0,2,5,3),(2,1,4,5),(3,5,4),(0,1,2)]); mesh.update()
-obj=bpy.data.objects.new('Canvas tent',mesh); scene.collection.objects.link(obj); obj.data.materials.append(tent_fabric)
+obj=bpy.data.objects.new('Canvas tent',mesh); scene.collection.objects.link(obj); obj.parent=tent; obj.data.materials.append(tent_fabric)
 mesh=bpy.data.meshes.new('Tent doorway'); mesh.from_pydata([(tent_x-.52,tent_y-.815,.05),(tent_x+.52,tent_y-.815,.05),(tent_x,tent_y-.815,1.10)],[],[(0,1,2)]); mesh.update()
-obj=bpy.data.objects.new('Tent doorway',mesh); scene.collection.objects.link(obj); obj.data.materials.append(tent_shadow)
+obj=bpy.data.objects.new('Tent doorway',mesh); scene.collection.objects.link(obj); obj.parent=tent; obj.data.materials.append(tent_shadow)
 for side in (-1,1):
-    cylinder_between('Tent seam',(tent_x,tent_y-.84,1.66),(tent_x+side*1.1,tent_y-.84,.05),.025,camp_wood,vertices=5)
-    cylinder_between('Tent guyline',(tent_x+side*1.1,tent_y-.8,.10),(tent_x+side*1.45,tent_y-1.10,.03),.015,camp_wood,vertices=5)
+    cylinder_between('Tent seam',(tent_x,tent_y-.84,1.66),(tent_x+side*1.1,tent_y-.84,.05),.025,camp_wood,vertices=5).parent=tent
+    cylinder_between('Tent guyline',(tent_x+side*1.1,tent_y-.8,.10),(tent_x+side*1.45,tent_y-1.10,.03),.015,camp_wood,vertices=5).parent=tent
 # A low log seat and a small stack of spare firewood complete the campsite.
 cylinder_between('Log bench',(-4.8,.3,.40),(-3.5,.3,.40),.20,camp_wood)
 for x in (-4.55,-3.75): cylinder_between('Bench support',(x,.3,.05),(x,.3,.30),.10,bark)
@@ -189,7 +190,7 @@ if len(args)>2:
     out=Path(args[2]).resolve(); out.mkdir(parents=True,exist_ok=True); groups={}
     for obj in scene.objects:
         if obj.type!='MESH' or not obj.data.materials: continue
-        group='fireflies' if obj.parent==flies else 'flame' if obj.parent==fire else 'sparks' if obj.parent==sparks else 'forest'
+        group='fireflies' if obj.parent==flies else 'flame' if obj.parent==fire else 'sparks' if obj.parent==sparks else 'tent' if obj.parent==tent else 'forest'
         groups.setdefault((group,obj.data.materials[0].name),[]).append(obj)
     parts=[]
     for (group,name),objects in sorted(groups.items()):

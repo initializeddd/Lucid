@@ -4,11 +4,17 @@
 #include <picosha2.h>
 
 #include <cstdio>
+#include <array>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <system_error>
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace lucid::ai {
 namespace {
@@ -17,13 +23,23 @@ constexpr auto kHash = "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6
 constexpr auto kUrl = "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/ebb2015119c907b064c512bf053e945850b5875f/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf";
 constexpr std::uintmax_t kSize = 491400064;
 
-bool valid(const std::filesystem::path& path) {
+bool valid(const std::filesystem::path& path, const std::atomic_bool* cancel) {
     std::error_code ec;
     if (std::filesystem::file_size(path, ec) != kSize || ec) return false;
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
-    return picosha2::hash256_hex_string(std::istreambuf_iterator<char>(file),
-                                        std::istreambuf_iterator<char>()) == kHash && !file.bad();
+    picosha2::hash256_one_by_one hash;
+    std::array<char, 64U * 1024U> buffer{};
+    while (file) {
+        if (cancel && cancel->load()) return false;
+        file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        hash.process(buffer.begin(), buffer.begin() + file.gcount());
+    }
+    if (file.bad() || !file.eof() || (cancel && cancel->load())) return false;
+    hash.finish();
+    std::array<picosha2::byte_t, picosha2::k_digest_size> digest{};
+    hash.get_hash_bytes(digest.begin(), digest.end());
+    return picosha2::bytes_to_hex_string(digest) == kHash;
 }
 struct Download { std::ofstream* stream; std::uintmax_t written = 0; };
 size_t writeData(char* data, size_t size, size_t count, void* context) {
@@ -47,9 +63,23 @@ bool ensureModel(const std::filesystem::path& directory, std::filesystem::path& 
     std::filesystem::create_directories(directory, ec);
     if (ec) { error = "Could not create model directory: " + ec.message(); return false; }
     model = directory / kName;
-    if (valid(model)) { if (cancel && cancel->load()) { error = "Model download cancelled"; return false; } if (progress) *progress = 100; return true; }
-    auto temporary = model;
-    temporary += ".download";
+    if (progress) *progress = kModelVerifying;
+    if (valid(model, cancel)) { if (cancel && cancel->load()) { error = "Model download cancelled"; return false; } if (progress) *progress = 100; return true; }
+    if (cancel && cancel->load()) { error = "Model download cancelled"; return false; }
+    if (progress) *progress = 0;
+    std::filesystem::path staging;
+    std::random_device random;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const auto candidate = directory / (".lucid-model-download-" + std::to_string(random()) + "-" + std::to_string(random()));
+        if (std::filesystem::create_directory(candidate, ec)) { staging = candidate; break; }
+        if (ec) { error = "Could not create model download directory: " + ec.message(); return false; }
+    }
+    if (staging.empty()) { error = "Could not create a unique model download directory"; return false; }
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } cleanup{staging};
+    const auto temporary = staging / "model.download";
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream) { error = "Could not create model download"; return false; }
     static std::once_flag init;
@@ -81,16 +111,23 @@ bool ensureModel(const std::filesystem::path& directory, std::filesystem::path& 
     curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &download);
     const CURLcode result = curl_easy_perform(curl.get());
     stream.close();
-    if (result != CURLE_OK || !stream || !valid(temporary)) {
+    if (result == CURLE_OK && stream && progress) *progress = kModelVerifying;
+    if (result != CURLE_OK || !stream || !valid(temporary, cancel)) {
         std::filesystem::remove(temporary, ec);
         error = cancel && cancel->load() ? "Model download cancelled" : result == CURLE_OK ? "Model download failed integrity verification" :
             std::string("Model download failed: ") + curl_easy_strerror(result);
         return false;
     }
-    std::filesystem::remove(model, ec);
-    ec.clear();
+    if (cancel && cancel->load()) { error = "Model download cancelled"; return false; }
+    if (progress) *progress = kModelInstalling;
+#if defined(_WIN32)
+    if (!MoveFileExW(temporary.c_str(), model.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        error = "Could not install downloaded model (Windows error " + std::to_string(GetLastError()) + ")"; return false;
+    }
+#else
     std::filesystem::rename(temporary, model, ec);
     if (ec) { error = "Could not install downloaded model: " + ec.message(); return false; }
+#endif
     return true;
 }
 } // namespace lucid::ai

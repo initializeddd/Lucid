@@ -3,6 +3,7 @@
 #include "ui/theme/Theme.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace lucid::ui {
 namespace {
@@ -19,6 +20,29 @@ constexpr float kDiagnosticHeight = 70.0F;
 }
 
 } // namespace
+
+CompletionListLayout completionListLayout(float editorTop, float editorBottom,
+    float cursorTop, float lineHeight, float padding, std::size_t items, std::size_t selected) noexcept {
+    lineHeight = std::max(1.0F, lineHeight);
+    padding = std::max(0.0F, padding);
+    const float above = std::max(0.0F, cursorTop - editorTop);
+    const float below = std::max(0.0F, editorBottom - cursorTop - lineHeight);
+    const std::size_t requested = std::max<std::size_t>(1, items);
+    const float requestedHeight = static_cast<float>(requested) * lineHeight + padding;
+    const bool placeBelow = below >= requestedHeight || below >= above;
+    const float available = placeBelow ? below : above;
+    const auto capacity = static_cast<std::size_t>(std::max(1.0F, std::floor((available - padding) / lineHeight)));
+    CompletionListLayout layout;
+    layout.count = std::min(requested, capacity);
+    if (items > 0) {
+        selected = std::min(selected, items - 1);
+        layout.first = selected >= layout.count ? selected - layout.count + 1 : 0;
+    }
+    layout.height = static_cast<float>(layout.count) * lineHeight + padding;
+    const float desiredY = placeBelow ? cursorTop + lineHeight : cursorTop - layout.height;
+    layout.y = std::clamp(desiredY, editorTop, std::max(editorTop, editorBottom - layout.height));
+    return layout;
+}
 
 SettingsErrorLayout settingsErrorLayout(float viewportWidth,
                                         float viewportHeight) noexcept {
@@ -53,6 +77,15 @@ float commandBarTop(float viewportHeight) noexcept {
     const float bounded = std::max(theme::kSearchBarMargin,
                                    viewportHeight * 0.25F);
     return std::min(kTop, bounded);
+}
+
+float commandSuggestionGap(float viewportHeight) noexcept {
+    // Give a status message and one choice room before reducing either to
+    // zero rows in a short viewport. Keep normal spacing in larger windows.
+    const float space = viewportHeight - commandBarTop(viewportHeight) -
+                        theme::kSearchBarHeight - theme::kSearchBarMargin -
+                        2.0F * theme::kSuggestionLineHeight;
+    return std::clamp(space, 4.0F, theme::kSuggestionGap);
 }
 
 SettingsPanelLayout settingsPanelLayout(float viewportWidth,

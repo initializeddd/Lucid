@@ -9,6 +9,8 @@ lean is part of the design.
 - For a large feature or a platform-behaviour change, open an issue first so the design can be
   discussed before you invest in an implementation.
 - Security issues should follow [SECURITY.md](SECURITY.md), not the public issue tracker.
+- Read [SUPPORT.md](SUPPORT.md) if you are unsure where a report belongs. The full guides are
+  published at <https://initializeddd.github.io/Lucid/>.
 
 ## Development workflow
 

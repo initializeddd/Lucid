@@ -20,8 +20,11 @@ bool Replica::install(std::uint64_t revision, std::string text, std::string& err
     SharedDocument validation(text);
     if (!validation.valid()) { error = "Invalid shared document"; return false; }
     if (m_installed && (m_inFlight || m_local != m_server || m_conflict)) { m_conflict = true; error = "Local edits require review before resynchronizing"; return false; }
+    if (m_installed && (revision < m_revision || (revision == m_revision && text != m_server))) {
+        error = "Shared snapshot is stale or inconsistent; current text was preserved"; return false;
+    }
     m_server = text; m_local = std::move(text); m_revision = revision; m_installed = true;
-    m_inFlight = false; m_conflict = false; m_request.clear(); error.clear(); return true;
+    m_inFlight = false; m_conflict = false; m_request.clear(); m_sentText.clear(); error.clear(); return true;
 }
 bool Replica::setLocal(std::string text, std::string& error) {
     if (!m_installed) { error = "No shared file is open"; return false; }
@@ -32,7 +35,7 @@ bool Replica::nextEdit(std::string request, Edit& edit, std::string& error) {
     if (!m_installed || m_conflict || m_inFlight) { error = "Shared edits are waiting for synchronization or review"; return false; }
     if (request.empty() || request.size() > 128) { error = "Invalid edit request ID"; return false; }
     if (m_local == m_server) { error = "No local changes"; return false; }
-    edit = difference(m_revision, m_server, m_local); m_request = std::move(request); m_inFlight = true; error.clear(); return true;
+    edit = difference(m_revision, m_server, m_local); m_request = std::move(request); m_sentText = m_local; m_inFlight = true; error.clear(); return true;
 }
 bool Replica::receive(std::uint64_t revision, std::string_view actor, std::string_view self,
                       std::string_view request, const Edit& change, std::string& error) {
@@ -41,16 +44,22 @@ bool Replica::receive(std::uint64_t revision, std::string_view actor, std::strin
     if (!server.join("remote", "Remote") || !server.apply("remote", {0, change.start, change.eraseBytes, change.insert}, error)) { m_conflict = true; return false; }
     const std::string nextServer = server.text();
     if (actor == self) {
-        if (!m_inFlight || request != m_request) { m_conflict = true; error = "Unexpected edit acknowledgement; preserve local edits"; return false; }
-        m_server = nextServer; m_revision = revision; m_inFlight = false; m_request.clear(); error.clear(); return true;
+        if (!m_inFlight || request != m_request || nextServer != m_sentText) { m_conflict = true; error = "Unexpected edit acknowledgement; preserve local edits"; return false; }
+        m_server = nextServer; m_revision = revision; m_inFlight = false; m_request.clear(); m_sentText.clear(); error.clear(); return true;
     }
-    if (m_local == m_server) { m_local = nextServer; m_server = nextServer; m_revision = revision; error.clear(); return true; }
-    SharedDocument rebased(m_server); Edit transformed;
-    if (!rebased.join("local", "Local") || !rebased.join("remote", "Remote") ||
-        !rebased.apply("local", difference(0, m_server, m_local), error) ||
-        !rebased.applyRebased("remote", {0, change.start, change.eraseBytes, change.insert}, transformed, error)) {
+    const auto rebaseLocal = [&](const std::string& local, std::string& result) {
+        if (local == m_server) { result = nextServer; return true; }
+        SharedDocument rebased(m_server); Edit transformed;
+        if (!rebased.join("local", "Local") || !rebased.join("remote", "Remote") ||
+            !rebased.apply("remote", {0, change.start, change.eraseBytes, change.insert}, error) ||
+            !rebased.applyRebased("local", difference(0, m_server, local), transformed, error)) return false;
+        result = rebased.text(); return true;
+    };
+    std::string nextLocal, nextSent;
+    if (!rebaseLocal(m_local, nextLocal) || (m_inFlight && !rebaseLocal(m_sentText, nextSent))) {
         m_conflict = true; error = "Concurrent edits overlap; local text was kept for review"; return false;
     }
-    m_local = rebased.text(); m_server = nextServer; m_revision = revision; error.clear(); return true;
+    m_local = std::move(nextLocal); if (m_inFlight) m_sentText = std::move(nextSent);
+    m_server = nextServer; m_revision = revision; error.clear(); return true;
 }
 }

@@ -10,6 +10,11 @@ add_executable(lucid_ui_tests
 target_link_libraries(lucid_ui_tests PRIVATE lucid_core)
 lucid_set_warnings(lucid_ui_tests)
 
+add_executable(lucid_utf8_tests text/utf8_test.cpp)
+target_link_libraries(lucid_utf8_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_utf8_tests)
+add_test(NAME text.utf8 COMMAND lucid_utf8_tests)
+
 add_executable(lucid_welcome_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/ui/welcome_test.cpp")
 
@@ -117,12 +122,15 @@ add_test(NAME editor.completion COMMAND lucid_completion_tests)
 # This test opens a native Vulkan window and is run explicitly on a desktop.
 add_executable(lucid_interaction_tests EXCLUDE_FROM_ALL app/interaction_test.cpp)
 target_link_libraries(lucid_interaction_tests PRIVATE lucid_core)
+add_executable(lucid_ai_scroll_tests EXCLUDE_FROM_ALL app/ai_scroll_test.cpp)
+target_link_libraries(lucid_ai_scroll_tests PRIVATE lucid_core)
 if(APPLE)
     target_sources(lucid_interaction_tests PRIVATE app/macos_menu_test.mm)
 endif()
 
 add_executable(lucid_text_search_tests editor/text_search_test.cpp)
 target_link_libraries(lucid_text_search_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_text_search_tests)
 add_test(NAME editor.text_search COMMAND lucid_text_search_tests)
 
 add_executable(lucid_app_icon_tests platform/app_icon_test.cpp)
@@ -147,6 +155,9 @@ add_executable(lucid_modules_tests workspace/modules_test.cpp)
 target_link_libraries(lucid_modules_tests PRIVATE lucid_core)
 lucid_set_warnings(lucid_modules_tests)
 add_test(NAME workspace.modules COMMAND lucid_modules_tests)
+add_executable(lucid_module_live_test EXCLUDE_FROM_ALL workspace/module_live_test.cpp)
+target_link_libraries(lucid_module_live_test PRIVATE lucid_core)
+lucid_set_warnings(lucid_module_live_test)
 
 add_executable(lucid_recovery_tests workspace/recovery_test.cpp)
 target_link_libraries(lucid_recovery_tests PRIVATE lucid_core)
@@ -237,7 +248,7 @@ add_test(NAME editor.lsp_edits COMMAND lucid_lsp_edits_tests)
 add_executable(lucid_mesh_tests renderer/mesh_test.cpp)
 target_link_libraries(lucid_mesh_tests PRIVATE lucid_core)
 lucid_set_warnings(lucid_mesh_tests)
-add_test(NAME renderer.mesh COMMAND lucid_mesh_tests "${PROJECT_SOURCE_DIR}/assets/backgrounds/city-transit" "${PROJECT_SOURCE_DIR}/assets/backgrounds/lunar-horizon" "${PROJECT_SOURCE_DIR}/assets/backgrounds/mountain-parallax" "${PROJECT_SOURCE_DIR}/assets/backgrounds/ocean-lighthouse" "${PROJECT_SOURCE_DIR}/assets/backgrounds/rainy-street" "${PROJECT_SOURCE_DIR}/assets/backgrounds/orbital-station" "${PROJECT_SOURCE_DIR}/assets/backgrounds/forest-fireflies" "${PROJECT_SOURCE_DIR}/assets/backgrounds/drafting-grid" "${PROJECT_SOURCE_DIR}/assets/backgrounds/retro-landscape")
+add_test(NAME renderer.mesh COMMAND lucid_mesh_tests "${PROJECT_SOURCE_DIR}/assets/backgrounds/city-transit" "${PROJECT_SOURCE_DIR}/assets/backgrounds/lunar-horizon" "${PROJECT_SOURCE_DIR}/assets/backgrounds/mountain-parallax" "${PROJECT_SOURCE_DIR}/assets/backgrounds/ocean-lighthouse" "${PROJECT_SOURCE_DIR}/assets/backgrounds/orbital-station" "${PROJECT_SOURCE_DIR}/assets/backgrounds/forest-fireflies")
 
 add_executable(lucid_scene_camera_tests renderer/camera_test.cpp)
 target_link_libraries(lucid_scene_camera_tests PRIVATE lucid_core)

@@ -24,17 +24,29 @@ bool safeRelative(std::string_view value) {
     return path.lexically_normal() != ".";
 }
 }
+bool mergeUnrestored(State& state, std::string_view project,
+                     const std::vector<recovery::FileContext>& files) {
+    if (state.project != project) return true;
+    auto merged = state.files;
+    for (const auto& file : files) {
+        if (std::any_of(merged.begin(), merged.end(), [&file](const auto& open) { return open.path == file.path; })) continue;
+        if (merged.size() >= kMaxSessionFiles) return false;
+        merged.push_back(file);
+    }
+    state.files = std::move(merged);
+    return true;
+}
 bool write(const std::filesystem::path& directory, const State& state, std::string& error) {
-    if (directory.empty() || state.recentProjects.size() > 8 || state.files.size() > 128 || state.project.size() > 4096) { error = "Session data is invalid or too large"; return false; }
+    if (directory.empty() || state.recentProjects.size() > 8 || state.files.size() > kMaxSessionFiles || state.project.size() > 4096 || state.project.find('\0') != std::string::npos) { error = "Session data is invalid or too large"; return false; }
     std::string data = "{\"version\":1,\"project\":" + debug::jsonString(state.project) + ",\"recent\":[";
     for (std::size_t i = 0; i < state.recentProjects.size(); ++i) {
-        if (state.recentProjects[i].size() > 4096) { error = "Project path is too long"; return false; }
+        if (state.recentProjects[i].size() > 4096 || state.recentProjects[i].find('\0') != std::string::npos) { error = "Invalid recent project path"; return false; }
         if (i) data += ',';
         data += debug::jsonString(state.recentProjects[i]);
     }
     data += "],\"files\":[";
     for (std::size_t i = 0; i < state.files.size(); ++i) {
-        const auto& file = state.files[i]; if (!safeRelative(file.path) || file.path.size() > 4096 || file.line > 100000000 || file.column > 100000000) { error = "Invalid session file"; return false; }
+        const auto& file = state.files[i]; if (!safeRelative(file.path) || file.path.size() > 4096 || file.line > 100000000 || file.column > 100000000 || file.firstLine > 100000000) { error = "Invalid session file"; return false; }
         if (i) data += ',';
         data += "{\"path\":" + debug::jsonString(file.path) + ",\"line\":" + std::to_string(file.line) + ",\"column\":" + std::to_string(file.column) + ",\"scroll\":" + std::to_string(std::max(file.firstLine, 0)) + "}";
     }
@@ -51,7 +63,7 @@ bool read(const std::filesystem::path& directory, State& state, std::string& err
     if (!root || root->type != JsonType::Object) { error = "Invalid session file"; return false; }
     const auto* version = root->find("version"); const auto* recent = root->find("recent"); const auto* files = root->find("files");
     State next;
-    if (!version || version->type != JsonType::Number || version->numberValue != 1 || !stringField(*root, "project", next.project) || !recent || recent->type != JsonType::Array || recent->children.size() > 8 || !files || files->type != JsonType::Array || files->children.size() > 128) { error = "Invalid session file"; return false; }
+    if (!version || version->type != JsonType::Number || version->numberValue != 1 || !stringField(*root, "project", next.project) || !recent || recent->type != JsonType::Array || recent->children.size() > 8 || !files || files->type != JsonType::Array || files->children.size() > kMaxSessionFiles) { error = "Invalid session file"; return false; }
     for (const auto& item : recent->children) {
         if (item.type != JsonType::String || item.stringValue.size() > 4096 || item.stringValue.find('\0') != std::string::npos) { error = "Invalid recent project"; return false; }
         next.recentProjects.push_back(item.stringValue);

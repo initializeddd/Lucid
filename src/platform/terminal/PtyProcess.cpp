@@ -1,4 +1,5 @@
 #include "platform/terminal/PtyProcess.hpp"
+#include "text/Utf8.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -47,9 +48,13 @@ void trimToSize(std::string& text, std::size_t limit) {
     if (text.size() <= limit) {
         return;
     }
-    const std::size_t cut = text.size() - limit;
+    std::size_t cut = text.size() - limit;
     const std::size_t newline = text.find('\n', cut);
-    text.erase(0, newline == std::string::npos ? cut : newline + 1);
+    // Prefer complete lines, unless doing so would discard almost the entire
+    // retained output (for example, one very long line ending in a newline).
+    if (newline != std::string::npos && text.size() - (newline + 1) >= limit / 2) cut = newline + 1;
+    else while (cut < text.size() && (static_cast<unsigned char>(text[cut]) & 0xc0U) == 0x80U) ++cut;
+    text.erase(0, cut);
 }
 
 [[nodiscard]] std::string sanitizeOutput(std::string_view input) {
@@ -93,14 +98,17 @@ void trimToSize(std::string& text, std::size_t limit) {
         }
 
         if (character == '\r') {
-            if (index + 1 < input.size() && input[index + 1] == '\n') {
-                continue;
+            auto next = index + 1;
+            while (next < input.size() && input[next] == '\r') ++next;
+            if (next < input.size() && input[next] != '\n') {
+                const auto line = output.find_last_of('\n');
+                output.erase(line == std::string::npos ? 0 : line + 1);
             }
             continue;
         }
         if (character == '\b') {
-            if (!output.empty()) {
-                output.pop_back();
+            if (!output.empty() && output.back() != '\n') {
+                output.resize(lucid::text::lastUtf8Start(output));
             }
             continue;
         }
@@ -133,6 +141,7 @@ bool PtyProcess::start(std::string workingDirectory,
     m_commandsDone = false;
     m_rawOutput.clear();
     m_output.clear();
+    m_pendingInput.clear();
     m_marker = makeMarker();
 
 #if defined(_WIN32)
@@ -152,17 +161,18 @@ bool PtyProcess::start(std::string workingDirectory,
     }
 
     if (pid == 0) {
-        if (!workingDirectory.empty()) {
-            (void)chdir(workingDirectory.c_str());
-        }
-        (void)setenv("LUCID_DONE_MARKER", m_marker.c_str(), 1);
-
         struct termios attributes {};
         if (tcgetattr(STDIN_FILENO, &attributes) == 0) {
             attributes.c_lflag &= static_cast<tcflag_t>(~ECHO);
             (void)tcsetattr(STDIN_FILENO, TCSANOW, &attributes);
         }
-
+        if (!workingDirectory.empty() && chdir(workingDirectory.c_str()) != 0) {
+            constexpr char message[] = "Lucid: cannot enter the project directory; commands were not run.\n";
+            (void)::write(STDERR_FILENO, message, sizeof(message) - 1);
+            _exit(126);
+        }
+        (void)setenv("PS1", "", 1);
+        (void)setenv("PS2", "", 1);
         execl("/bin/sh", "sh", nullptr);
         _exit(127);
     }
@@ -170,6 +180,11 @@ bool PtyProcess::start(std::string workingDirectory,
     const int flags = fcntl(master, F_GETFL, 0);
     if (flags >= 0) {
         (void)fcntl(master, F_SETFL, flags | O_NONBLOCK);
+    }
+    struct termios terminalAttributes {};
+    if (tcgetattr(master, &terminalAttributes) == 0) {
+        terminalAttributes.c_lflag &= static_cast<tcflag_t>(~ECHO);
+        (void)tcsetattr(master, TCSANOW, &terminalAttributes);
     }
 
     m_fd = master;
@@ -185,6 +200,7 @@ void PtyProcess::update() {
         reap();
         return;
     }
+    flushInput();
     pumpOutput();
     if (!m_alive) {
         reap();
@@ -198,10 +214,18 @@ void PtyProcess::write(std::string_view text) {
     if (m_fd < 0 || text.empty()) {
         return;
     }
+    m_pendingInput.append(text);
+    flushInput();
+#endif
+}
+
+void PtyProcess::flushInput() {
+#if !defined(_WIN32)
+    if (m_fd < 0 || m_pendingInput.empty()) return;
     std::size_t written = 0;
-    while (written < text.size()) {
+    while (written < m_pendingInput.size()) {
         const ssize_t count =
-            ::write(m_fd, text.data() + written, text.size() - written);
+            ::write(m_fd, m_pendingInput.data() + written, m_pendingInput.size() - written);
         if (count > 0) {
             written += static_cast<std::size_t>(count);
             continue;
@@ -209,8 +233,10 @@ void PtyProcess::write(std::string_view text) {
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             break;
         }
+        if (count < 0 && errno == EINTR) continue;
         break;
     }
+    m_pendingInput.erase(0, written);
 #endif
 }
 
@@ -221,21 +247,32 @@ void PtyProcess::appendEcho(std::string_view text) {
 
 void PtyProcess::close() noexcept {
 #if !defined(_WIN32)
+    const pid_t foreground = m_fd >= 0 ? ::tcgetpgrp(m_fd) : -1;
+    if (foreground > 1 && foreground != ::getpgrp()) {
+        (void)kill(-foreground, SIGHUP);
+        (void)kill(-foreground, SIGKILL);
+    }
     if (m_fd >= 0) {
         ::close(m_fd);
         m_fd = -1;
     }
     if (m_pid > 0) {
-        (void)kill(static_cast<pid_t>(m_pid), SIGHUP);
+        const auto pid = static_cast<pid_t>(m_pid);
+        // forkpty creates a session and process group for the shell. Signal the
+        // group so its build processes do not outlive the compile window.
+        (void)kill(-pid, SIGHUP);
+        (void)kill(pid, SIGHUP);
+        (void)kill(-pid, SIGKILL);
         int status = 0;
-        if (waitpid(static_cast<pid_t>(m_pid), &status, WNOHANG) == 0) {
-            (void)kill(static_cast<pid_t>(m_pid), SIGKILL);
-            (void)waitpid(static_cast<pid_t>(m_pid), &status, 0);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            (void)kill(pid, SIGKILL);
+            (void)waitpid(pid, &status, 0);
         }
         m_pid = -1;
     }
 #endif
     m_alive = false;
+    m_pendingInput.clear();
 }
 
 void PtyProcess::sendNextCommand() {
@@ -249,8 +286,9 @@ void PtyProcess::sendNextCommand() {
     }
 
     const std::string& command = m_commands[m_nextCommand++];
-    std::string line = command;
-    line += "; printf '\\n%s:%s\\n' \"$LUCID_DONE_MARKER\" \"$?\"\n";
+    m_commandStarted = std::chrono::steady_clock::now();
+    std::string line = "{\n" + command;
+    line += "\n}; command printf '\\n%s:%s\\n' '" + m_marker + "' \"$?\"\n";
     write(line);
 }
 
@@ -278,12 +316,16 @@ void PtyProcess::pumpOutput() {
     }
 
     if (!m_marker.empty()) {
-        const std::size_t marker = m_rawOutput.find(m_marker);
-        if (marker != std::string::npos) {
+        std::size_t search = 0;
+        while (true) {
+            const std::size_t marker = m_rawOutput.find(m_marker, search);
+            if (marker == std::string::npos) break;
             const std::size_t statusStart = marker + m_marker.size();
+            if (statusStart == m_rawOutput.size()) break;
+            if (m_rawOutput[statusStart] != ':') { search = statusStart; continue; }
             const std::size_t end = m_rawOutput.find('\n', statusStart);
-            if (end != std::string::npos && statusStart < end &&
-                m_rawOutput[statusStart] == ':') {
+            if (end == std::string::npos) break;
+            if (statusStart < end) {
                 const std::string status = m_rawOutput.substr(statusStart + 1, end - statusStart - 1);
                 char* parsedEnd = nullptr;
                 const long code = std::strtol(status.c_str(), &parsedEnd, 10);
@@ -293,9 +335,19 @@ void PtyProcess::pumpOutput() {
                     m_rawOutput.erase(marker, end - marker + 1);
                     if (marker > 0 && m_rawOutput[marker - 1] == '\n')
                         m_rawOutput.erase(marker - 1, 1);
+                    if (code != 0) {
+                        m_rawOutput += "\n[Command " + std::to_string(m_exitCodes.size()) +
+                            " failed with exit code " + std::to_string(code) + "]\n";
+                    }
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - m_commandStarted).count();
+                    m_rawOutput += "\n[Command " + std::to_string(m_exitCodes.size()) + " finished in " +
+                        std::to_string(elapsed) + " ms; exit code " + std::to_string(code) + "]\n";
                     sendNextCommand();
+                    break;
                 }
             }
+            search = statusStart;
         }
     }
 
@@ -303,7 +355,12 @@ void PtyProcess::pumpOutput() {
     trimToSize(m_output, kMaxOutput);
 
     if (closed) {
-        if (!m_commandsDone && m_nextCommand > m_exitCodes.size()) m_exitCodes.push_back(-1);
+        if (!m_commandsDone && m_nextCommand > m_exitCodes.size()) {
+            m_exitCodes.push_back(-1);
+            m_rawOutput += "\n[Compile shell exited before reporting the command result]\n";
+            m_output = sanitizeOutput(m_rawOutput);
+            trimToSize(m_output, kMaxOutput);
+        }
         if (m_fd >= 0) {
             ::close(m_fd);
             m_fd = -1;

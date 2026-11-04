@@ -5,6 +5,18 @@ All notable changes to Lucid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Public documentation site built with MkDocs Material, including a landing page, screenshots and a demo.
+- CodeQL, OpenSSF Scorecard and dependency-review workflows, plus `SUPPORT.md` and a public security policy.
+
+### Changed
+
+- README now includes screenshots, a demo, documentation and community links.
+- Removed private-repository wording from release notes and documentation.
+
 ## [0.2.1-beta.2] - 2026-11-03
 
 ### Fixed
@@ -32,7 +44,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Limitations
 
 - Multiplayer and the full module runtime are not available. Debugger, BSD desktop, accessibility and other platform-specific workflows need further validation.
-- Packages are unsigned for distribution. The private repository requires authenticated downloads; the installer script cannot fetch private release assets directly.
+- Packages are unsigned for distribution. The installer script downloads release assets directly.
 
 ## [0.2.0-beta.1] - 2026-11-03
 

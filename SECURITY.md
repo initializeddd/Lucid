@@ -15,15 +15,17 @@ release.
 
 Please do **not** open a public issue for a security problem.
 
-- For this private repository, contact the repository owner through an existing private channel.
-  Collaborators with the necessary permissions can also create a draft security advisory in the
-  repository's **Security** tab.
-- If private vulnerability reporting is available and enabled after the repository becomes public,
-  use **Security → Report a vulnerability**.
-- Include the affected version or commit, reproduction steps, and expected impact. Avoid sharing
-  sensitive details in an issue or discussion.
+Use GitHub's private vulnerability reporting:
+
+1. Open the repository's **Security** tab.
+2. Choose **Report a vulnerability**.
+3. Include the affected version or commit, reproduction steps and expected impact.
 
 Maintainers will acknowledge the report as soon as possible and coordinate a fix and disclosure.
+If private vulnerability reporting is unavailable, open a draft security advisory in the
+repository's **Security** tab or contact the maintainer through GitHub.
+
+Please avoid sharing sensitive details in an issue or discussion.
 
 ## Scope
 
@@ -33,6 +35,12 @@ Lucid is a native desktop editor. Relevant areas include:
 - path handling that escapes a project root;
 - command injection through compile functions or variable expansion;
 - process handling in the PTY terminal;
-- unsafe deserialization of settings, caches or project files.
+- unsafe deserialization of settings, caches or project files;
+- vulnerabilities in the local model download and verification path.
 
 Build and packaging issues that require an already-compromised machine are generally out of scope.
+
+## Disclosure
+
+We aim to publish a fix and an advisory once a report is confirmed. Reporters are credited in the
+advisory unless they ask to remain anonymous.

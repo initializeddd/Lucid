@@ -237,21 +237,13 @@ bool saveTasks(const Project& project, TaskBoard& board, std::string& error) {
         if (!project.readFile(kFile, current, error)) return false;
         if (current != board.sourceContents) { error = "Task file changed; reopen tasks and try again"; return false; }
     }
-    std::filesystem::create_directories(path.parent_path(),ec);
-    if(ec) { error=ec.message(); return false; }
-    const auto temp=path.parent_path() / ("tasks-" + newTaskId() + ".tmp");
     const auto contents=serialize(board);
-    { std::ofstream file(temp,std::ios::binary|std::ios::trunc); if(!file) { error="Could not create task file"; return false; }
-      file.write(contents.data(),static_cast<std::streamsize>(contents.size())); file.close();
-      if(!file) { std::filesystem::remove(temp,ec); error="Could not write task file"; return false; } }
-#if defined(_WIN32)
-    if (!MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        std::filesystem::remove(temp,ec); error="Could not replace task file"; return false;
+    TaskBoard validated;
+    if (contents.size() > Project::maxFileSize || !parseBoard(contents, validated, error)) {
+        error = "Cannot save invalid or oversized task board" + (error.empty() ? std::string{} : ": " + error); return false;
     }
-#else
-    std::filesystem::rename(temp,path,ec);
-    if(ec) { const auto message=ec.message(); std::filesystem::remove(temp,ec); error=message; return false; }
-#endif
+    auto writer = project;
+    if (!writer.writeFile(kFile, contents, error, exists ? &board.sourceContents : nullptr, !exists)) return false;
     board.sourceContents = contents;
     board.sourceExists = true;
     error.clear(); return true;

@@ -11,6 +11,8 @@ imgui.ini
 cmake-build-*/
 dist/
 .lucid/
+site/
+.venv/
 *.swp
 *~
 

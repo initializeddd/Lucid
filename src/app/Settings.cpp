@@ -175,8 +175,19 @@ SettingsResult parseSettings(std::string_view text) {
             if (member.type != editor::JsonType::Number || member.numberValue < 0 || member.numberValue > 9 || std::floor(member.numberValue) != member.numberValue) {
                 result.error = "backgroundScene must be an integer from 0 to 9"; return result;
             }
-            settings.backgroundScene = static_cast<int>(member.numberValue);
-            if (settings.backgroundScene == 3) settings.backgroundScene = 0;
+            settings.backgroundScene = availableBackgroundScene(static_cast<int>(member.numberValue));
+        } else if (member.key == "backgroundColorMode") {
+            if (member.type != editor::JsonType::String ||
+                (member.stringValue != "accent" && member.stringValue != "natural")) {
+                result.error = "backgroundColorMode must be accent or natural"; return result;
+            }
+            settings.backgroundColorMode = member.stringValue;
+        } else if (member.key == "sessionRestore") {
+            if (member.type != editor::JsonType::String ||
+                (member.stringValue != "ask" && member.stringValue != "restore" && member.stringValue != "empty")) {
+                result.error = "sessionRestore must be ask, restore, or empty"; return result;
+            }
+            settings.sessionRestore = member.stringValue;
         } else if (member.key == "highContrast") {
             if (member.type != editor::JsonType::Bool) { result.error = "highContrast must be true or false"; return result; }
             settings.highContrast = member.boolValue;
@@ -289,6 +300,8 @@ std::string defaultSettingsJson() {
            "    \"cursorStyle\": \"line\",\n"
            "    \"backgroundMotion\": true,\n"
            "    \"backgroundScene\": 0,\n"
+           "    \"backgroundColorMode\": \"accent\",\n"
+           "    \"sessionRestore\": \"ask\",\n"
            "    \"highContrast\": false,\n"
            "    \"zoomFactor\": 1.0,\n"
            "    \"iconTheme\": \"classic\",\n"
@@ -314,6 +327,8 @@ std::string serializeSettings(const EditorSettings& settings) {
     stream << "    \"backgroundMotion\": "
            << (settings.backgroundMotion ? "true" : "false") << ",\n";
     stream << "    \"backgroundScene\": " << settings.backgroundScene << ",\n";
+    stream << "    \"backgroundColorMode\": \"" << settings.backgroundColorMode << "\",\n";
+    stream << "    \"sessionRestore\": \"" << settings.sessionRestore << "\",\n";
     stream << "    \"highContrast\": " << (settings.highContrast ? "true" : "false") << ",\n";
     stream << "    \"zoomFactor\": " << std::fixed << std::setprecision(2)
            << settings.zoomFactor << ",\n";
@@ -335,6 +350,10 @@ std::string serializeSettings(const EditorSettings& settings) {
 }
 
 std::filesystem::path settingsDirectory() {
+    if (const char* overridePath = std::getenv("LUCID_SETTINGS_DIRECTORY"); overridePath && overridePath[0] != '\0') {
+        const std::filesystem::path path(overridePath);
+        if (path.is_absolute()) return path;
+    }
 #if defined(__APPLE__)
     const std::filesystem::path home = homeDirectory();
     if (home.empty()) {

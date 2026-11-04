@@ -58,6 +58,15 @@ bool triggerSwitchFileShortcut() {
     return [[NSApp mainMenu] performKeyEquivalent:event];
 }
 
+bool triggerCloseFileShortcut() {
+    NSEvent* event = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                     location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand
+                                    timestamp:0 windowNumber:0 context:nil
+                                   characters:@"w" charactersIgnoringModifiers:@"w"
+                                    isARepeat:NO keyCode:13];
+    return [[NSApp mainMenu] performKeyEquivalent:event];
+}
+
 bool checkAccessibility(void* nativeWindow, const char* expected, unsigned long start, unsigned long length) {
     NSWindow* window = glfwGetCocoaWindow(static_cast<GLFWwindow*>(nativeWindow));
     NSView* view = window.contentView;
@@ -66,4 +75,10 @@ bool checkAccessibility(void* nativeWindow, const char* expected, unsigned long 
     return [[view accessibilityRole] isEqualToString:NSAccessibilityTextAreaRole] &&
         [value isEqualToString:[NSString stringWithUTF8String:expected]] &&
         range.location == start && range.length == length;
+}
+
+bool accessibilityLabelContains(void* nativeWindow, const char* expected) {
+    NSWindow* window = glfwGetCocoaWindow(static_cast<GLFWwindow*>(nativeWindow));
+    NSString* label = [window.contentView accessibilityLabel];
+    return [label containsString:[NSString stringWithUTF8String:expected]];
 }

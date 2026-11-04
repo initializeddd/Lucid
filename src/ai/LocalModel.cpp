@@ -31,8 +31,9 @@ bool generate(const std::filesystem::path& modelPath, std::string_view request,
                                "Lucid compile functions are written inside C or C++ block comments: "
                                "start with @name, put each shell command on a line beginning with $, and finish with @end. "
                                "For example: /*\n@build\n$cmake --build %project%/build\n@end\n*/. "
-                               "Optional platform suffixes include :macOS and :windows. "
-                               "Commands run from the project root and %project% expands to that root.<|im_end|>\n"
+                               "Optional platform suffixes are :macOS, :windows, :linux, :freebsd and :openbsd. "
+                               "Commands run from the project root; %project% expands to that root and %file% to the open file. "
+                               "Compile functions are not currently executable on Windows.<|im_end|>\n"
                                "<|im_start|>user\n" + std::string(request) +
                                "<|im_end|>\n<|im_start|>assistant\n";
     if (prompt.size() > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {

@@ -4,23 +4,37 @@ layout(location = 1) in vec3 vPosition;
 layout(location = 0) out vec4 outColor;
 layout(push_constant) uniform ScenePush { mat4 mvp; vec4 color; vec4 animation; vec4 background; vec4 material; } scene;
 float cellNoise(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float smoothNoise(vec2 p) {
+    vec2 cell = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(cellNoise(cell), cellNoise(cell + vec2(1.0, 0.0)), f.x),
+               mix(cellNoise(cell + vec2(0.0, 1.0)), cellNoise(cell + vec2(1.0, 1.0)), f.x), f.y);
+}
 void main() {
     // Ordered screen-space dithering keeps the fade in the same pixel-art
     // vocabulary as the low-resolution scene. Discarded samples reveal the
     // actual background and do not write depth over geometry behind them.
     float groundVisibility = 1.0;
-    if ((scene.material.y > 2.5 && scene.material.y < 3.5) || (scene.material.y > 8.5 && scene.material.y < 9.5) || (scene.material.y > 14.5 && scene.material.y < 15.5))
-        groundVisibility = smoothstep(-30.0, -20.0, vPosition.z);
+    // Break up the horizon with broad, gentle waves in world space. Keep
+    // the variation inside the extended geometry so the mesh edge stays hidden.
+    float horizonWave = 0.55 * sin(vPosition.x * 0.24) + 0.22 * sin(vPosition.x * 0.53 + 1.2);
+    float groundDepth = vPosition.z + horizonWave;
+    if ((scene.material.y > 2.5 && scene.material.y < 3.5) || (scene.material.y > 14.5 && scene.material.y < 15.5))
+        groundVisibility = smoothstep(-44.0, -29.0, groundDepth);
+    else if (scene.material.y > 8.5 && scene.material.y < 9.5)
+        groundVisibility = smoothstep(-29.0, -20.0, groundDepth);
     else if (scene.material.y > 16.5 && scene.material.y < 17.5)
-        groundVisibility = smoothstep(-20.0, -12.0, vPosition.z);
+        groundVisibility = smoothstep(-30.5, -19.0, groundDepth);
     else if (scene.material.y > 19.5 && scene.material.y < 20.5)
-        groundVisibility = smoothstep(0.0, 4.0, vPosition.z);
+        groundVisibility = smoothstep(0.8, 4.8, groundDepth);
     else if (scene.material.y > 10.5 && scene.material.y < 11.5)
-        groundVisibility = smoothstep(-10.0, 1.0, vPosition.z);
+        groundVisibility = smoothstep(-13.0, -2.0, groundDepth);
     else if (scene.material.y > 4.5 && scene.material.y < 5.5)
-        groundVisibility = smoothstep(-10.0, -3.0, vPosition.z);
+        groundVisibility = smoothstep(-14.0, -8.0, groundDepth);
     else if (scene.material.y > 11.5 && scene.material.y < 12.5)
-        groundVisibility = smoothstep(-4.0, -0.5, vPosition.z);
+        groundVisibility = smoothstep(-5.2, -2.0, groundDepth);
+    else if (scene.material.y > 21.5 && scene.material.y < 22.5)
+        groundVisibility = smoothstep(-7.4, -4.0, groundDepth);
     else if (scene.material.y > 12.5 && scene.material.y < 13.5)
         groundVisibility = smoothstep(-5.5, -1.5, vPosition.z);
     else if (scene.material.y > 13.5 && scene.material.y < 14.5)
@@ -94,7 +108,7 @@ void main() {
         vec2 cell = floor(brick), local = fract(brick);
         float joint = max(step(local.x, 0.055), step(local.y, 0.09));
         textureFactor = (0.90 + 0.18 * cellNoise(cell)) * (1.0 - 0.18 * joint);
-    } else if ((scene.material.y > 1.5 && scene.material.y < 4.5) || (scene.material.y > 12.5 && scene.material.y < 14.5)) {
+    } else if ((scene.material.y > 1.5 && scene.material.y < 4.5) || (scene.material.y > 12.5 && scene.material.y < 14.5) || (scene.material.y > 21.5 && scene.material.y < 22.5)) {
         vec2 cell = floor(surface * (scene.material.y > 3.5 ? 9.0 : 5.0));
         textureFactor = 0.87 + 0.23 * cellNoise(cell);
     }
@@ -108,6 +122,21 @@ void main() {
         shaded += vec3(0.055, 0.065, 0.095) * limb;
     }
     if (scene.material.y > 6.5 && scene.material.y < 7.5) {
+        // Procedural continents and cloud systems follow the rotating globe.
+        // Quantized coordinates retain the scene's pixel-art texture.
+        vec3 globe = normalize(vPosition - vec3(-42.0, -56.0, -14.0));
+        vec2 geo = vec2(atan(globe.z, globe.x) * 2.7, asin(clamp(globe.y, -1.0, 1.0)) * 2.7);
+        vec2 landPoint = floor(geo * 22.0) / 22.0;
+        float landShape = 0.65 * smoothNoise(landPoint * 1.5) + 0.35 * smoothNoise(landPoint * 3.4 + 8.0);
+        float land = smoothstep(0.54, 0.63, landShape);
+        vec2 cloudPoint = floor((geo + vec2(0.20 * sin(scene.animation.y * 0.03), 0.0)) * 30.0) / 30.0;
+        float cloudShape = 0.65 * smoothNoise(cloudPoint * 3.0 + 22.0) + 0.35 * smoothNoise(cloudPoint * 7.0 + 13.0);
+        float clouds = smoothstep(0.55, 0.68, cloudShape) * 0.82;
+        vec3 landColor = scene.background.a < 0.0
+            ? vec3(0.22, 0.40, 0.21) * (0.55 + 0.45 * light)
+            : shaded * 1.65 + vec3(0.035, 0.045, 0.055);
+        shaded = mix(shaded, landColor, land);
+        shaded = mix(shaded, vec3(0.47, 0.51, 0.59) * (0.55 + 0.45 * light), clouds);
         float rim = pow(1.0 - clamp(dot(normal, normalize(vec3(0.0, 0.38, 0.92))), 0.0, 1.0), 4.0);
         shaded += vec3(0.15, 0.18, 0.29) * rim;
     }
@@ -119,11 +148,13 @@ void main() {
     }
     // Recolor the scene from its luminance, retaining its lighting and detail
     // while letting the selected primary color determine the overall hue.
-    vec3 primary = clamp(vec3(scene.background.a, scene.material.zw), 0.0, 1.0);
-    float peak = max(max(primary.r, primary.g), primary.b);
-    vec3 hue = peak > 0.001 ? primary / peak : vec3(1.0);
-    float luminance = dot(shaded, vec3(0.2126, 0.7152, 0.0722));
-    shaded = luminance * mix(vec3(1.0), hue, 0.72);
+    if (scene.background.a >= 0.0) {
+        vec3 primary = clamp(vec3(scene.background.a, scene.material.zw), 0.0, 1.0);
+        float peak = max(max(primary.r, primary.g), primary.b);
+        vec3 hue = peak > 0.001 ? primary / peak : vec3(1.0);
+        float luminance = dot(shaded, vec3(0.2126, 0.7152, 0.0722));
+        shaded = luminance * mix(vec3(1.0), hue, 0.72);
+    }
     float alpha = scene.color.a;
     if (scene.animation.x > 11.5 && scene.animation.x < 12.5) {
         float phase = cellNoise(floor(vPosition.xz * 1.5));

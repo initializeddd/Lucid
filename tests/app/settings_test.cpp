@@ -18,10 +18,26 @@ bool colorNear(const std::optional<lucid::ui::theme::Color>& color, int red,
 } // namespace
 
 int main() {
+    for (const auto* mode : {"accent", "natural"}) {
+        lucid::EditorSettings settings; settings.backgroundColorMode = mode;
+        const auto result = lucid::parseSettings(lucid::serializeSettings(settings));
+        if (!result.valid || result.settings.backgroundColorMode != mode) return 192;
+    }
+    if (lucid::parseSettings(R"({"backgroundColorMode":"unknown"})").valid ||
+        lucid::parseSettings("{}").settings.backgroundColorMode != "accent") return 193;
+    for (const auto* choice : {"ask", "restore", "empty"}) {
+        lucid::EditorSettings settings; settings.sessionRestore = choice;
+        const auto result = lucid::parseSettings(lucid::serializeSettings(settings));
+        if (!result.valid || result.settings.sessionRestore != choice) return 190;
+    }
+    if (lucid::parseSettings(R"({"sessionRestore":"sometimes"})").valid ||
+        lucid::parseSettings(R"({"sessionRestore":true})").valid ||
+        lucid::parseSettings("{}").settings.sessionRestore != "ask") return 191;
     for (int scene = 0; scene < 10; ++scene) {
         lucid::EditorSettings settings; settings.backgroundScene = scene;
         const auto result = lucid::parseSettings(lucid::serializeSettings(settings));
-        if (!result.valid || result.settings.backgroundScene != (scene == 3 ? 0 : scene)) return 170 + scene;
+        const bool removed = scene == 3 || scene == 5 || scene == 8 || scene == 9;
+        if (!result.valid || result.settings.backgroundScene != (removed ? 0 : scene)) return 170 + scene;
     }
     if (lucid::parseSettings(R"({"backgroundScene":10})").valid ||
         lucid::parseSettings(R"({"backgroundScene":1.5})").valid ||

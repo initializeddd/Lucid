@@ -22,6 +22,8 @@ int main() {
 
     std::string error;
     bool created = false;
+    (void)Project::openOrCreate(base / "missing", created, error, false, false);
+    if (error.empty() || created || fs::exists(base / "missing")) return 28;
     Project project =
         Project::openOrCreate(base / "demo", created, error);
     if (!error.empty() || !created) {
@@ -192,6 +194,17 @@ int main() {
         return 21;
     }
 
+    { std::ofstream file(base / "demo" / "size-limit.bin", std::ios::binary); }
+    fs::resize_file(base / "demo" / "size-limit.bin", Project::maxFileSize, filesystemError);
+    if (filesystemError || !project.readFile("size-limit.bin", content, error) || content.size() != Project::maxFileSize) return 40;
+    fs::resize_file(base / "demo" / "size-limit.bin", Project::maxFileSize + 1, filesystemError);
+    if (filesystemError || project.readFile("size-limit.bin", content, error) || !content.empty() || error.empty()) return 41;
+    if (!project.writeFile("exclusive.txt", "first", error, nullptr, true) ||
+        project.writeFile("exclusive.txt", "second", error, nullptr, true) ||
+        !project.readFile("exclusive.txt", content, error) || content != "first") return 42;
+    std::atomic_bool cancelScan{true}; bool scanComplete = true;
+    project.refresh(&scanComplete, &cancelScan);
+    if (scanComplete) return 43;
     fs::remove_all(base, filesystemError);
     return 0;
 }

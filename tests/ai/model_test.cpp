@@ -4,9 +4,11 @@
 #include "ai/ModelDownload.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <thread>
 
 int main() {
     std::string output, error;
@@ -23,6 +25,13 @@ int main() {
         const auto modelPath = std::filesystem::path(model);
         std::filesystem::path verified;
         if (!lucid::ai::ensureModel(modelPath.parent_path(), verified, error) || verified != modelPath) return 4;
+        std::atomic_bool stopVerification{false}; std::atomic<int> verificationProgress{0};
+        std::string verificationError; std::filesystem::path verificationPath; bool verificationResult = true;
+        std::thread verification([&] { verificationResult = lucid::ai::ensureModel(modelPath.parent_path(), verificationPath, verificationError, &stopVerification, &verificationProgress); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (verificationProgress.load() != lucid::ai::kModelVerifying && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        stopVerification = true; verification.join();
+        if (verificationResult || verificationError != "Model download cancelled") return 18;
         if (!lucid::ai::generate(verified, "Write a Python function that adds two numbers.", output, error) ||
             output.empty()) return 5;
     }
@@ -46,7 +55,10 @@ int main() {
     std::string empty = "  ";
     if (lucid::ai::cleanupResponse(empty, error)) return 10;
     const auto payload = lucid::ai::openRouterRequest("vendor/model", "quoted \"state\"");
-    if (payload.find("vendor/model") == std::string::npos || payload.find("\\\"state\\\"") == std::string::npos) return 12;
+    if (payload.find("vendor/model") == std::string::npos || payload.find("\\\"state\\\"") == std::string::npos ||
+        payload.find("Follow the user's requested task") == std::string::npos || payload.find("@end") == std::string::npos ||
+        payload.find(":freebsd") == std::string::npos || payload.find("not currently executable on Windows") == std::string::npos ||
+        payload.find("Explain debugging state concisely") != std::string::npos) return 12;
     if (!lucid::ai::parseOpenRouterResponse(R"({"choices":[{"finish_reason":"stop","message":{"content":"explanation"}}]})", output, error) || output != "explanation") return 13;
     if (lucid::ai::parseOpenRouterResponse(R"({"choices":[{"finish_reason":"length","message":{"content":"partial"}}]})", output, error)) return 14;
     if (lucid::ai::generateOpenRouter("bad\nkey", "model", "prompt", output, error) || error.empty()) return 15;

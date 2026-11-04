@@ -45,6 +45,9 @@ struct CompileScript {
 [[nodiscard]] std::string
 expandCompileVariables(std::string_view command,
                        const std::unordered_map<std::string, std::string>& variables);
+[[nodiscard]] std::string
+expandCompileShellVariables(std::string_view command,
+                            const std::unordered_map<std::string, std::string>& variables);
 [[nodiscard]] std::string shellQuote(std::string_view value);
 
 } // namespace lucid::editor

@@ -1,5 +1,6 @@
 #include "workspace/PathSearch.hpp"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,20 @@ int main() {
     const std::vector<std::string> directories{"src", "src/lib", "src/lib/nested", "other"};
     results = lucid::workspace::filterChildPaths(directories, "src/", 8);
     if (results.size() != 1 || results[0] != "src/lib") return 13;
+
+    const std::vector<std::string> longPaths{std::string(180, 'x') + "a.cpp", "short.txt"};
+    results = filterPaths(longPaths, "a", 8);
+    if (results.size() != 1 || results[0] != longPaths[0]) return 14;
+    results = lucid::workspace::filterChildPaths(longPaths, "a", 8);
+    if (results.size() != 1 || results[0] != longPaths[0]) return 15;
+
+    std::vector<std::string> manyPaths;
+    for (int i = 999; i >= 0; --i) manyPaths.push_back("folder/file" + std::to_string(i) + ".cpp");
+    const auto allMatches = filterPaths(manyPaths, "file", manyPaths.size());
+    const auto topMatches = filterPaths(manyPaths, "file", 12);
+    if (allMatches.size() != manyPaths.size() || topMatches.size() != 12 ||
+        !std::equal(topMatches.begin(), topMatches.end(), allMatches.begin())) return 16;
+    if (!filterPaths(manyPaths, "file", 0).empty()) return 17;
 
     return 0;
 }

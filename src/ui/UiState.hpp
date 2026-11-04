@@ -17,11 +17,13 @@ enum class PromptKind {
     Ai,
     AiSettings,
     SettingsMenu,
+    SessionRestore,
     ProjectSearch,
     ProjectSearchResults,
     ProjectReplace,
     ProjectReplaceReview,
     LanguageLocations,
+    Diagnostics,
     AiModelInput,
     AiKeyInput,
     Find,
@@ -32,9 +34,13 @@ enum class PromptKind {
     ModuleList,
     ModuleActions,
     ModuleCommands,
+    ModuleImport,
+    ModulePreview,
+    ModuleCatalog,
     DebugMenu,
     DebugInput,
     DebugStack,
+    DebugThreads,
     DebugVariables,
     DebugOutput,
     GitChanges,
@@ -86,6 +92,8 @@ enum class SettingsControl {
     PrimaryColor7,
     BackgroundMotion,
     BackgroundScene,
+    BackgroundColorMode,
+    StartupSession,
     OpenSettingsJson,
     AiSettings,
     Done,
@@ -111,6 +119,9 @@ struct PathSuggestion {
 struct FrameState {
     bool commandVisible = false;
     std::string_view commandQuery;
+    std::size_t commandCursor = 0;
+    std::size_t commandSelectionStart = 0;
+    std::size_t commandSelectionEnd = 0;
     std::string_view commandPlaceholder;
     PromptKind commandKind = PromptKind::File;
     double timeSeconds = 0.0;
@@ -166,6 +177,7 @@ struct FrameState {
     editor::CursorStyle cursorStyle = editor::CursorStyle::Line;
     bool backgroundMotion = true;
     int backgroundScene = 0;
+    bool backgroundNaturalColors = false;
     float backgroundDim = 0.0F;
     bool showWindowTitle = false;
     std::string_view windowTitle;
@@ -227,6 +239,8 @@ struct FrameState {
 
     std::string_view commandStatus;
     bool commandStatusIsError = false;
+    std::size_t commandStatusColumns = 1;
+    std::size_t commandStatusRows = 0;
     std::string_view statusText;
     bool statusIsError = false;
 };

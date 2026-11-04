@@ -117,5 +117,53 @@ int main() {
         return 17;
     }
 
+    bar.setQuery("path/");
+    if (bar.appendUtf8("Grüße\tfile\nignored")) return 30;
+    if (bar.query() != "path/Grüße file") return 18;
+    bar.backspace();
+    if (bar.query() != "path/Grüße fil") return 19;
+    bar.setQuery(std::string(SearchBar::kMaxQueryLength - 1, 'x'));
+    if (bar.appendUtf8("üa")) return 31;
+    if (bar.query().size() != SearchBar::kMaxQueryLength - 1) return 20;
+    bar.setQuery("");
+    bar.appendUtf8(std::string("a\xff" "b", 3));
+    if (bar.query() != "a\xef\xbf\xbd" "b") return 21;
+
+    bar.setQuery("Grüße");
+    bar.moveLeft();
+    bar.moveLeft(true);
+    if (bar.query().substr(bar.selectionStart(), bar.selectionEnd() - bar.selectionStart()) != "ß") return 22;
+    bar.append(U's');
+    if (bar.query() != "Grüse") return 23;
+    bar.deleteForward();
+    if (bar.query() != "Grüs") return 24;
+    bar.moveHome();
+    bar.deleteForward();
+    if (bar.query() != "rüs") return 25;
+    bar.selectAll();
+    bar.appendUtf8("rüste");
+    if (bar.query() != "rüste" || bar.hasSelection()) return 26;
+    bar.moveLeft();
+    bar.backspace();
+    if (bar.query() != "rüse") return 27;
+
+    bar.setQuery("src/Grüße.cpp");
+    bar.moveWordLeft();
+    if (bar.query().substr(bar.cursor()) != "cpp") return 28;
+    bar.moveWordLeft(true);
+    if (bar.query().substr(bar.selectionStart(), bar.selectionEnd() - bar.selectionStart()) != ".") return 29;
+    bar.moveWordLeft();
+    bar.moveWordLeft();
+    if (bar.query().substr(bar.cursor(), 7) != "Grüße") return 30;
+    bar.setCursor(7); // A byte inside ü is clamped to its boundary.
+    if (bar.cursor() != 6) return 31;
+    bar.moveWordRight(true);
+    if (!bar.hasSelection()) return 32;
+
+    bar.close();
+    if (!bar.visible() || bar.isOpen()) return 33;
+    bar.toggle();
+    if (!bar.isOpen() || !bar.visible() || !bar.query().empty()) return 34;
+
     return 0;
 }

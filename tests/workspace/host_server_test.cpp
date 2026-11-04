@@ -57,18 +57,19 @@ int main() {
     if (!server.start(project, "127.0.0.1", 0, token, error) || server.port() == 0) return 3;
     Client alice, bob;
     if (!alice.connectTo(server.port()) || !bob.connectTo(server.port())) return 4;
-    if (!alice.sendMessage("{\"type\":\"join\",\"version\":1,\"name\":\"Alice\",\"token\":\"" + token + "\"}") || !alice.receiveContaining("joined")) return 5;
-    if (!bob.sendMessage("{\"type\":\"join\",\"version\":1,\"name\":\"Bob\",\"token\":\"" + token + "\"}") || !bob.receiveContaining("joined")) return 6;
+    if (!alice.sendMessage("{\"type\":\"join\",\"version\":3,\"name\":\"Alice\",\"token\":\"" + token + "\"}") || !alice.receiveContaining("joined")) return 5;
+    if (!bob.sendMessage("{\"type\":\"join\",\"version\":3,\"name\":\"Bob\",\"token\":\"" + token + "\"}") || !bob.receiveContaining("joined")) return 6;
+    if (!alice.sendMessage(R"({"type":"files","request":"browse"})") || !alice.receiveContaining("\"type\":\"files\"")) return 21;
     if (!alice.sendMessage(R"({"type":"open","path":"a.txt"})") || !alice.receiveContaining("snapshot")) return 7;
     if (!bob.sendMessage(R"({"type":"open","path":"a.txt"})") || !bob.receiveContaining("snapshot")) return 8;
-    if (!alice.sendMessage(R"({"type":"edit","request":"1","revision":0,"start":0,"erase":1,"insert":"H"})")) return 9;
+    if (!alice.sendMessage(R"({"type":"edit","path":"a.txt","context":1,"request":"1","revision":0,"start":0,"erase":1,"insert":"H"})")) return 9;
     if (!alice.receiveContaining("\"type\":\"edit\"") || !bob.receiveContaining("\"type\":\"edit\"")) return 10;
-    if (!bob.sendMessage(R"({"type":"edit","request":"conflict","revision":0,"start":0,"erase":1,"insert":"X"})") ||
+    if (!bob.sendMessage(R"({"type":"edit","path":"a.txt","context":1,"request":"conflict","revision":0,"start":0,"erase":1,"insert":"X"})") ||
         !bob.receiveContaining("overlap") || !bob.receiveContaining("Hello")) return 11;
-    if (!bob.sendMessage(R"({"type":"edit","request":"2","revision":0,"start":5,"erase":0,"insert":"!"})") ||
+    if (!bob.sendMessage(R"({"type":"edit","path":"a.txt","context":1,"request":"2","revision":0,"start":5,"erase":0,"insert":"!"})") ||
         !alice.receiveContaining("\"revision\":2") || !bob.receiveContaining("\"revision\":2")) return 12;
-    if (!bob.sendMessage(R"({"type":"cursor","revision":2,"anchor":6,"caret":6})") || !alice.receiveContaining("\"caret\":6")) return 13;
-    if (!bob.sendMessage(R"({"type":"save","request":"save"})") || !bob.receiveContaining("saved")) return 14;
+    if (!bob.sendMessage(R"({"type":"cursor","path":"a.txt","context":1,"revision":2,"anchor":6,"caret":6})") || !alice.receiveContaining("\"caret\":6")) return 13;
+    if (!bob.sendMessage(R"({"type":"save","path":"a.txt","context":1,"request":"save"})") || !bob.receiveContaining("saved")) return 14;
     { std::ifstream file(dir / "a.txt"); std::string text((std::istreambuf_iterator<char>(file)), {}); if (text != "Hello!") return 15; }
     Connection client; const ShareLink link{"127.0.0.1", server.port(), token};
     if (!client.connect(formatShareLink(link), "Carol", error)) return 16;
@@ -86,6 +87,33 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     if (!snapshot) return 20;
-    client.close(); server.stop(); std::filesystem::remove_all(dir); return 0;
+    Client departing;
+    if (!departing.connectTo(server.port()) ||
+        !departing.sendMessage("{\"type\":\"join\",\"version\":3,\"name\":\"Dana\",\"token\":\"" + token + "\"}") ||
+        !departing.receiveContaining("joined") ||
+        !departing.sendMessage(R"({"type":"open","path":"a.txt"})") || !departing.receiveContaining("snapshot")) return 22;
+    if (!departing.sendMessage(R"({"type":"edit","path":"a.txt","context":1,"request":"last","revision":2,"start":6,"erase":0,"insert":"?"})") ||
+        shutdown(departing.fd, SHUT_WR) != 0 || !bob.receiveContaining("\"request\":\"last\"")) return 23;
+    Connection observer;
+    if (!observer.connect(formatShareLink(link), "Observer", error)) return 24;
+    bool observerJoined = false;
+    const auto observerDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < observerDeadline && !observerJoined) {
+        std::vector<std::string> messages;
+        if (!observer.poll(messages, error)) return 25;
+        for (const auto& message : messages) if (message.find("joined") != std::string::npos) observerJoined = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!observerJoined) return 26;
+    client.close(); server.stop();
+    std::vector<std::string> oldMessages{"previously delivered"};
+    bool disconnected = false;
+    const auto disconnectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < disconnectDeadline) {
+        if (!observer.poll(oldMessages, error)) { disconnected = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!disconnected || error != "Session connection closed") return 27;
+    std::filesystem::remove_all(dir); return 0;
 #endif
 }

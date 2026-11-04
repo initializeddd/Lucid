@@ -101,7 +101,7 @@ struct Renderer::Impl {
 
         contentScale = window.contentScale() * uiZoom;
         recreateFont();
-        constexpr std::array<const char*, 10> sceneNames{"city-transit", "lunar-horizon", "mountain-parallax", "", "ocean-lighthouse", "rainy-street", "orbital-station", "forest-fireflies", "drafting-grid", "retro-landscape"};
+        constexpr std::array<const char*, 10> sceneNames{"city-transit", "lunar-horizon", "mountain-parallax", "", "ocean-lighthouse", "", "orbital-station", "forest-fireflies", "", ""};
         for (std::size_t index = 0; index < sceneNames.size(); ++index) {
             if (sceneNames[index][0] == '\0') continue;
             try { backgroundScenes[index] = std::make_unique<vk::Background3DScene>(device, sceneNames[index]); }
@@ -338,7 +338,7 @@ struct Renderer::Impl {
             vkCmdBeginRenderPass(commandBuffer, &backgroundInfo, VK_SUBPASS_CONTENTS_INLINE);
             std::array<float,4> primary{state.settingsPrimary.r, state.settingsPrimary.g, state.settingsPrimary.b, 1.0F};
             if (vk::isSrgbFormat(swapchain.format())) primary = vk::srgbToLinear(primary);
-            backgroundScenes[static_cast<std::size_t>(sceneIndex)]->draw(commandBuffer, *backgroundPipelines[currentFrame], backgroundTargets[currentFrame]->extent(), state.animationTime, state.backgroundDim, clear, {primary[0], primary[1], primary[2]});
+            backgroundScenes[static_cast<std::size_t>(sceneIndex)]->draw(commandBuffer, *backgroundPipelines[currentFrame], backgroundTargets[currentFrame]->extent(), state.animationTime, state.backgroundDim, clear, {primary[0], primary[1], primary[2]}, state.backgroundNaturalColors);
             vkCmdEndRenderPass(commandBuffer);
             shaderReadBarrier(commandBuffer, backgroundTargets[currentFrame]->colorImage());
         }

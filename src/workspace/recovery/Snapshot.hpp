@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 namespace lucid::workspace::recovery {
+inline constexpr std::size_t maxRecoveredContentsSize = 64U * 1024U * 1024U;
 struct FileContext { std::string path; std::size_t line = 0, column = 0; int firstLine = 0; bool operator==(const FileContext&) const = default; };
 struct Snapshot {
     std::string project, file, baseline, contents;

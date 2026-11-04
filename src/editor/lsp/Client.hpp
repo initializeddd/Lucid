@@ -2,6 +2,7 @@
 #include "debug/AdapterProcess.hpp"
 #include "debug/Protocol.hpp"
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -13,6 +14,8 @@ namespace lucid::editor::lsp {
 [[nodiscard]] bool pathFromFileUri(std::string_view uri, std::filesystem::path& path);
 class Client {
 public:
+    explicit Client(std::chrono::milliseconds initializationTimeout = std::chrono::seconds(15))
+        : m_initializationTimeout(initializationTimeout) {}
     [[nodiscard]] bool start(const std::filesystem::path& root, std::string& error);
     [[nodiscard]] bool open(const std::filesystem::path& file, std::string_view language,
                             std::string_view text, std::string& error);
@@ -32,5 +35,7 @@ private:
     std::uint64_t m_nextId = 2;
     int m_version = 0;
     bool m_ready = false;
+    std::chrono::milliseconds m_initializationTimeout;
+    std::chrono::steady_clock::time_point m_initializationDeadline{};
 };
 }

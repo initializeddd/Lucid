@@ -64,18 +64,18 @@ int main() {
         return 14;
     }
     editing.backspace();
-    if (editing.line(1) != U"   " || editing.cursorColumn() != 3) {
+    if (editing.line(1) != U"" || editing.cursorColumn() != 0) {
         return 15;
     }
     editing.setCursor(1, 0);
     editing.backspace();
-    if (editing.lineCount() != 1 || editing.line(0) != U"    a   " ||
+    if (editing.lineCount() != 1 || editing.line(0) != U"    a" ||
         editing.cursorLine() != 0 || editing.cursorColumn() != 5) {
         return 16;
     }
     editing.setCursor(0, 0);
     editing.deleteForward();
-    if (editing.line(0) != U"   a   ") {
+    if (editing.line(0) != U"   a") {
         return 17;
     }
 
@@ -93,7 +93,7 @@ int main() {
         return 20;
     }
     editing.moveEnd();
-    if (editing.cursorColumn() != 7) {
+    if (editing.cursorColumn() != 4) {
         return 21;
     }
 
@@ -195,6 +195,83 @@ int main() {
         return 37;
     }
 
+    Document largePaste = Document::fromUtf8("before\nafter");
+    largePaste.setCursor(0, 3);
+    std::string manyLines;
+    for (int i = 0; i < 5000; ++i) manyLines += "x\n";
+    largePaste.pasteUtf8(manyLines);
+    if (largePaste.lineCount() != 5002 || largePaste.cursorLine() != 5000 ||
+        largePaste.cursorColumn() != 0 || largePaste.lineUtf8(5000) != "ore" ||
+        largePaste.lineUtf8(5001) != "after") return 137;
+    largePaste.undo();
+    if (largePaste.toUtf8() != "before\nafter" || largePaste.dirty()) return 138;
+
+    Document filteredPaste = Document::fromUtf8("keep");
+    filteredPaste.selectAll();
+    const auto beforeFilteredPaste = filteredPaste.revision();
+    filteredPaste.pasteUtf8(std::string("\x01\x7f", 2));
+    if (filteredPaste.toUtf8() != "keep" || filteredPaste.selectionUtf8() != "keep" ||
+        filteredPaste.dirty() || filteredPaste.revision() != beforeFilteredPaste) return 96;
+    filteredPaste.pasteUtf8(std::string("\x01X\x7f", 3));
+    if (filteredPaste.toUtf8() != "X") return 97;
+    filteredPaste.undo();
+    if (filteredPaste.toUtf8() != "keep" || filteredPaste.selectionUtf8() != "keep") return 98;
+
+    Document samePaste = Document::fromUtf8("alpha\n\xce\xb2" "eta");
+    samePaste.selectAll();
+    const auto beforeSamePaste = samePaste.revision();
+    samePaste.pasteUtf8("alpha\r\n\xce\xb2" "eta");
+    if (samePaste.toUtf8() != "alpha\n\xce\xb2" "eta" || samePaste.hasSelection() ||
+        samePaste.cursorLine() != 1 || samePaste.cursorColumn() != 4 ||
+        samePaste.dirty() || samePaste.revision() != beforeSamePaste) return 105;
+
+    Document redoAfterSamePaste = Document::fromUtf8("a");
+    redoAfterSamePaste.setCursor(0, 1);
+    redoAfterSamePaste.insert(U'b');
+    redoAfterSamePaste.undo();
+    redoAfterSamePaste.selectAll();
+    redoAfterSamePaste.pasteUtf8("a");
+    redoAfterSamePaste.redo();
+    if (redoAfterSamePaste.toUtf8() != "ab" || !redoAfterSamePaste.dirty()) return 106;
+
+    Document sameTyping = Document::fromUtf8("a  b");
+    sameTyping.setCursor(0, 4);
+    sameTyping.insert(U'!');
+    sameTyping.undo();
+    const auto beforeSameTyping = sameTyping.revision();
+    sameTyping.setCursor(0, 1);
+    sameTyping.extendSelectionTo(0, 0);
+    sameTyping.insert(U'a');
+    if (sameTyping.dirty() || sameTyping.hasSelection() || sameTyping.cursorColumn() != 1 ||
+        sameTyping.revision() != beforeSameTyping) return 111;
+    sameTyping.setCursor(0, 3);
+    sameTyping.extendSelectionTo(0, 1);
+    sameTyping.insertSpaces(2);
+    if (sameTyping.dirty() || sameTyping.hasSelection() || sameTyping.cursorColumn() != 3 ||
+        sameTyping.revision() != beforeSameTyping) return 112;
+    sameTyping.redo();
+    if (sameTyping.toUtf8() != "a  b!" || !sameTyping.dirty()) return 113;
+
+    Document savedHistory = Document::fromUtf8("a");
+    savedHistory.setCursor(0, 1);
+    savedHistory.insert(U'b');
+    savedHistory.markSaved();
+    savedHistory.insert(U'c');
+    savedHistory.undo();
+    if (savedHistory.toUtf8() != "ab" || savedHistory.dirty()) return 99;
+    savedHistory.undo();
+    if (savedHistory.toUtf8() != "a" || !savedHistory.dirty()) return 100;
+    savedHistory.redo();
+    if (savedHistory.toUtf8() != "ab" || savedHistory.dirty()) return 101;
+    savedHistory.undo();
+    savedHistory.insert(U'x');
+    if (savedHistory.toUtf8() != "ax" || !savedHistory.dirty()) return 102;
+    savedHistory.markRecovered();
+    savedHistory.undo();
+    if (!savedHistory.dirty()) return 103;
+    savedHistory.markSaved();
+    if (savedHistory.dirty()) return 104;
+
     Document trailingPaste = Document::fromUtf8("ab");
     trailingPaste.setCursor(0, 1);
     trailingPaste.pasteUtf8("X\n");
@@ -227,6 +304,22 @@ int main() {
         deletedLine.cursorColumn() != 0) {
         return 41;
     }
+
+    Document deletedBlock = Document::fromUtf8("one\ntwo\nthree\nfour");
+    deletedBlock.setCursor(3, 0);
+    deletedBlock.extendSelectionTo(1, 1);
+    deletedBlock.deleteLine();
+    if (deletedBlock.toUtf8() != "one\nfour" || deletedBlock.cursorLine() != 1 ||
+        deletedBlock.cursorColumn() != 0 || deletedBlock.hasSelection()) return 107;
+    deletedBlock.undo();
+    if (deletedBlock.toUtf8() != "one\ntwo\nthree\nfour" ||
+        deletedBlock.selectionUtf8() != "wo\nthree\n" || deletedBlock.dirty()) return 108;
+    deletedBlock.selectAll();
+    deletedBlock.deleteLine();
+    if (deletedBlock.toUtf8() != "" || deletedBlock.lineCount() != 1 ||
+        deletedBlock.cursorLine() != 0 || deletedBlock.cursorColumn() != 0) return 109;
+    deletedBlock.undo();
+    if (deletedBlock.toUtf8() != "one\ntwo\nthree\nfour") return 110;
 
     Document below = Document::fromUtf8("    first");
     below.setCursor(0, 5);
@@ -379,6 +472,22 @@ int main() {
     smart.setCursor(0, 6); smart.moveSmartHome(true);
     if (smart.selectionUtf8() != "      ") return 75;
 
+    Document vertical = Document::fromUtf8("\tx\n    x\nx\n\tx");
+    vertical.setCursor(0, 1);
+    vertical.moveDown();
+    if (vertical.cursorLine() != 1 || vertical.cursorColumn() != 4) return 90;
+    vertical.moveDown();
+    if (vertical.cursorLine() != 2 || vertical.cursorColumn() != 1) return 91;
+    vertical.moveDown();
+    if (vertical.cursorLine() != 3 || vertical.cursorColumn() != 1) return 92;
+    vertical.moveUp(true);
+    if (vertical.cursorLine() != 2 || vertical.cursorColumn() != 1 || !vertical.hasSelection()) return 93;
+    vertical.moveUp(true);
+    if (vertical.cursorLine() != 1 || vertical.cursorColumn() != 4) return 94;
+    vertical.moveLeft();
+    vertical.moveUp();
+    if (vertical.cursorLine() != 0 || vertical.cursorColumn() != 1) return 95;
+
     std::string formatError, formatted;
     const std::string windowsText = "\xef\xbb\xbf" "one\r\ntwo\r\n";
     if (!Document::canEditLosslessly(windowsText, formatError)) return 76;
@@ -391,6 +500,83 @@ int main() {
     if (!oldMacDoc.serializeForFile(oldMac, formatted, formatError) || formatted != oldMac) return 78;
     if (Document::canEditLosslessly("one\r\ntwo\n", formatError) || formatError.empty()) return 79;
     if (Document::canEditLosslessly(std::string("bad\xff", 4), formatError) || formatError.empty()) return 80;
+
+    auto joined = Document::fromUtf8("first\n  second\n\tthird\nlast");
+    joined.setCursor(0, 2); joined.joinLines();
+    if (joined.toUtf8() != "first second\n\tthird\nlast" || joined.cursorColumn() != 5) return 96;
+    joined.undo();
+    if (joined.toUtf8() != "first\n  second\n\tthird\nlast" || joined.cursorColumn() != 2) return 97;
+    joined.setCursor(0, 0); joined.extendSelectionTo(2, 3); joined.joinLines();
+    if (joined.toUtf8() != "first second third\nlast") return 98;
+    joined.undo();
+    if (joined.toUtf8() != "first\n  second\n\tthird\nlast" || !joined.hasSelection()) return 99;
+
+    auto wordDeletion = Document::fromUtf8("one two\nthree");
+    wordDeletion.setCursor(0, 7); wordDeletion.deleteWord(false);
+    if (wordDeletion.toUtf8() != "one \nthree") return 100;
+    wordDeletion.undo();
+    if (wordDeletion.toUtf8() != "one two\nthree" || wordDeletion.cursorColumn() != 7 || wordDeletion.hasSelection()) return 101;
+    wordDeletion.redo();
+    if (wordDeletion.toUtf8() != "one \nthree") return 102;
+    wordDeletion.setCursor(0, 0); wordDeletion.deleteWord(false); wordDeletion.undo();
+    if (wordDeletion.toUtf8() != "one two\nthree") return 103;
+    wordDeletion.setCursor(1, 3); wordDeletion.deleteToLineBoundary(false); wordDeletion.undo();
+    if (wordDeletion.toUtf8() != "one two\nthree" || wordDeletion.cursorColumn() != 3 || wordDeletion.hasSelection()) return 104;
+
+    auto formattedDocument = Document::fromUtf8("first\nsecond");
+    formattedDocument.setCursor(0, 2); formattedDocument.extendSelectionTo(1, 3);
+    if (!formattedDocument.replaceAllUtf8("first!\nsecond!")) return 105;
+    if (formattedDocument.cursorLine() != 1 || formattedDocument.cursorColumn() != 3 || formattedDocument.hasSelection()) return 106;
+    formattedDocument.undo();
+    if (formattedDocument.toUtf8() != "first\nsecond" || !formattedDocument.hasSelection() ||
+        formattedDocument.selectionStart().column != 2 || formattedDocument.selectionEnd().column != 3) return 107;
+    if (formattedDocument.replaceAllUtf8(std::string("bad\xff", 4)) || formattedDocument.toUtf8() != "first\nsecond") return 108;
+
+    auto surrounded = Document::fromUtf8("hello\nworld");
+    surrounded.setCursor(1, 3); surrounded.extendSelectionTo(0, 2);
+    if (!surrounded.surroundSelection(U'(', U')') || surrounded.toUtf8() != "he(llo\nwor)ld" ||
+        surrounded.selectionUtf8() != "llo\nwor" || surrounded.cursorLine() != 0 || surrounded.cursorColumn() != 3) return 109;
+    surrounded.undo();
+    if (surrounded.toUtf8() != "hello\nworld" || surrounded.selectionUtf8() != "llo\nwor" || surrounded.cursorColumn() != 2) return 110;
+    surrounded.redo();
+    if (surrounded.toUtf8() != "he(llo\nwor)ld" || surrounded.selectionUtf8() != "llo\nwor") return 111;
+
+    auto smartBackspace = Document::fromUtf8("      value\n\t   item\ntext  ");
+    smartBackspace.setCursor(0, 6); smartBackspace.backspace();
+    if (smartBackspace.lineUtf8(0) != "    value" || smartBackspace.cursorColumn() != 4) return 112;
+    smartBackspace.undo();
+    if (smartBackspace.lineUtf8(0) != "      value" || smartBackspace.cursorColumn() != 6) return 113;
+    smartBackspace.setCursor(1, 4); smartBackspace.backspace();
+    if (smartBackspace.lineUtf8(1) != "\titem") return 114;
+    smartBackspace.setCursor(2, 6); smartBackspace.backspace();
+    if (smartBackspace.lineUtf8(2) != "text ") return 115;
+    auto boundaries = Document::fromUtf8("first\nsecond\nlast");
+    boundaries.setCursor(1, 3); boundaries.moveDocumentStart(true);
+    if (boundaries.selectionUtf8() != "first\nsec" || boundaries.cursorLine() != 0) return 116;
+    boundaries.moveDocumentEnd(true);
+    if (boundaries.selectionUtf8() != "ond\nlast" || boundaries.cursorLine() != 2 || boundaries.cursorColumn() != 4) return 117;
+    boundaries.moveDocumentStart();
+    if (boundaries.hasSelection() || boundaries.cursorLine() != 0 || boundaries.cursorColumn() != 0) return 118;
+    auto paragraphs = Document::fromUtf8("first\ncontinued\n\nsecond\nlast");
+    paragraphs.setCursor(1, 3); paragraphs.moveParagraphUp();
+    if (paragraphs.cursorLine() != 0 || paragraphs.cursorColumn() != 0) return 119;
+    paragraphs.moveParagraphDown(true);
+    if (paragraphs.cursorLine() != 3 || paragraphs.selectionUtf8() != "first\ncontinued\n\n") return 120;
+    paragraphs.moveParagraphDown();
+    if (paragraphs.cursorLine() != 4 || paragraphs.cursorColumn() != 4 || paragraphs.hasSelection()) return 121;
+    paragraphs.moveParagraphUp();
+    if (paragraphs.cursorLine() != 3 || paragraphs.cursorColumn() != 0) return 122;
+    auto largeHistory = Document::fromUtf8(std::string(1024U * 1024U, 'a'));
+    for (int i = 0; i < 20; ++i) largeHistory.insert(U'x');
+    int undoCount = 0;
+    for (;;) {
+        const auto revision = largeHistory.revision(); largeHistory.undo();
+        if (revision == largeHistory.revision()) break;
+        ++undoCount;
+    }
+    if (undoCount < 1 || undoCount >= 20) return 123;
+    const auto beforeRedo = largeHistory.toUtf8(); largeHistory.redo();
+    if (largeHistory.toUtf8() == beforeRedo) return 124;
 
     return 0;
 }

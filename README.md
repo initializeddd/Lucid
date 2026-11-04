@@ -13,13 +13,17 @@
 Keyboard-first. Path-native. Drawn entirely on the GPU.
 
 [![CI](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-initializeddd.github.io%2FLucid-787EFF)](https://initializeddd.github.io/Lucid/)
+[![CodeQL](https://github.com/initializeddd/Lucid/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/initializeddd/Lucid/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/initializeddd/Lucid/badge)](https://securityscorecards.dev/viewer/?uri=github.com/initializeddd/Lucid)
 [![Status](https://img.shields.io/badge/status-beta-787EFF)](#downloads)
 [![License](https://img.shields.io/github/license/initializeddd/Lucid?color=787EFF)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/initializeddd/Lucid?color=787EFF&include_prereleases)](https://github.com/initializeddd/Lucid/releases)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-787EFF)](#platform-support)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-787EFF)](https://en.cppreference.com/w/cpp/20)
+[![Discussions](https://img.shields.io/badge/discussions-open-787EFF)](https://github.com/initializeddd/Lucid/discussions)
 
-[Download](#downloads) · [Getting started](docs/getting-started.md) · [Build from source](#build-from-source) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md)
+[Download](#downloads) · [Docs](https://initializeddd.github.io/Lucid/) · [Getting started](docs/getting-started.md) · [Build from source](#build-from-source) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md) · [Discussions](https://github.com/initializeddd/Lucid/discussions)
 
 </div>
 
@@ -34,6 +38,17 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 > **Beta software.** Version `v0.2.1-beta.2` includes features at different stages of maturity.
 > File formats and behavior may change. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
+
+## Screenshots
+
+![The Lucid editor showing a C++ file](docs/assets/screenshots/editor.png)
+
+![The Lucid start surface](docs/assets/screenshots/start.png)
+
+![Opening a C++ file and scrolling through the code](docs/assets/screenshots/demo.gif)
+
+A short [MP4 version](docs/assets/screenshots/demo.mp4) is available for reduced-motion or
+lower-bandwidth viewing.
 
 ## At a glance
 
@@ -73,7 +88,7 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 ## Downloads
 
-Download [Lucid v0.2.1-beta.2](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2). The repository and release are private and require GitHub access.
+Download [Lucid v0.2.1-beta.2](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2), or browse all [releases](https://github.com/initializeddd/Lucid/releases).
 
 | Platform | Artifacts | Notes |
 | --- | --- | --- |
@@ -88,11 +103,9 @@ The release includes SHA-256 checksums. Beta builds are not signed with distribu
 so macOS Gatekeeper and Windows SmartScreen may warn on first launch. BSD builds have not had a
 full graphical desktop smoke test.
 
-The installer script supports Linux, FreeBSD and OpenBSD. Its curl command works once the release
-is publicly accessible; the current private repository requires an authenticated download, and the
-script itself cannot download private release assets. Use the downloadable archives in the meantime.
-Installers register Lucid as an **Open With** option for supported text and source files without
-changing the default application.
+The installer script supports Linux, FreeBSD and OpenBSD and downloads the matching release
+archive. Installers register Lucid as an **Open With** option for supported text and source files
+without changing the default application.
 
 ### Project-wide search and replace
 
@@ -284,11 +297,11 @@ See [Building](docs/building.md) for signing, packaging, icon regeneration and v
 `animationSpeed` accepts `0.5`, `1.0` or `2.0`. `cursorStyle` accepts `line`, `block`,
 `underscore` or `kitty` (`bar` and `underline` remain accepted as aliases). `backgroundMotion`
 enables or disables the animated 3D background. Choose a scene under **Settings → Animation →
-Background scene**; scenes follow the selected primary color and dim and blur while a file is open to keep code readable. The bundled scenes
+Background scene**. **Background colors** switches between the primary-color tint and each scene's own colors. Scenes dim and blur while a file is open to keep code readable. The bundled scenes
 are rendered locally and do not require an image download. In `settings.json`, `backgroundScene`
-uses IDs `0`, `1`, `2`, and `4` through `9`: city transit, lunar horizon, mountain parallax,
-ocean lighthouse, rainy street, orbital station, forest fireflies, drafting grid, and retro landscape.
-The removed scene ID `3` falls back to city transit. If the 3D renderer or its assets are unavailable, Lucid leaves the background
+uses IDs `0`, `1`, `2`, `4`, `6`, and `7`: city transit, lunar horizon, mountain parallax,
+ocean lighthouse, orbital station, and forest fireflies. Removed scene IDs `3`, `5`, `8`, and `9`
+fall back to city transit. If the 3D renderer or its assets are unavailable, Lucid leaves the background
 clear and logs the error. `zoomFactor` accepts `0.5` through `3.0` and scales
 the whole interface, including text, layout and mouse hit testing. `theme` accepts `lucid-dark`,
 `graphite` or `lucid-light`. `primary` accepts any `#RRGGBB` color and overrides the theme accent and
@@ -317,6 +330,8 @@ in place of `Alt`:
 | Open or create a project | `Ctrl+P` / `Ctrl+O` |
 | Open or create a file by path | `Ctrl+K` / `Ctrl+N` |
 | Switch between open files | `Ctrl+E` |
+| Close selected file in switcher | `Ctrl+W` while the switcher is open |
+| Reopen last closed file | `Ctrl+Shift+E` |
 | Complete the selected suggestion | `Tab` |
 | Find in the current file | `Ctrl+F` |
 | Replace a match | `Ctrl+H` (macOS: `Command+Option+F`) |
@@ -331,17 +346,21 @@ in place of `Alt`:
 | Dismiss the Path Lens | `Escape` |
 | Save | `Ctrl+S` |
 | Close file (saves first) | `Ctrl+W` |
-| Delete line | `Ctrl+Backspace` / `Ctrl+Shift+K` |
+| Delete line | `Ctrl+Shift+K` |
+| Delete previous / next word | `Ctrl+Backspace` / `Ctrl+Delete` (macOS: Option+Backspace / Option+Delete) |
 | Insert line below / above | `Ctrl+Enter` / `Ctrl+Shift+Enter` |
 | Toggle line comment | `Ctrl+/` |
 | Indent / outdent selection | `Tab` / `Shift+Tab` |
 | Move current line | `Alt+Up` / `Alt+Down` |
+| Beginning / end of document | `Ctrl+Home` / `Ctrl+End` (macOS: Command+Up / Command+Down); add Shift to select |
+| Previous / next paragraph | `Ctrl+Up` / `Ctrl+Down` (macOS: Command+Option+Up / Down); add Shift to select |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` |
 | Run compile function under caret | `Ctrl+R` |
 | Search project compile functions | `Ctrl+Shift+R` |
 | Open settings | `Ctrl+,` |
 | Select all / copy / cut / paste | `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
 | Duplicate line | `Ctrl+D` |
+| Join lines | `Ctrl+J` |
 | Delete file / project | `Ctrl+Shift+Backspace` / `Ctrl+Shift+Alt+Backspace` |
 
 Use `Ctrl+E` (Command+E on macOS) to open a temporary list of open files. Opening another
@@ -350,9 +369,16 @@ position and undo history. If the file changed on disk while inactive, Lucid rel
 Closing the current file returns to the most recently active open file.
 
 Find searches case-sensitive text in the open file; Enter and Shift+Enter move through matches.
+In project search, Ctrl+Shift+W (Command+Shift+W on macOS) toggles whole-word matching;
+replacement applies only the matches shown in the search results.
+In replacement review, open a file and press Enter on a match to include or exclude it.
+Ctrl+Up/Down (Command+Up/Down on macOS) recalls project searches from the current session.
+Ctrl+Shift+O (Command+Shift+O on macOS) returns to the last project-search results.
 Replace opens a find prompt, then Enter opens the replacement prompt. Enter replaces the selected
 match (an empty replacement deletes it), and returns to the find prompt. Escape closes the prompt;
 replacements can be undone normally.
+Undo history is bounded by both the number and memory size of stored snapshots; older
+steps may be discarded sooner for large files. Local recovery history is separate.
 
 ### Language intelligence
 
@@ -360,7 +386,10 @@ For C and C++ projects Lucid starts `clangd` from your PATH, if available, to pr
 and supported completion suggestions. Install LLVM/clangd separately and provide a
 `compile_commands.json` for the most accurate project results. Use Ctrl+Shift+Space
 (Command+Shift+Space on macOS) to open completion, F12 to find a definition, Shift+F12 to
-find references, and Alt+Shift+F (Option+Shift+F on macOS) to format the current buffer.
+find references, and Alt+Shift+F (Option+Shift+F on macOS) to format the current buffer
+or the selected range when text is selected.
+F8 and Shift+F8 move to the next or previous diagnostic in the current file;
+Ctrl+F8 (Command+F8 on macOS) opens the diagnostic list.
 Navigation currently opens locations inside the project only. Formatting can be undone and
 does not save the file automatically. When clangd is unavailable, completion falls back to
 function names found in the current file and a bounded scan of project files. Workspace rename,
@@ -399,8 +428,10 @@ Windows and Linux screen-reader integration are not implemented yet.
 ## Sessions and recovery
 
 Lucid saves recent projects and, on a clean exit, the active project and open
-file positions. It reopens available text files on the next launch; missing or
-unsupported files are skipped. An explicit file supplied at launch takes
+file positions. On the next launch, choose whether to restore that workspace or
+start fresh. Select **Don't show again** before choosing to remember that action;
+change it later under **Settings → Editor → Startup session**. Restoring skips missing or
+unsupported files. An explicit file supplied at launch takes
 precedence. If crash snapshots are available, Lucid presents recovery instead
 of automatically reopening the saved file context. Session records contain
 paths and positions, not unsaved text or undo history.
@@ -442,10 +473,11 @@ filesystem or concurrent-write failure; keep independent backups.
 
 ## Modules
 
-Lucid's module preview supports declarative text commands in a temporary,
-keyboard-accessible manager. Modules list their requested access and start
-disabled; requests for project files, network, processes, or settings cannot be
-enabled yet. See the [module guide](docs/modules.md) for the format and setup.
+Lucid's module manager supports declarative text commands in a temporary,
+keyboard-accessible surface. Preview a local manifest or GitHub package before
+installing it; modules list requested access and start disabled. Access to files,
+network, processes, or settings cannot be enabled yet. See the
+[module guide](docs/modules.md) for the format and setup.
 
 ## AI settings
 
@@ -519,20 +551,24 @@ stores its selected debug executable, source and breakpoints, and records debug 
 For C/C++ programs on macOS, build the executable with debug symbols (for example,
 `-g -O0`), open its source file, and use **Command+Shift+B** to toggle a
 breakpoint on the current line. Open **Run > Debugger** with **Command+Shift+D**,
-choose **Start debugging**, and enter the executable's path relative to the
-project. The executable must already exist and contain debug information. On macOS,
+choose **Start debugging**, enter the executable's path relative to the
+project, then enter arguments as a JSON array of strings (or accept `[]` for none)
+and a working directory relative to the project (`.` uses the project root).
+Finally, provide environment overrides as a JSON object of strings, or accept
+`{}` to use the inherited environment.
+The executable must already exist and contain debug information. On macOS,
 Lucid uses `xcrun lldb-dap` from the Xcode toolchain. On Linux, install LLVM's
 `lldb-dap` (versioned executable names are also searched). On Windows, install
 LLVM with `lldb-dap.exe` on `PATH` or in `Program Files/LLVM/bin`. Lucid does
 not install the adapter automatically. Linux and Windows need native validation.
 
 While stopped, the debugger menu offers continue, step over, step into, step out,
-a call stack, expandable variables, and output. A `B` marks a breakpoint, `>`
+a call stack, thread selection, expandable variables, and output. A `B` marks a breakpoint, `>`
 marks the stopped line, and an asterisk marks a variable that changed after a
 step. Selecting a stack frame changes the displayed variables. The current
 implementation can send breakpoints for multiple source files during a session.
 Task workspaces currently persist only one source file's breakpoints. The debugger
-does not yet provide launch arguments, attach, or full thread selection. Breakpoints are line-based and do not automatically
+does not yet provide attach, and thread behavior depends on the debug adapter. Breakpoints are line-based and do not automatically
 move with edits. Stop the debugger before switching tasks or projects.
 
 **Explain paused state with AI** uses the debugger provider selected in AI
@@ -555,7 +591,7 @@ $cmake --build %project%/build
 ```
 
 Use zero or more platform suffixes: `:macOS`, `:windows`, `:linux`, `:freebsd` or `:openbsd`. Unqualified functions run on
-every platform. Variables are expanded before execution:
+every platform. Lucid quotes expanded values for the shell, including paths containing spaces; existing single or double quotes around a variable are supported. These variables are available:
 
 | Variable | Value |
 | --- | --- |
@@ -585,7 +621,8 @@ invalidated when a file is saved or deleted.
 Lucid/
 ├── assets/          Fonts, themes, shaders and branding
 ├── cmake/           Build configuration and dependency helpers
-├── docs/            Guides, architecture and roadmap
+├── docs/            Guides, architecture, roadmap and docs site assets
+├── mkdocs.yml       Documentation site configuration
 ├── packaging/       Platform installers and integration
 ├── scripts/         Development and packaging helpers
 ├── src/ai/          Local model download and inference
@@ -621,12 +658,23 @@ ctest --test-dir build -C Release --output-on-failure   # multi-config generator
 Debug builds enable `VK_LAYER_KHRONOS_validation` automatically when the layer is available; the
 renderer logs a warning and continues if it is missing.
 
+## Documentation
+
+Full guides are published at <https://initializeddd.github.io/Lucid/>:
+
+- [Getting started](docs/getting-started.md)
+- [Building from source](docs/building.md)
+- [Architecture](docs/architecture.md)
+- [Modules](docs/modules.md)
+- [Roadmap](docs/roadmap.md)
+
 ## Contributing
 
 Use [issues](https://github.com/initializeddd/Lucid/issues) for reproducible bugs and scoped feature
 requests, and [Discussions](https://github.com/initializeddd/Lucid/discussions) for questions and
-early ideas. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For security
-reports, follow [SECURITY.md](SECURITY.md); do not post sensitive details in an issue.
+early ideas. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and
+[SUPPORT.md](SUPPORT.md) if you are unsure where a report belongs. For security reports, follow
+[SECURITY.md](SECURITY.md); do not post sensitive details in an issue.
 
 ## License
 

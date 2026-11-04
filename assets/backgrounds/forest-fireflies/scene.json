@@ -123,7 +123,7 @@
     },
     {
       "mesh": "forest-tent-entrance.obj",
-      "group": "forest",
+      "group": "tent",
       "color": [
         0.09000000357627869,
         0.10999999940395355,
@@ -134,7 +134,7 @@
     },
     {
       "mesh": "forest-tent-fabric.obj",
-      "group": "forest",
+      "group": "tent",
       "color": [
         0.3400000035762787,
         0.3700000047683716,
@@ -164,6 +164,17 @@
         1.0
       ],
       "emission": 1.2
+    },
+    {
+      "mesh": "tent-camp-wood.obj",
+      "group": "tent",
+      "color": [
+        0.23999999463558197,
+        0.25999999046325684,
+        0.3199999928474426,
+        1.0
+      ],
+      "emission": 0.0
     }
   ]
 }

@@ -15,16 +15,17 @@ public:
     Background3DScene(const Device& device, std::string_view sceneName);
     void draw(VkCommandBuffer command, const Background3DPipeline& pipeline,
               VkExtent2D extent, float time, float dim, const std::array<float,4>& background,
-              const std::array<float,3>& primary) const;
+              const std::array<float,3>& primary, bool naturalColors) const;
 private:
     struct Part {
         std::unique_ptr<Buffer> vertices;
         std::unique_ptr<Buffer> indices;
         std::uint32_t indexCount = 0;
         std::array<float,4> color{};
+        std::array<float,4> naturalColor{};
         float emission = 0.0F;
         float surface = 0.0F;
-        enum class Motion { None, Train, Satellite, Clouds, Ocean, Beacon, Rain, Station, Fireflies, Tracer, RetroGrid, RetroSun, LunarEarth, Vegetation, Stars, Aircraft, Flame, Birds, Ripples, Meteor, Compass, Sparks } motion = Motion::None;
+        enum class Motion { None, Train, Satellite, Clouds, Ocean, Beacon, Rain, Station, Planet, PlanetClouds, Tent, Fireflies, Tracer, RetroGrid, RetroSun, LunarEarth, Vegetation, Stars, Aircraft, Flame, Birds, Ripples, Meteor, Compass, Sparks } motion = Motion::None;
     };
     std::vector<Part> m_parts;
     bool m_lunar = false;

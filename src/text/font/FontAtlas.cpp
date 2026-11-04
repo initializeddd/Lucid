@@ -221,9 +221,16 @@ FontAtlas::FontAtlas(int pixelHeight) : m_pixelHeight(pixelHeight) {
             const int controlResult = stbtt_PackFontRange(
                 &packContext, fontData.data(), 0, static_cast<float>(pixelHeight),
                 static_cast<int>(kControlCodepoint), 1, &packedControl);
+            std::array<stbtt_packedchar, kPunctuationCodepoints.size()> packedPunctuation{};
+            bool punctuationPacked = true;
+            for (std::size_t i = 0; i < packedPunctuation.size(); ++i) {
+                punctuationPacked &= stbtt_PackFontRange(&packContext, fontData.data(), 0,
+                    static_cast<float>(pixelHeight), static_cast<int>(kPunctuationCodepoints[i]),
+                    1, &packedPunctuation[i]) != 0;
+            }
             stbtt_PackEnd(&packContext);
 
-            if (packedResult == 0) {
+            if (packedResult == 0 || !punctuationPacked) {
                 continue;
             }
 
@@ -287,6 +294,8 @@ FontAtlas::FontAtlas(int pixelHeight) : m_pixelHeight(pixelHeight) {
             if (controlResult != 0) {
                 fillExtraGlyph(packedControl, m_controlGlyph);
             }
+            for (std::size_t i = 0; i < packedPunctuation.size(); ++i)
+                fillExtraGlyph(packedPunctuation[i], m_punctuationGlyphs[i]);
 
             m_width = atlasSize;
             m_height = atlasSize;
@@ -303,6 +312,8 @@ FontAtlas::FontAtlas(int pixelHeight) : m_pixelHeight(pixelHeight) {
 }
 
 const Glyph& FontAtlas::glyph(char32_t codepoint) const noexcept {
+    for (std::size_t i = 0; i < kPunctuationCodepoints.size(); ++i)
+        if (codepoint == kPunctuationCodepoints[i]) return m_punctuationGlyphs[i];
     if (codepoint == kCommandCodepoint) {
         return m_commandGlyph;
     }

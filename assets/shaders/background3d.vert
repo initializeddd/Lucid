@@ -6,7 +6,22 @@ layout(location = 1) out vec3 vPosition;
 layout(push_constant) uniform ScenePush { mat4 mvp; vec4 color; vec4 animation; vec4 background; vec4 material; } scene;
 void main() {
     vec3 animated = position;
-    if (scene.animation.x > 12.5 && scene.animation.x < 13.5) {
+    if (scene.animation.x > 14.5 && scene.animation.x < 15.5) {
+        // Wind bends the tent as a whole while its base stays pegged down.
+        // The subdivided canvas billows between its seams on alternating sides.
+        float height = clamp((position.y - 0.04) / 1.61, 0.0, 1.0);
+        float wind = sin(scene.animation.y * 0.4) + 0.3 * sin(scene.animation.y * 0.8 + 0.7);
+        animated.x += height * 0.13 * wind;
+        animated.z += height * 0.035 * sin(scene.animation.y * 0.3 + 0.5);
+        if (scene.material.y > 22.5 && scene.material.y < 23.5) {
+            float across = sin(3.14159265 * height);
+            float along = sin(3.14159265 * clamp((position.z + 1.5) / 1.6, 0.0, 1.0));
+            float side = sign(position.x - 1.0);
+            float billow = 0.13 * across * along * sin(scene.animation.y * 0.8 + position.z * 2.4 + side);
+            animated.x += side * billow;
+            animated.y += billow * 0.12;
+        }
+    } else if (scene.animation.x > 12.5 && scene.animation.x < 13.5) {
         float phase = fract(sin(dot(floor(position.xz * 5.0), vec2(127.1,311.7))) * 43758.5453);
         float rise = fract(scene.animation.y * 0.45 + phase);
         animated.y += rise * 1.5;
@@ -42,5 +57,9 @@ void main() {
     if (scene.animation.x > 7.5 && scene.animation.x < 8.5) gl_Position.z = gl_Position.w * 0.99999;
     float c = cos(scene.animation.w), s = sin(scene.animation.w);
     vNormal = vec3(normal.x * c + normal.z * s, normal.y, -normal.x * s + normal.z * c);
+    if (scene.animation.x > 13.5 && scene.animation.x < 14.5) {
+        const float ct = cos(0.38), st = sin(0.38);
+        vNormal.xy = mat2(ct, st, -st, ct) * vNormal.xy;
+    }
     vPosition = position;
 }

@@ -16,5 +16,13 @@ int main() {
     if (!match || match->column != 1) return 6;
     match = findText(repeated.lines(), U"aa", {0, 1}, true);
     if (!match || match->column != 0) return 7;
+    match = findText(repeated.lines(), U"aa", {0, 99});
+    if (!match || match->column != 0) return 8;
+    match = findText(repeated.lines(), U"aa", {0, 0}, true);
+    if (!match || match->column != 2) return 9;
+    match = findText(doc.lines(), U"alpha", {99, 0}, true);
+    if (!match || match->line != 1 || match->column != 5) return 10;
+    match = findText(doc.lines(), U"alpha", {99, 0});
+    if (!match || match->line != 0 || match->column != 0) return 11;
     return 0;
 }

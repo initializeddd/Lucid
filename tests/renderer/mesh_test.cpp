@@ -49,11 +49,8 @@ int main(int argc, char** argv) {
             {"lunar-horizon", {"satellite", "meteor"}},
             {"mountain-parallax", {"clouds", "birds"}},
             {"ocean-lighthouse", {"ocean", "beacon", "birds"}},
-            {"rainy-street", {"rain", "ripples"}},
             {"orbital-station", {"station", "meteor"}},
-            {"forest-fireflies", {"fireflies", "flame", "sparks"}},
-            {"drafting-grid", {"tracer", "compass"}},
-            {"retro-landscape", {"retro-grid", "retro-sun"}},
+            {"forest-fireflies", {"fireflies", "flame", "sparks", "tent"}},
         };
         const auto expected = requiredGroups.find(directory.filename().string());
         if (expected == requiredGroups.end()) return 14;

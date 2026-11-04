@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,7 @@ public:
 
 private:
     void sendNextCommand();
+    void flushInput();
     void pumpOutput();
     void reap() noexcept;
 
@@ -44,8 +46,10 @@ private:
     std::vector<std::string> m_commands;
     std::vector<int> m_exitCodes;
     std::string m_marker;
+    std::string m_pendingInput;
     std::string m_rawOutput;
     std::string m_output;
+    std::chrono::steady_clock::time_point m_commandStarted{};
 };
 
 } // namespace lucid::platform

@@ -1,0 +1,28 @@
+name: Publish Lucid modules
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - lucid-module-publish
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oras-project/setup-oras@v1
+        with:
+          version: 1.2.3
+      - name: Sign in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | oras login ghcr.io --username '${{ github.actor }}' --password-stdin
+      - name: Publish modules and generate catalog
+        run: python3 tools/modules/publish.py --publish
+      - name: Verify published packages
+        run: python3 tools/modules/publish.py --verify

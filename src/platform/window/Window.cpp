@@ -68,6 +68,8 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
         return input::Key::Home;
     case GLFW_KEY_END:
         return input::Key::End;
+    case GLFW_KEY_F8:
+        return input::Key::F8;
     case GLFW_KEY_F12:
         return input::Key::F12;
     case GLFW_KEY_B: return input::Key::B;
@@ -83,6 +85,8 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
         return input::Key::Comma;
     case GLFW_KEY_H:
         return input::Key::H;
+    case GLFW_KEY_J:
+        return input::Key::J;
     case GLFW_KEY_E:
         return input::Key::E;
     case GLFW_KEY_G: return input::Key::G;

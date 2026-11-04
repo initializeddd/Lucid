@@ -1,4 +1,5 @@
 #include "modules/Modules.hpp"
+#include "editor/document/Document.hpp"
 #include "editor/json/Json.hpp"
 #include <algorithm>
 #include <fstream>
@@ -27,16 +28,16 @@ bool safeDirectory(const std::filesystem::path& root, std::string_view id, std::
     if (ec || status.type() != std::filesystem::file_type::directory) { error = "Module directory is missing or is a link"; return false; }
     return true;
 }
-Module readModule(const std::filesystem::path& dir, std::string id) {
+Module parseManifest(std::string id, std::string_view text) {
     Module m; m.id = std::move(id); m.name = m.id;
-    std::error_code ec; auto status = std::filesystem::symlink_status(dir / "module.json", ec);
-    if (ec || status.type() != std::filesystem::file_type::regular) { m.error = "Missing or unsafe module.json"; return m; }
-    auto size = std::filesystem::file_size(dir / "module.json", ec);
-    if (ec || size > 65536) { m.error = "Module manifest is too large"; return m; }
-    std::ifstream input(dir / "module.json", std::ios::binary);
-    std::string text((std::istreambuf_iterator<char>(input)), {});
+    if (!validId(m.id)) { m.error = "Invalid module ID"; return m; }
+    if (text.size() > 65536) { m.error = "Module manifest is too large"; return m; }
     editor::JsonError jsonError; const auto json = editor::parseJson(text, jsonError);
-    if (!input || !json || json->type != JsonType::Object || !stringField(*json, "name", m.name, 128) || !stringField(*json, "version", m.version, 64)) { m.error = "Invalid module manifest"; return m; }
+    if (!json || json->type != JsonType::Object || !stringField(*json, "name", m.name, 128) || !stringField(*json, "version", m.version, 64)) { m.error = "Invalid module manifest"; return m; }
+    if (const auto* description = json->find("description")) {
+        if (description->type != JsonType::String || description->stringValue.size() > 512) { m.error = "Invalid module description"; return m; }
+        m.description = description->stringValue;
+    }
     const auto* p = json->find("permissions"); const auto* c = json->find("commands");
     if (!p || p->type != JsonType::Object || p->children.size() != 4 || !boolField(*p, "project", m.project) ||
         !boolField(*p, "network", m.network) || !boolField(*p, "processes", m.processes) || !boolField(*p, "settings", m.settings) ||
@@ -44,14 +45,58 @@ Module readModule(const std::filesystem::path& dir, std::string id) {
     for (const auto& item : c->children) {
         Command command;
         if (item.type != JsonType::Object || !stringField(item, "title", command.title, 128) || !stringField(item, "insert", command.insert, 4096)) { m.error = "Invalid text command"; return m; }
+        std::string textError;
+        if (std::any_of(command.insert.begin(), command.insert.end(), [](unsigned char c) {
+                return (c < 32 && c != '\n' && c != '\r' && c != '\t') || c == 127;
+            }) || !editor::Document::canEditLosslessly(command.insert, textError)) {
+            m.error = "Module command contains unsupported text"; return m;
+        }
         m.commands.push_back(std::move(command));
     }
     m.valid = true;
-    const auto marker = std::filesystem::symlink_status(dir / ".enabled", ec);
-    m.enabled = !ec && marker.type() == std::filesystem::file_type::directory && !m.project && !m.network && !m.processes && !m.settings;
     if (m.project || m.network || m.processes || m.settings) m.error = "Requested permissions are not supported";
     return m;
 }
+Module readModule(const std::filesystem::path& dir, std::string id) {
+    Module m; m.id = id; m.name = id;
+    std::error_code ec; auto status = std::filesystem::symlink_status(dir / "module.json", ec);
+    if (ec || status.type() != std::filesystem::file_type::regular) { m.error = "Missing or unsafe module.json"; return m; }
+    auto size = std::filesystem::file_size(dir / "module.json", ec);
+    if (ec || size > 65536) { m.error = "Module manifest is too large"; return m; }
+    std::ifstream input(dir / "module.json", std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(input)), {});
+    if (!input) { m.error = "Cannot read module manifest"; return m; }
+    m = parseManifest(std::move(id), text);
+    if (!m.valid) return m;
+    const auto marker = std::filesystem::symlink_status(dir / ".enabled", ec);
+    m.enabled = !ec && marker.type() == std::filesystem::file_type::directory && !m.project && !m.network && !m.processes && !m.settings;
+    return m;
+}
+}
+Module preview(std::string_view id, std::string_view manifest) {
+    return parseManifest(std::string(id), manifest);
+}
+bool install(const std::filesystem::path& root, std::string_view id,
+             std::string_view manifest, std::string& error) {
+    const auto module = preview(id, manifest);
+    if (!module.valid || !module.error.empty()) { error = module.error; return false; }
+    if (root.empty()) { error = "Module storage unavailable"; return false; }
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    if (ec) { error = "Cannot open module storage: " + ec.message(); return false; }
+    const auto dir = root / std::string(id);
+    if (!std::filesystem::create_directory(dir, ec)) {
+        error = ec ? "Cannot create module directory: " + ec.message() : "A module with this ID is already installed";
+        return false;
+    }
+    std::ofstream output(dir / "module.json", std::ios::binary | std::ios::trunc);
+    output.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
+    output.close();
+    if (!output) {
+        std::error_code ignored; std::filesystem::remove_all(dir, ignored);
+        error = "Could not save module manifest"; return false;
+    }
+    error.clear(); return true;
 }
 bool list(const std::filesystem::path& root, std::vector<Module>& result, std::string& error) {
     result.clear(); error.clear(); if (root.empty()) { error = "Module storage unavailable"; return false; }

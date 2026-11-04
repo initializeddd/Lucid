@@ -4,7 +4,7 @@ Lucid builds with CMake on macOS, Linux, Windows, FreeBSD and OpenBSD. The proje
 C++20 compiler, GLFW 3.3+, the Vulkan 1.2 headers and loader, and `glslangValidator`. GLFW is
 fetched automatically when a system installation is not found.
 
-For the short version, see the [README](../README.md#build-from-source). This page covers platform
+For the short version, see the [README](https://github.com/initializeddd/Lucid/blob/main/README.md#build-from-source). This page covers platform
 details, packaging, signing and validation.
 
 ## Common options

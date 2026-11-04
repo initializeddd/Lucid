@@ -1,4 +1,5 @@
 #include "ui/search/SearchBar.hpp"
+#include "text/Utf8.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -17,11 +18,33 @@ constexpr float kSlideDistance = 12.0F;
 constexpr float kMinScaleX = 0.96F;
 constexpr float kSquash = 0.35F;
 
+std::size_t previousCharacter(std::string_view value, std::size_t offset) {
+    if (offset == 0) return 0;
+    --offset;
+    while (offset > 0 && (static_cast<unsigned char>(value[offset]) & 0xc0U) == 0x80U) --offset;
+    return offset;
+}
+
+std::size_t nextCharacter(std::string_view value, std::size_t offset) {
+    if (offset >= value.size()) return value.size();
+    ++offset;
+    while (offset < value.size() && (static_cast<unsigned char>(value[offset]) & 0xc0U) == 0x80U) ++offset;
+    return offset;
+}
+
+int characterGroup(unsigned char c) {
+    if (c == ' ' || c == '\t') return 0;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_' || c >= 128) return 1;
+    return 2;
+}
+
 } // namespace
 
 void SearchBar::open(PromptKind kind) {
     if (!m_open || kind != m_kind) {
         m_query.clear();
+        m_cursor = m_anchor = 0;
     }
 
     if (m_phase == Phase::Hidden) {
@@ -45,7 +68,7 @@ void SearchBar::close() {
 }
 
 void SearchBar::toggle(PromptKind kind) {
-    if (m_visible && m_kind == kind) {
+    if (m_open && m_kind == kind) {
         close();
     } else {
         open(kind);
@@ -70,14 +93,112 @@ void SearchBar::append(char32_t codepoint) {
         encoded.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
         encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
     }
-    if (m_query.size() + encoded.size() <= kMaxQueryLength) m_query += encoded;
+    if (m_query.size() - (selectionEnd() - selectionStart()) + encoded.size() > kMaxQueryLength) return;
+    deleteSelection();
+    m_query.insert(m_cursor, encoded);
+    m_cursor += encoded.size();
+    m_anchor = m_cursor;
 }
 
 void SearchBar::backspace() {
-    if (!m_open || m_query.empty()) return;
-    std::size_t start = m_query.size() - 1;
+    if (!m_open) return;
+    if (hasSelection()) { deleteSelection(); return; }
+    if (m_cursor == 0) return;
+    std::size_t start = m_cursor - 1;
     while (start > 0 && (static_cast<unsigned char>(m_query[start]) & 0xC0) == 0x80) --start;
-    m_query.erase(start);
+    m_query.erase(start, m_cursor - start);
+    m_cursor = m_anchor = start;
+}
+
+void SearchBar::deleteSelection() {
+    const auto start = selectionStart();
+    m_query.erase(start, selectionEnd() - start);
+    m_cursor = m_anchor = start;
+}
+
+void SearchBar::deleteForward() {
+    if (!m_open) return;
+    if (hasSelection()) { deleteSelection(); return; }
+    if (m_cursor >= m_query.size()) return;
+    std::size_t end = m_cursor + 1;
+    while (end < m_query.size() && (static_cast<unsigned char>(m_query[end]) & 0xC0) == 0x80) ++end;
+    m_query.erase(m_cursor, end - m_cursor);
+}
+
+void SearchBar::moveLeft(bool extend) {
+    if (!m_open) return;
+    if (!extend && hasSelection()) m_cursor = selectionStart();
+    else if (m_cursor > 0) {
+        --m_cursor;
+        while (m_cursor > 0 && (static_cast<unsigned char>(m_query[m_cursor]) & 0xC0) == 0x80) --m_cursor;
+    }
+    if (!extend) m_anchor = m_cursor;
+}
+
+void SearchBar::moveRight(bool extend) {
+    if (!m_open) return;
+    if (!extend && hasSelection()) m_cursor = selectionEnd();
+    else if (m_cursor < m_query.size()) {
+        ++m_cursor;
+        while (m_cursor < m_query.size() && (static_cast<unsigned char>(m_query[m_cursor]) & 0xC0) == 0x80) ++m_cursor;
+    }
+    if (!extend) m_anchor = m_cursor;
+}
+
+void SearchBar::moveWordLeft(bool extend) {
+    if (!m_open) return;
+    if (!extend && hasSelection()) { m_cursor = m_anchor = selectionStart(); return; }
+    while (m_cursor > 0 && characterGroup(static_cast<unsigned char>(m_query[previousCharacter(m_query, m_cursor)])) == 0)
+        m_cursor = previousCharacter(m_query, m_cursor);
+    if (m_cursor > 0) {
+        const int group = characterGroup(static_cast<unsigned char>(m_query[previousCharacter(m_query, m_cursor)]));
+        while (m_cursor > 0 && characterGroup(static_cast<unsigned char>(m_query[previousCharacter(m_query, m_cursor)])) == group)
+            m_cursor = previousCharacter(m_query, m_cursor);
+    }
+    if (!extend) m_anchor = m_cursor;
+}
+
+void SearchBar::moveWordRight(bool extend) {
+    if (!m_open) return;
+    if (!extend && hasSelection()) { m_cursor = m_anchor = selectionEnd(); return; }
+    if (m_cursor < m_query.size()) {
+        const int group = characterGroup(static_cast<unsigned char>(m_query[m_cursor]));
+        while (m_cursor < m_query.size() && characterGroup(static_cast<unsigned char>(m_query[m_cursor])) == group)
+            m_cursor = nextCharacter(m_query, m_cursor);
+    }
+    while (m_cursor < m_query.size() && characterGroup(static_cast<unsigned char>(m_query[m_cursor])) == 0)
+        m_cursor = nextCharacter(m_query, m_cursor);
+    if (!extend) m_anchor = m_cursor;
+}
+
+void SearchBar::setCursor(std::size_t offset, bool extend) {
+    if (!m_open) return;
+    m_cursor = std::min(offset, m_query.size());
+    while (m_cursor > 0 && m_cursor < m_query.size() &&
+           (static_cast<unsigned char>(m_query[m_cursor]) & 0xc0U) == 0x80U) --m_cursor;
+    if (!extend) m_anchor = m_cursor;
+}
+
+void SearchBar::moveHome(bool extend) { if (m_open) { m_cursor = 0; if (!extend) m_anchor = m_cursor; } }
+void SearchBar::moveEnd(bool extend) { if (m_open) { m_cursor = m_query.size(); if (!extend) m_anchor = m_cursor; } }
+void SearchBar::selectAll() { if (m_open) { m_anchor = 0; m_cursor = m_query.size(); } }
+
+bool SearchBar::appendUtf8(std::string_view text) {
+    if (!m_open) return false;
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const char32_t codepoint = lucid::text::nextUtf8(text, offset);
+        // Prompts are single-line: avoid silently joining separate pasted lines.
+        if (codepoint == U'\n' || codepoint == U'\r') return false;
+        if (codepoint == U'\t' || codepoint >= 32) {
+            const auto before = m_query;
+            const auto beforeCursor = m_cursor;
+            const auto beforeAnchor = m_anchor;
+            append(codepoint == U'\t' ? U' ' : codepoint);
+            if (m_query == before && m_cursor == beforeCursor && m_anchor == beforeAnchor) return false; // The next character does not fit.
+        }
+    }
+    return true;
 }
 
 void SearchBar::setQuery(std::string query) {
@@ -87,6 +208,7 @@ void SearchBar::setQuery(std::string query) {
         query.resize(end);
     }
     m_query = std::move(query);
+    m_cursor = m_anchor = m_query.size();
 }
 
 void SearchBar::update(double timeSeconds, float animationSpeed) {
@@ -126,6 +248,7 @@ void SearchBar::update(double timeSeconds, float animationSpeed) {
         m_value = 0.0F;
         m_velocity = 0.0F;
         m_query.clear();
+        m_cursor = m_anchor = 0;
         return;
     }
 
@@ -141,6 +264,9 @@ FrameState SearchBar::frameState(double timeSeconds, float animationSpeed) {
     FrameState state;
     state.commandVisible = m_visible;
     state.commandQuery = m_query;
+    state.commandCursor = m_cursor;
+    state.commandSelectionStart = selectionStart();
+    state.commandSelectionEnd = selectionEnd();
     state.commandKind = m_kind;
     state.timeSeconds = timeSeconds;
 

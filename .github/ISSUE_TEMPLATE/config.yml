@@ -2,10 +2,13 @@ blank_issues_enabled: false
 contact_links:
   - name: Security report
     url: https://github.com/initializeddd/Lucid/security/policy
-    about: Read the private security reporting instructions.
+    about: Read the security policy and report vulnerabilities privately.
   - name: Questions and ideas
     url: https://github.com/initializeddd/Lucid/discussions
     about: Ask questions or discuss an idea before opening an issue.
+  - name: Support
+    url: https://github.com/initializeddd/Lucid/blob/main/SUPPORT.md
+    about: Find the right place for questions, bugs and security reports.
   - name: Documentation
-    url: https://github.com/initializeddd/Lucid/tree/main/docs
-    about: Read the architecture, build and getting-started guides.
+    url: https://initializeddd.github.io/Lucid/
+    about: Read the getting-started, build and architecture guides.

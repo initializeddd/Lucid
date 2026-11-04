@@ -15,6 +15,13 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
+#if defined(__APPLE__)
+#include <stdio.h>
+#endif
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/xattr.h>
 #endif
@@ -23,7 +30,20 @@
 namespace lucid::workspace {
 namespace {
 
-constexpr std::uintmax_t kMaxFileSize = 16U * 1024U * 1024U;
+#if !defined(_WIN32)
+bool installNewFile(const std::filesystem::path& temporary, const std::filesystem::path& destination) {
+#if defined(__APPLE__)
+    if (::renamex_np(temporary.c_str(), destination.c_str(), RENAME_EXCL) == 0) return true;
+    if (errno != ENOTSUP && errno != EINVAL) return false;
+#elif defined(__linux__) && defined(SYS_renameat2)
+    if (::syscall(SYS_renameat2, AT_FDCWD, temporary.c_str(), AT_FDCWD, destination.c_str(), RENAME_NOREPLACE) == 0) return true;
+    if (errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP) return false;
+#endif
+    if (::link(temporary.c_str(), destination.c_str()) != 0) return false;
+    (void)::unlink(temporary.c_str());
+    return true;
+}
+#endif
 
 #if defined(__linux__) || defined(__APPLE__)
 bool copyExtendedAttributes(int source, int target) {
@@ -97,7 +117,7 @@ bool copyExtendedAttributes(int source, int target) {
 Project::Project(std::filesystem::path root) : m_root(std::move(root)) {}
 
 Project Project::openOrCreate(const std::filesystem::path& path, bool& created,
-                              std::string& error, bool eagerIndex) {
+                              std::string& error, bool eagerIndex, bool allowCreate) {
     created = false;
     error.clear();
 
@@ -119,6 +139,10 @@ Project Project::openOrCreate(const std::filesystem::path& path, bool& created,
             return {};
         }
     } else {
+        if (!allowCreate) {
+            error = pathError("Project directory is unavailable", path);
+            return {};
+        }
         if (!std::filesystem::create_directories(path, filesystemError) || filesystemError) {
             error = pathError("Could not create project directory", path);
             return {};
@@ -143,20 +167,22 @@ std::string Project::name() const {
     return filename.empty() ? m_root.string() : filename;
 }
 
-void Project::refresh() {
+void Project::refresh(bool* complete, const std::atomic_bool* cancel) {
     m_files.clear();
     m_directories.clear();
+    if (complete) *complete = false;
 
     std::error_code error;
-    if (m_root.empty() || !std::filesystem::is_directory(m_root, error) || error) {
+    if ((cancel && cancel->load()) || m_root.empty() || !std::filesystem::is_directory(m_root, error) || error) {
         return;
     }
 
     std::filesystem::recursive_directory_iterator iterator(
-        m_root, std::filesystem::directory_options::skip_permission_denied, error);
+        m_root, complete ? std::filesystem::directory_options::none : std::filesystem::directory_options::skip_permission_denied, error);
     const std::filesystem::recursive_directory_iterator end;
 
     while (!error && iterator != end) {
+        if (cancel && cancel->load()) return;
         const std::filesystem::directory_entry& entry = *iterator;
         const std::string filename = entry.path().filename().string();
 
@@ -180,11 +206,15 @@ void Project::refresh() {
             }
         }
 
+        if (entryError && complete) { error = entryError; break; }
+
         iterator.increment(error);
     }
 
+    if (cancel && cancel->load()) return;
     std::sort(m_files.begin(), m_files.end());
     std::sort(m_directories.begin(), m_directories.end());
+    if (complete) *complete = !error && !(cancel && cancel->load());
 }
 
 std::filesystem::path Project::resolve(std::string_view relative, std::string& error) const {
@@ -283,7 +313,7 @@ bool Project::readFile(std::string_view relative, std::string& content,
         error = filesystemError.message();
         return false;
     }
-    if (size > kMaxFileSize) {
+    if (size > maxFileSize) {
         error = "File is too large to open";
         return false;
     }
@@ -294,18 +324,24 @@ bool Project::readFile(std::string_view relative, std::string& content,
         return false;
     }
 
-    content.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    if (!file.eof() && file.fail()) {
-        error = pathError("Could not read file", path);
-        content.clear();
-        return false;
+    std::array<char, 64U * 1024U> buffer{};
+    while (file) {
+        file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = static_cast<std::size_t>(file.gcount());
+        if (count > maxFileSize - content.size()) {
+            error = "File is too large to open"; content.clear(); return false;
+        }
+        content.append(buffer.data(), count);
+    }
+    if (file.bad() || !file.eof()) {
+        error = pathError("Could not read file", path); content.clear(); return false;
     }
 
     return true;
 }
 
 bool Project::writeFile(std::string_view relative, std::string_view content,
-                        std::string& error, const std::string* expected) {
+                        std::string& error, const std::string* expected, bool createOnly) {
     error.clear();
 
     const std::filesystem::path path = resolve(relative, error);
@@ -337,6 +373,7 @@ bool Project::writeFile(std::string_view relative, std::string_view content,
     const DWORD originalAttributes = GetFileAttributesW(path.c_str());
     const bool hadOriginal = originalAttributes != INVALID_FILE_ATTRIBUTES;
     if (!hadOriginal && GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) { error = pathError("Could not inspect file", path); return false; }
+    if (createOnly && hadOriginal) { error = "File already exists"; return false; }
     wchar_t name[MAX_PATH]{};
     if (!GetTempFileNameW(path.parent_path().c_str(), L"lcd", 0, name)) {
         error = pathError("Could not create temporary file", path); return false;
@@ -373,6 +410,7 @@ bool Project::writeFile(std::string_view relative, std::string_view content,
     const bool hasOriginal = source >= 0;
     if (hasOriginal) {
         ok = ::fstat(source, &existing) == 0 && S_ISREG(existing.st_mode);
+        if (createOnly) { error = "File already exists"; ok = false; }
         if (ok && existing.st_nlink > 1) { error = "Cannot safely replace a hard-linked file; save a separate copy first"; ok = false; }
     } else if (errno != ENOENT) ok = false;
     std::size_t offset = 0;
@@ -404,7 +442,10 @@ bool Project::writeFile(std::string_view relative, std::string_view content,
             error = "File identity changed during save; the existing file was preserved"; ok = false;
         }
     }
-    if (ok) { std::filesystem::rename(temporary, path, filesystemError); ok = !filesystemError; }
+    if (ok && !hasOriginal) {
+        // Install without replacing a file created after the initial check.
+        ok = installNewFile(temporary, path);
+    } else if (ok) { std::filesystem::rename(temporary, path, filesystemError); ok = !filesystemError; }
     if (!ok) { std::filesystem::remove(temporary, filesystemError); if (error.empty()) error = pathError("Could not safely save file", path); return false; }
     // The replacement is already committed at this point; syncing the parent
     // directory improves crash durability where the filesystem supports it.

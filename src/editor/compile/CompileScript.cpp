@@ -262,4 +262,50 @@ std::string shellQuote(std::string_view value) {
     return quoted;
 }
 
+std::string expandCompileShellVariables(
+    std::string_view command, const std::unordered_map<std::string, std::string>& variables) {
+    enum class Quote { None, Single, Double } quote = Quote::None;
+    struct Substitution { Quote outer; std::size_t parentheses; };
+    std::vector<Substitution> substitutions;
+    std::string result;
+    for (std::size_t i = 0; i < command.size();) {
+        const char c = command[i];
+        if (c == '\\' && quote != Quote::Single && i + 1 < command.size()) {
+            result.append(command.substr(i, 2)); i += 2; continue;
+        }
+        if (c == '$' && quote != Quote::Single && i + 1 < command.size() && command[i + 1] == '(') {
+            substitutions.push_back({quote, 1}); quote = Quote::None;
+            result += "$("; i += 2; continue;
+        }
+        if (quote == Quote::None && !substitutions.empty()) {
+            if (c == '(') ++substitutions.back().parentheses;
+            else if (c == ')' && --substitutions.back().parentheses == 0) {
+                quote = substitutions.back().outer; substitutions.pop_back();
+                result += c; ++i; continue;
+            }
+        }
+        if (c == '\'' && quote != Quote::Double) quote = quote == Quote::Single ? Quote::None : Quote::Single;
+        else if (c == '"' && quote != Quote::Single) quote = quote == Quote::Double ? Quote::None : Quote::Double;
+        if (c == '%') {
+            const auto end = command.find('%', i + 1);
+            if (end != std::string_view::npos) {
+                const auto found = variables.find(std::string(command.substr(i + 1, end - i - 1)));
+                if (found != variables.end()) {
+                    if (quote == Quote::None) result += shellQuote(found->second);
+                    else for (const char value : found->second) {
+                        if (quote == Quote::Single && value == '\'') result += "'\\''";
+                        else {
+                            if (quote == Quote::Double && (value == '\\' || value == '"' || value == '$' || value == '`')) result += '\\';
+                            result += value;
+                        }
+                    }
+                    i = end + 1; continue;
+                }
+            }
+        }
+        result += c; ++i;
+    }
+    return result;
+}
+
 } // namespace lucid::editor

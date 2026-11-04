@@ -25,7 +25,7 @@ bool safePath(std::string_view name) {
     for (const auto& part : path) if (part == "..") return false;
     return path.lexically_normal() != ".";
 }
-bool git(const std::filesystem::path& root, std::vector<std::string> args, std::string& output, std::string& error, bool noninteractive = false) {
+bool git(const std::filesystem::path& root, std::vector<std::string> args, std::string& output, std::string& error, bool noninteractive = false, bool requireCompleteOutput = true) {
 #if defined(_WIN32)
     const auto wide = [](std::string_view text) {
         if (text.empty()) return std::wstring{};
@@ -78,7 +78,8 @@ bool git(const std::filesystem::path& root, std::vector<std::string> args, std::
     }
     CloseHandle(reader); WaitForSingleObject(process.hProcess, INFINITE); DWORD status = 1; GetExitCodeProcess(process.hProcess, &status);
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    if (truncated) { error = "Git output exceeds the 2 MiB review limit"; return false; }
+    if (truncated && !requireCompleteOutput) output += "\n[Git output truncated after 2 MiB]";
+    if (truncated && requireCompleteOutput) { error = "Git output exceeds the 2 MiB review limit"; return false; }
     if (status != 0) { error = output.empty() ? "Git command failed" : output; return false; }
     error.clear(); return true;
 #else
@@ -112,22 +113,31 @@ bool git(const std::filesystem::path& root, std::vector<std::string> args, std::
         output.append(buffer, std::min<std::size_t>(static_cast<std::size_t>(n), available));
     }
     close(fd[0]); int status = 0; while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    if (truncated) { error = "Git output exceeds the 2 MiB review limit"; return false; }
+    if (truncated && !requireCompleteOutput) output += "\n[Git output truncated after 2 MiB]";
+    if (truncated && requireCompleteOutput) { error = "Git output exceeds the 2 MiB review limit"; return false; }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { error = output.empty() ? "Git command failed" : output; return false; }
     error.clear(); return true;
 #endif
 }
 void appendDiff(std::string_view text, std::vector<GitReviewLine>& lines) {
-    std::istringstream in{std::string(text)}; std::string line; int current = 0;
+    std::istringstream in{std::string(text)}; std::string line; int current = 0; bool inHunk = false;
     while (std::getline(in, line)) {
-        if (line.rfind("@@ ", 0) == 0) {
+        if (line.rfind("diff --git ", 0) == 0) { inHunk = false; }
+        else if (line.rfind("@@ ", 0) == 0) {
             auto plus = line.find('+'); if (plus != std::string::npos) std::from_chars(line.data() + plus + 1, line.data() + line.size(), current);
+            inHunk = true;
             lines.push_back({line, current});
-        } else if (!line.empty() && line[0] == '+' && line.rfind("+++", 0) != 0) {
+        } else if (inHunk && !line.empty() && line[0] == '+') {
             lines.push_back({line, current++});
-        } else if (!line.empty() && line[0] == '-' && line.rfind("---", 0) != 0) {
+        } else if (inHunk && !line.empty() && line[0] == '-') {
             lines.push_back({line, current});
-        } else if (!line.empty() && line[0] == ' ' && current > 0) { lines.push_back({line, current++}); }
+        } else if (inHunk && !line.empty() && line[0] == ' ' && current > 0) { lines.push_back({line, current++}); }
+        else if (!inHunk && (line.rfind("Binary files ", 0) == 0 || line.rfind("old mode ", 0) == 0 ||
+                 line.rfind("new mode ", 0) == 0 || line.rfind("new file mode ", 0) == 0 ||
+                 line.rfind("deleted file mode ", 0) == 0 || line.rfind("similarity index ", 0) == 0 ||
+                 line.rfind("rename from ", 0) == 0 || line.rfind("rename to ", 0) == 0)) {
+            lines.push_back({line, 0});
+        }
     }
 }
 }
@@ -153,7 +163,7 @@ bool gitChanges(const std::filesystem::path& root, std::vector<GitChange>& chang
 }
 bool gitReview(const std::filesystem::path& root, const GitChange& change, GitReview& review, std::string& error) {
     review.lines.clear(); std::string output;
-    if (!safePath(change.path)) { error = "Invalid project path"; return false; }
+    if (!safePath(change.path) || (!change.oldPath.empty() && !safePath(change.oldPath))) { error = "Invalid project path"; return false; }
     if (change.status == "??") {
         const auto path = root / change.path;
         std::error_code ec;
@@ -170,8 +180,22 @@ bool gitReview(const std::filesystem::path& root, const GitChange& change, GitRe
             std::vector<std::string> args{"diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3"};
             if (staged) args.push_back("--cached");
             args.push_back("--"); args.push_back(change.path);
+            if (!change.oldPath.empty()) args.push_back(change.oldPath);
             if (!git(root, std::move(args), output, error)) return false;
-            if (!output.empty()) { review.lines.push_back({staged ? "Staged changes" : "Working tree changes", 0}); appendDiff(output, review.lines); }
+            if (!output.empty()) {
+                // Staged line numbers describe the index, not a working file
+                // that may contain additional, line-shifting edits.
+                const bool stagedFileDiffers = staged && change.status.size() == 2 &&
+                    change.status[1] != ' ' && change.status[1] != '?';
+                review.lines.push_back({stagedFileDiffers ? "Staged changes (line navigation unavailable: working file differs)" :
+                                        staged ? "Staged changes" : "Working tree changes", 0});
+                const auto before = review.lines.size();
+                appendDiff(output, review.lines);
+                if (stagedFileDiffers) {
+                    for (auto i = before; i < review.lines.size(); ++i) review.lines[i].line = 0;
+                }
+                if (review.lines.size() == before) review.lines.push_back({"No textual diff available", 0});
+            }
         }
     }
     if (change.conflict) {
@@ -195,7 +219,7 @@ bool gitStage(const std::filesystem::path& root, const GitChange& change, std::s
     }
     std::vector<std::string> args{"add", "-A", "--", change.path};
     if (!change.oldPath.empty()) args.push_back(change.oldPath);
-    std::string output; return git(root, std::move(args), output, error);
+    std::string output; return git(root, std::move(args), output, error, false, false);
 }
 bool gitUnstage(const std::filesystem::path& root, const GitChange& change, std::string& error) {
     if (!safePath(change.path) || (!change.oldPath.empty() && !safePath(change.oldPath))) { error = "Invalid project path"; return false; }
@@ -204,7 +228,7 @@ bool gitUnstage(const std::filesystem::path& root, const GitChange& change, std:
     const bool hasHead = git(root, {"rev-parse", "--verify", "HEAD"}, output, ignored);
     std::vector<std::string> args = hasHead ? std::vector<std::string>{"restore", "--staged", "--"} : std::vector<std::string>{"rm", "--cached", "-r", "--ignore-unmatch", "--"};
     args.push_back(change.path); if (!change.oldPath.empty()) args.push_back(change.oldPath);
-    return git(root, std::move(args), output, error);
+    return git(root, std::move(args), output, error, false, false);
 }
 bool gitCommitPreview(const std::filesystem::path& root, GitCommitPreview& preview, std::string& error) {
     preview = {}; std::string prefix, output;
@@ -226,7 +250,7 @@ bool gitCommit(const std::filesystem::path& root, const GitCommitPreview& previe
     if (message.empty() || message.size() > 256 || message.find_first_not_of(" \t\r\n") == std::string_view::npos || message.find('\0') != std::string_view::npos) { error = "Enter a commit message of up to 256 bytes"; return false; }
     GitCommitPreview fresh; if (!gitCommitPreview(root, fresh, error)) return false;
     if (fresh.indexTree != preview.indexTree || fresh.head != preview.head || fresh.paths != preview.paths) { error = "Staged changes or HEAD changed; review them again"; return false; }
-    return git(root, {"commit", "-m", std::string(message)}, output, error);
+    return git(root, {"commit", "-m", std::string(message)}, output, error, false, false);
 }
 
 bool gitBlame(const std::filesystem::path& root, std::string_view path, int line, std::string& author, std::string& error) {
@@ -284,6 +308,6 @@ bool gitRemote(const std::filesystem::path& root, const GitUpstream& expected, G
     if (action == GitRemoteAction::Fetch) args.insert(args.end(), {"fetch", "--no-tags", "--", current.remote});
     else if (action == GitRemoteAction::Pull) args.insert(args.end(), {"pull", "--ff-only", "--no-rebase", "--", current.remote, current.mergeRef});
     else args.insert(args.end(), {"push", "--no-follow-tags", "--recurse-submodules=no", "--", current.remote, current.head + ":" + current.mergeRef});
-    return git(root, std::move(args), output, error, true);
+    return git(root, std::move(args), output, error, true, false);
 }
 }

@@ -3,34 +3,102 @@
 #include "workspace/recovery/History.hpp"
 #include <algorithm>
 namespace lucid::workspace {
-ProjectSearchResults searchProject(const Project& project, std::string_view query, std::size_t limit) {
+namespace {
+bool wordByte(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c >= 0x80;
+}
+// Keep the match in view, and never cut a UTF-8 character at either edge.
+std::string searchPreview(const std::string& content, std::size_t lineStart,
+                          std::size_t lineEnd, std::size_t match) {
+    constexpr std::size_t kContextBefore = 60;
+    constexpr std::size_t kPreviewBytes = 180;
+    std::size_t start = match - lineStart > kContextBefore ? match - kContextBefore : lineStart;
+    while (start < match && (static_cast<unsigned char>(content[start]) & 0xc0U) == 0x80U) ++start;
+    std::size_t end = std::min(lineEnd, start + kPreviewBytes);
+    while (end > start && end < lineEnd &&
+           (static_cast<unsigned char>(content[end]) & 0xc0U) == 0x80U) --end;
+    std::string result;
+    if (start > lineStart) result += "...";
+    result.append(content, start, end - start);
+    if (end < lineEnd) result += "...";
+    return result;
+}
+} // namespace
+
+std::string replacementPreview(const ProjectSearchFile& file, const ProjectSearchMatch& match,
+                               std::string_view query, std::string_view replacement) {
+    const auto& text = file.original; const auto pos = match.offset;
+    if (query.empty() || pos > text.size() || query.size() > text.size() - pos || text.compare(pos, query.size(), query) != 0) return "Preview unavailable";
+    const auto previous = pos == 0 ? std::string::npos : text.find_last_of("\r\n", pos - 1);
+    const auto lineStart = previous == std::string::npos ? 0 : previous + 1;
+    const auto after = pos + query.size();
+    const auto newline = text.find_first_of("\r\n", after);
+    const auto lineEnd = newline == std::string::npos ? text.size() : newline;
+    auto start = pos - std::min<std::size_t>(60, pos - lineStart);
+    while (start < pos && (static_cast<unsigned char>(text[start]) & 0xc0U) == 0x80U) ++start;
+    auto end = std::min(lineEnd, after + std::min<std::size_t>(60, lineEnd - after));
+    while (end > after && end < lineEnd && (static_cast<unsigned char>(text[end]) & 0xc0U) == 0x80U) --end;
+    std::string result = start > lineStart ? "..." : "";
+    result.append(text, start, pos - start);
+    std::size_t shown = std::min<std::size_t>(replacement.size(), 80);
+    while (shown > 0 && shown < replacement.size() && (static_cast<unsigned char>(replacement[shown]) & 0xc0U) == 0x80U) --shown;
+    for (std::size_t i = 0; i < shown; ++i) {
+        if (replacement[i] == '\r' || replacement[i] == '\n') {
+            if (replacement[i] == '\r' && i + 1 < shown && replacement[i + 1] == '\n') ++i;
+            result += " ↵ ";
+        } else result.push_back(replacement[i]);
+    }
+    if (shown < replacement.size()) result += "...";
+    result.append(text, after, end - after);
+    if (end < lineEnd) result += "...";
+    return result;
+}
+
+ProjectSearchResults searchProject(const Project& project, std::string_view query, std::size_t limit, const std::atomic_bool* cancel, bool wholeWord) {
     ProjectSearchResults result;
     std::size_t storedBytes = 0;
     if (query.empty() || query.find('\n') != std::string_view::npos || query.find('\r') != std::string_view::npos) return result;
     for (const auto& path : project.files()) {
+        if (cancel && cancel->load()) { result.indexIncomplete = true; return result; }
         std::string content, error;
         if (!project.readFile(path, content, error) ||
             std::any_of(content.begin(), content.end(), [](unsigned char c) { return c == 0 || (c < 32 && c != '\t' && c != '\n' && c != '\r'); }) ||
             !editor::Document::canEditLosslessly(content, error)) { ++result.skipped; continue; }
-        std::size_t pos = 0, lineStart = 0, line = 0, fileIndex = result.files.size();
+        std::size_t pos = 0, scanned = 0, lineStart = 0, line = 0, column = 0;
+        std::size_t lineEnd = 0;
+        const std::size_t fileIndex = result.files.size();
+        bool needLineEnd = true;
         bool added = false;
         while ((pos = content.find(query, pos)) != std::string::npos) {
+            if (cancel && cancel->load()) { result.indexIncomplete = true; return result; }
+            if (wholeWord && ((pos > 0 && wordByte(static_cast<unsigned char>(content[pos - 1]))) ||
+                (pos + query.size() < content.size() && wordByte(static_cast<unsigned char>(content[pos + query.size()]))))) {
+                ++pos; continue;
+            }
             if (result.matches.size() >= limit) { result.truncated = true; return result; }
-            while (lineStart < pos) {
-                const auto newline = content.find_first_of("\r\n", lineStart);
-                if (newline == std::string::npos || newline >= pos) break;
-                lineStart = newline + 1;
-                if (content[newline] == '\r' && lineStart < content.size() && content[lineStart] == '\n') ++lineStart;
-                ++line;
+            while (scanned < pos) {
+                const unsigned char byte = static_cast<unsigned char>(content[scanned++]);
+                if (byte == '\r' || byte == '\n') {
+                    if (byte == '\r' && scanned < pos && content[scanned] == '\n') ++scanned;
+                    lineStart = scanned;
+                    ++line;
+                    column = 0;
+                    needLineEnd = true;
+                } else if ((byte & 0xc0U) != 0x80U) {
+                    ++column;
+                }
             }
             if (!added) {
                 if (content.size() > 64U * 1024U * 1024U - storedBytes) { result.truncated = true; return result; }
                 storedBytes += content.size(); result.files.push_back({path, content}); added = true;
             }
-            std::size_t column = 0;
-            for (std::size_t i = lineStart; i < pos; ++i) if ((static_cast<unsigned char>(content[i]) & 0xc0U) != 0x80U) ++column;
-            const auto lineEnd = content.find_first_of("\r\n", pos);
-            const auto snippet = content.substr(lineStart, std::min<std::size_t>((lineEnd == std::string::npos ? content.size() : lineEnd) - lineStart, 180));
+            if (needLineEnd) {
+                lineEnd = content.find_first_of("\r\n", pos);
+                if (lineEnd == std::string::npos) lineEnd = content.size();
+                needLineEnd = false;
+            }
+            const auto snippet = searchPreview(content, lineStart, lineEnd, pos);
             result.matches.push_back({fileIndex, pos, line, column, snippet});
             pos += query.size();
         }
@@ -42,11 +110,69 @@ bool replaceProject(Project& project, const ProjectSearchResults& results, std::
                     std::vector<std::string>* changedPaths, const std::filesystem::path& historyRoot) {
     changed = 0; error.clear();
     if (changedPaths) changedPaths->clear();
-    if (query.empty() || results.truncated) { error = "Search is empty or incomplete; replacement was not applied"; return false; }
+    if (query.empty() || results.truncated || results.indexIncomplete) { error = "Search is empty or incomplete; replacement was not applied"; return false; }
     // Preflight all files before modifying any, and recheck each one at replacement time.
     for (const auto& file : results.files) {
         std::string current;
         if (!project.readFile(file.path, current, error) || current != file.original) { error = "File changed since review: " + file.path; return false; }
+    }
+    std::vector<std::vector<std::size_t>> offsets(results.files.size());
+    for (const auto& match : results.matches) {
+        if (match.file >= results.files.size()) { error = "Invalid reviewed search result"; return false; }
+        offsets[match.file].push_back(match.offset);
+    }
+    for (std::size_t i = 0; i < offsets.size(); ++i) {
+        auto& positions = offsets[i]; std::sort(positions.begin(), positions.end());
+        const auto& original = results.files[i].original;
+        std::size_t end = 0; bool first = true;
+        for (const auto pos : positions) {
+            if (pos > original.size() || query.size() > original.size() - pos ||
+                original.compare(pos, query.size(), query) != 0 || (!first && pos < end)) {
+                error = "Invalid reviewed search result"; return false;
+            }
+            end = pos + query.size(); first = false;
+        }
+    }
+    const auto replaced = [query, replacement](const std::string& original, const std::vector<std::size_t>& positions, std::string& updated) {
+        updated.clear(); std::size_t start = 0;
+        const auto firstEnding = original.find_first_of("\r\n");
+        const std::string_view ending = firstEnding == std::string::npos || original[firstEnding] == '\n' ? "\n" :
+            firstEnding + 1 < original.size() && original[firstEnding + 1] == '\n' ? "\r\n" : "\r";
+        std::string normalizedReplacement;
+        if (replacement.find_first_of("\r\n") != std::string_view::npos) {
+            for (std::size_t i = 0; i < replacement.size(); ++i) {
+                if (replacement[i] == '\r' || replacement[i] == '\n') {
+                    if (replacement[i] == '\r' && i + 1 < replacement.size() && replacement[i + 1] == '\n') ++i;
+                    if (ending.size() > Project::maxFileSize - normalizedReplacement.size()) return false;
+                    normalizedReplacement.append(ending);
+                } else {
+                    if (normalizedReplacement.size() == Project::maxFileSize) return false;
+                    normalizedReplacement.push_back(replacement[i]);
+                }
+            }
+        }
+        const auto fileReplacement = replacement.find_first_of("\r\n") == std::string_view::npos ? replacement : std::string_view(normalizedReplacement);
+        const auto append = [&updated](std::string_view text) {
+            if (text.size() > Project::maxFileSize - updated.size()) return false;
+            updated.append(text); return true;
+        };
+        for (const auto pos : positions) {
+            if (!append(std::string_view(original).substr(start, pos - start)) || !append(fileReplacement)) return false;
+            start = pos + query.size();
+        }
+        return append(std::string_view(original).substr(start));
+    };
+    for (std::size_t i = 0; i < results.files.size(); ++i) {
+        const auto& file = results.files[i];
+        std::string updated;
+        if (!replaced(file.original, offsets[i], updated)) {
+            error = "No files changed; replacement would make " + file.path + " exceed the 16 MiB file limit"; return false;
+        }
+        if (std::any_of(updated.begin(), updated.end(), [](unsigned char c) { return c == 0 || (c < 32 && c != '\t' && c != '\n' && c != '\r'); }) ||
+            !editor::Document::canEditLosslessly(updated, error)) {
+            error = "No files changed; replacement would make " + file.path + " unsafe to edit" + (error.empty() ? "" : ": " + error);
+            return false;
+        }
     }
     if (!historyRoot.empty() && query != replacement) {
         for (const auto& file : results.files) {
@@ -55,12 +181,10 @@ bool replaceProject(Project& project, const ProjectSearchResults& results, std::
             if (!recovery::recordHistory(historyRoot, backup, error)) { error = "No files changed; could not back up " + file.path + ": " + error; return false; }
         }
     }
-    for (const auto& file : results.files) {
-        std::string updated; std::size_t start = 0, pos = 0;
-        while ((pos = file.original.find(query, start)) != std::string::npos) {
-            updated.append(file.original, start, pos - start); updated.append(replacement); start = pos + query.size();
-        }
-        updated.append(file.original, start, std::string::npos);
+    for (std::size_t i = 0; i < results.files.size(); ++i) {
+        const auto& file = results.files[i];
+        std::string updated;
+        if (!replaced(file.original, offsets[i], updated)) { error = "Stopped after " + std::to_string(changed) + " files: replacement exceeds the file limit"; return false; }
         if (updated == file.original) continue;
         if (!project.writeFile(file.path, updated, error, &file.original)) { error = "Stopped after " + std::to_string(changed) + " files: " + error; return false; }
         ++changed;

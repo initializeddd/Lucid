@@ -1,6 +1,7 @@
 #include "workspace/FunctionIndex.hpp"
 #include "workspace/Project.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <string>
@@ -111,6 +112,27 @@ int main() {
     if (!bsdIndex.usedCache || open.empty() || free.empty() ||
         bsdIndex.functions[open.front()].platform != lucid::editor::CompilePlatform::OpenBSD ||
         bsdIndex.functions[free.front()].platform != lucid::editor::CompilePlatform::FreeBSD) return 15;
+    std::vector<lucid::workspace::ProjectFunction> many;
+    for (int i = 99; i >= 0; --i) {
+        lucid::workspace::ProjectFunction function;
+        function.name = "build" + std::to_string(i % 11);
+        function.file = "build.cpp";
+        function.line = i;
+        many.push_back(std::move(function));
+    }
+    const auto all = searchFunctions(many, "build", many.size());
+    const auto first = searchFunctions(many, "build", 13);
+    if (all.size() != many.size() || first.size() != 13 || !std::equal(first.begin(), first.end(), all.begin())) return 16;
+    if (!searchFunctions(many, "build", 0).empty()) return 17;
+    lucid::workspace::ProjectFunction longName;
+    longName.name = "build" + std::string(1000, 'x');
+    longName.file = "src/example.cpp";
+    lucid::workspace::ProjectFunction longPath;
+    longPath.name = "compile";
+    longPath.file = std::string(500, 'x') + "/target.cpp";
+    const std::vector<lucid::workspace::ProjectFunction> longFunctions{longName, longPath};
+    if (searchFunctions(longFunctions, "build", 8) != std::vector<std::size_t>{0}) return 18;
+    if (searchFunctions(longFunctions, "target", 8) != std::vector<std::size_t>{1}) return 19;
     fs::remove_all(base, filesystemError);
     return 0;
 }

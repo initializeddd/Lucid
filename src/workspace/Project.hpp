@@ -1,6 +1,8 @@
 #pragma once
 
 #include <filesystem>
+#include <atomic>
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -9,10 +11,12 @@ namespace lucid::workspace {
 
 class Project {
 public:
+    static constexpr std::size_t maxFileSize = 16U * 1024U * 1024U;
     Project() = default;
 
     static Project openOrCreate(const std::filesystem::path& path, bool& created,
-                                std::string& error, bool eagerIndex = true);
+                                std::string& error, bool eagerIndex = true,
+                                bool allowCreate = true);
 
     [[nodiscard]] const std::filesystem::path& root() const noexcept { return m_root; }
     [[nodiscard]] std::string name() const;
@@ -21,7 +25,8 @@ public:
         return m_directories;
     }
 
-    void refresh();
+    // When requested, report whether the entire indexable tree was scanned.
+    void refresh(bool* complete = nullptr, const std::atomic_bool* cancel = nullptr);
 
     [[nodiscard]] bool exists(std::string_view relative) const;
     [[nodiscard]] bool isDirectory(std::string_view relative) const;
@@ -31,7 +36,8 @@ public:
     [[nodiscard]] bool readFile(std::string_view relative, std::string& content,
                                 std::string& error) const;
     [[nodiscard]] bool writeFile(std::string_view relative, std::string_view content,
-                                 std::string& error, const std::string* expected = nullptr);
+                                 std::string& error, const std::string* expected = nullptr,
+                                 bool createOnly = false);
     [[nodiscard]] bool createFile(std::string_view relative, std::string& error, bool allowExisting = true);
     [[nodiscard]] bool createDirectory(std::string_view relative, std::string& error);
     [[nodiscard]] bool deleteFile(std::string_view relative, std::string& error);

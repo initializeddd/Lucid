@@ -8,6 +8,7 @@ namespace lucid::workspace::collaboration {
 // explicitly preserve and resolve it before installing another snapshot.
 class Replica {
 public:
+    // Use a fresh replica for a different file or a newly created host session.
     [[nodiscard]] bool install(std::uint64_t revision, std::string text, std::string& error);
     [[nodiscard]] bool setLocal(std::string text, std::string& error);
     [[nodiscard]] bool nextEdit(std::string request, Edit& edit, std::string& error);
@@ -22,7 +23,7 @@ public:
     [[nodiscard]] bool conflicted() const noexcept { return m_conflict; }
 private:
     static Edit difference(std::uint64_t revision, std::string_view before, std::string_view after);
-    std::string m_server, m_local, m_request;
+    std::string m_server, m_local, m_request, m_sentText;
     std::uint64_t m_revision = 0;
     bool m_installed = false, m_inFlight = false, m_conflict = false;
 };

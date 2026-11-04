@@ -25,11 +25,13 @@
 #include "workspace/recovery/Snapshot.hpp"
 #include "workspace/git/GitReview.hpp"
 #include "modules/Modules.hpp"
+#include "modules/Registry.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -74,6 +76,7 @@ private:
 
     void openFilePrompt();
     void openDocumentSwitcher();
+    void closeSwitcherSelection();
     void openTasks();
     void openDebugger();
     void toggleBreakpoint();
@@ -81,7 +84,7 @@ private:
     void stopDebugger();
     void refreshDebugSuggestions();
     void applyDebugCommand();
-    void checkpointRecovery();
+    bool checkpointRecovery();
     [[nodiscard]] bool saveSession(std::string& error);
     void restoreSession(const workspace::session::State& state);
     void openRecovery(bool includeHistory = true);
@@ -90,6 +93,8 @@ private:
     void openModules();
     void refreshModuleSuggestions();
     void applyModuleCommand();
+    void pollModules();
+    void refreshModuleCatalog();
     void openGitReview();
     void refreshGitSuggestions();
     void applyGitReview();
@@ -109,6 +114,7 @@ private:
     void openAiCleanup();
     void openFind();
     void openProjectSearch(bool replace);
+    void reopenProjectSearchResults();
     void applyProjectSearch();
     void pollProjectSearch();
     void openReplace();
@@ -123,11 +129,12 @@ private:
     void applyLanguageLocation();
     void applyCommand(bool forceFolder);
     void createFolder(const std::string& path);
-    void openProject(const std::string& path);
+    bool openProject(const std::string& path);
     void openExternalPath(const std::string& path);
-    void openFile(const std::string& path);
+    void openFile(const std::string& path, bool allowCreate = true);
     [[nodiscard]] bool saveDocument();
     void closeDocument();
+    void reopenClosedDocument();
     void deleteCurrentFile();
     void deleteCurrentProject();
     void closeProject();
@@ -135,12 +142,17 @@ private:
     void moveSuggestion(int delta);
     void acceptSuggestion();
     void refreshSuggestions();
+    void refreshMenuViewport();
+    void selectSuggestionRow(std::size_t index);
     void onCommandQueryChanged();
     void clearCommandFeedback();
     void refreshHighlight();
     void refreshDiagnostics(double timeSeconds);
     void pollCompilerDiagnostics(double timeSeconds);
     void updateActiveDiagnostic();
+    void navigateDiagnostic(bool backwards);
+    void openDiagnosticList();
+    void applyDiagnosticList();
     void resetDiagnostics();
     void initializeSettings();
     void syncAccessibility(const ui::FrameState& frame);
@@ -158,7 +170,7 @@ private:
     bool persistSettings();
     void refreshSettings();
     void loadSettingsFromDisk();
-    void ensureSettingsFile();
+    bool ensureSettingsFile();
     [[nodiscard]] bool isJsonDocument() const;
     [[nodiscard]] bool isCodeDocument() const;
     [[nodiscard]] bool isSettingsDocument() const;
@@ -167,6 +179,7 @@ private:
     [[nodiscard]] ui::SettingsPanelLayout settingsPanelLayout() const;
     [[nodiscard]] ui::SettingsControl settingsControlAt(double x, double y) const;
     [[nodiscard]] ui::DiagnosticCardLayout diagnosticCardLayout() const;
+    [[nodiscard]] float diagnosticAnchorX() const;
     [[nodiscard]] float textWidth(const std::u32string& line, std::size_t column) const;
     void uiSize(int& width, int& height) const;
 
@@ -192,7 +205,9 @@ private:
     void handleCompileTerminalMouseButton(const input::MouseButtonEvent& event);
     void handleCompileTerminalMouseMove(const input::MouseMoveEvent& event);
     [[nodiscard]] std::size_t compileOutputPosition(double x, double y, bool standalone) const;
+    void selectAllCompileOutput();
     void copyCompileSelection();
+    void updateCompileOutput();
     void scrollCompileOutput(double offset, bool standalone);
     [[nodiscard]] ui::FrameState
     makeCompileTerminalFrameState(double timeSeconds) const;
@@ -205,10 +220,15 @@ private:
     [[nodiscard]] ui::CompileTerminalLayout compileTerminalLayout() const;
     [[nodiscard]] ui::CompileTerminalLayout compileTerminalBaseLayout() const;
     [[nodiscard]] bool placeCaretAt(double x, double y, bool extendSelection);
+    [[nodiscard]] bool placeCommandCaretAt(double x, double y, bool extendSelection, bool dragging = false);
     void updateCursorShape(double x, double y);
     [[nodiscard]] int visibleRowCount() const;
     [[nodiscard]] int maxFirstLine() const;
     [[nodiscard]] float suggestionListTop() const;
+    [[nodiscard]] std::size_t commandStatusColumns() const;
+    [[nodiscard]] std::size_t commandStatusRows() const;
+    [[nodiscard]] std::size_t visibleSuggestionCount() const;
+    [[nodiscard]] std::size_t pagedContentCount() const;
     [[nodiscard]] int suggestionIndexAt(double x, double y) const;
     [[nodiscard]] bool commandRegionContains(double x, double y) const;
     [[nodiscard]] bool welcomeActionContains(double x, double y) const;
@@ -238,6 +258,8 @@ private:
     struct TaskChoice { TaskChoiceKind kind; std::string id; };
     enum class TaskInputKind { Identity, Title, Subtask, Assignee, Solution };
     std::filesystem::path m_recoveryFile;
+    std::filesystem::path m_cachedRecoveryPath;
+    std::optional<workspace::recovery::Snapshot> m_cachedRecoverySnapshot;
     std::vector<std::filesystem::path> m_recoveryFiles;
     struct RecoverySummary { std::string file; bool saved = false, history = false; std::size_t openCount = 0; };
     std::vector<RecoverySummary> m_recoverySummaries;
@@ -247,13 +269,32 @@ private:
     double m_recoveryLastTime = 0.0;
     std::filesystem::path m_moduleRoot;
     std::vector<modules::Module> m_modules;
+    modules::Module m_modulePreview;
+    std::string m_modulePreviewManifest;
+    std::string m_modulePreviewSource;
+    struct ModuleFetchResult {
+        bool catalog = false;
+        std::size_t generation = 0;
+        std::string id, manifest, source, error;
+        std::vector<modules::RegistryEntry> entries;
+    };
+    std::vector<modules::RegistryEntry> m_moduleCatalog;
+    std::future<ModuleFetchResult> m_moduleFetchFuture;
+    std::size_t m_moduleFetchGeneration = 0;
     std::vector<int> m_moduleChoices;
     std::size_t m_moduleSelected = 0;
     std::size_t m_modulePage = 0;
+    ui::PromptKind m_pagedLayoutKind = ui::PromptKind::File;
+    std::size_t m_pagedLayoutCapacity = 0;
+    bool m_pagedLayoutValid = false;
+    std::size_t m_pagedScroll = 0;
     debug::AdapterProcess m_debugAdapter;
     debug::Session m_debugSession;
     std::map<std::string, std::vector<int>> m_debugBreakpoints;
     std::string m_debugSource, m_debugInline, m_debugLastWarning, m_debugLastMessage;
+    bool m_debugAwaitArguments = false, m_debugAwaitWorkingDirectory = false, m_debugAwaitEnvironment = false;
+    std::string m_debugPendingProgram, m_debugPendingRoot, m_debugPendingSource, m_debugPendingDirectory;
+    std::vector<std::string> m_debugPendingArguments;
     std::vector<int> m_debugChoices;
     std::size_t m_debugPage = 0;
     bool m_debugClosing = false;
@@ -287,11 +328,13 @@ private:
         std::string diskContents;
     };
     std::vector<OpenDocument> m_inactiveDocuments;
+    std::vector<OpenDocument> m_closedDocuments;
     editor::Document m_document;
     bool m_hasDocument = false;
     std::string m_filePath;
     std::string m_diskContents;
     int m_firstLine = 0;
+    double m_editorScrollRemainder = 0.0;
     bool m_followCursor = true;
     bool m_welcomeActionHovered = false;
     int m_welcomeShortcutScroll = 0;
@@ -318,7 +361,7 @@ private:
     std::size_t m_languageNavigationLine = 0, m_languageNavigationColumn = 0;
     bool m_languageFormatQueued = false;
     std::uint64_t m_languageFormatRequest = 0, m_languageFormatRevision = 0;
-    std::string m_languageFormatFile, m_languageFormatOriginal, m_languageFormatOutput;
+    std::string m_languageFormatFile, m_languageFormatOriginal, m_languageFormatOutput, m_languageFormatRange;
     std::string m_languageDiagnosticsFile;
     std::uint64_t m_languageDiagnosticsRevision = ~std::uint64_t{0};
     std::uint64_t m_completionRequest = 0;
@@ -329,6 +372,7 @@ private:
     std::vector<std::string> m_completions;
     std::set<std::string> m_projectCompletionNames;
     bool m_mouseSelecting = false;
+    bool m_commandSelecting = false;
     bool m_wordSelecting = false;
     editor::TextPosition m_wordSelectionStart{};
     editor::TextPosition m_wordSelectionEnd{};
@@ -354,11 +398,20 @@ private:
 
     std::vector<std::string> m_recentProjects;
     bool m_restoringSession = false;
+    std::string m_unrestoredProject;
+    std::vector<workspace::recovery::FileContext> m_unrestoredFiles;
+    std::optional<workspace::session::State> m_pendingSession;
+    bool m_rememberSessionChoice = false;
     std::vector<std::string> m_suggestionPaths;
     std::vector<std::string> m_suggestionDetails;
     std::vector<std::size_t> m_suggestionFunctionIndices;
     std::vector<ui::PathSuggestion> m_suggestions;
     std::size_t m_suggestionScroll = 0;
+    double m_menuScrollRemainder = 0.0;
+    ui::PromptKind m_menuScrollKind = ui::PromptKind::File;
+    int m_menuViewportWidth = 0, m_menuViewportHeight = 0;
+    bool m_menuViewportValid = false;
+    bool m_menuReselectionRequired = false;
     bool m_suggestionHasMoreBelow = false;
     float m_suggestionMoreAbove = 0.0F;
     float m_suggestionMoreBelow = 0.0F;
@@ -397,6 +450,7 @@ private:
     bool m_compileSelecting = false;
     int m_compileTerminalLine = 0;
     int m_compileOutputScroll = 0;
+    double m_compileScrollRemainder = 0.0;
     float m_compileTerminalReveal = 0.0F;
     float m_compileTerminalVelocity = 0.0F;
     float m_compileTerminalOffsetX = 0.0F;
@@ -405,6 +459,8 @@ private:
 
     std::string m_windowTitle = "Lucid";
     std::string m_settingsRoot;
+    std::string m_settingsBaselineRoot;
+    std::optional<std::string> m_settingsBaseline;
     std::string m_settingsError;
     bool m_settingsErrorHovered = false;
     bool m_settingsPanelVisible = false;
@@ -415,11 +471,20 @@ private:
     std::uint64_t m_settingsRevision = ~std::uint64_t{0};
 
     std::vector<editor::Diagnostic> m_diagnostics;
+    std::vector<int> m_diagnosticListChoices;
+    std::size_t m_diagnosticListPage = 0;
     workspace::ProjectSearchResults m_projectSearchResults;
+    std::vector<bool> m_projectSearchSelected;
     std::string m_projectSearchQuery, m_projectReplacement;
+    std::vector<std::string> m_projectSearchHistory;
+    std::string m_projectSearchDraft;
+    std::size_t m_projectSearchHistoryPosition = 0;
     std::size_t m_projectSearchPage = 0;
-    bool m_projectSearchReplace = false;
+    std::optional<std::size_t> m_lastProjectSearchMatch;
+    std::optional<std::size_t> m_projectReviewFile;
+    bool m_projectSearchReplace = false, m_projectSearchWholeWord = false;
     std::future<workspace::ProjectSearchResults> m_projectSearchFuture;
+    std::shared_ptr<std::atomic_bool> m_projectSearchCancel;
     std::string m_projectSearchRoot;
     std::vector<int> m_projectSearchChoices;
     std::uint64_t m_diagnosticsRevision = 0;
@@ -443,6 +508,8 @@ private:
     std::shared_ptr<std::atomic_bool> m_aiCancel;
     std::string m_aiResponse;
     std::vector<std::string> m_aiLines;
+    std::vector<std::size_t> m_aiLineOffsets;
+    std::size_t m_aiWrapColumns = 0;
     std::size_t m_aiScroll = 0;
     std::string m_aiFile;
     std::uint64_t m_aiRevision = 0;

@@ -2,6 +2,35 @@
 #include <string>
 using namespace lucid::debug;
 int main() {
+    Session threads; std::string threadError;
+    threads.start("/tmp/program", "/tmp", "/tmp/file.cpp", {}); (void)threads.takeOutbound();
+    if (!threads.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"breakpoint","threadId":42}})"), threadError)) return 72;
+    (void)threads.takeOutbound();
+    if (!threads.requestThreads(threadError) || threads.takeOutbound().find("\"threads\"") == std::string::npos ||
+        !threads.receive(frame(R"({"type":"response","request_seq":3,"success":true,"body":{"threads":[{"id":42,"name":"main"},{"id":77,"name":"worker"}]}})"), threadError) ||
+        threads.threads().size() != 2 || threads.selectedThread() != 42) return 73;
+    if (!threads.selectThread(1, threadError) || threads.selectedThread() != 77 || threads.takeOutbound().find("\"threadId\":77") == std::string::npos) return 74;
+    if (!threads.receive(frame(R"({"type":"response","request_seq":2,"success":true,"body":{"stackFrames":[{"id":4,"name":"stale"}]}})"), threadError) || !threads.stack().empty()) return 75;
+    Session threadStatus; threadStatus.start("/tmp/program", "/tmp", "/tmp/file.cpp", {}); (void)threadStatus.takeOutbound();
+    if (!threadStatus.receive(frame(R"({"type":"event","event":"stopped","body":{"threadId":1}})"), threadError)) return 76;
+    (void)threadStatus.takeOutbound();
+    if (!threadStatus.requestThreads(threadError) || !threadStatus.requestThreads(threadError) || !threadStatus.threadsPending()) return 77;
+    (void)threadStatus.takeOutbound();
+    if (!threadStatus.receive(frame(R"({"type":"response","request_seq":3,"success":true,"body":{"threads":[{"id":4}]}})"), threadError) ||
+        !threadStatus.threadsPending() || !threadStatus.threads().empty()) return 78;
+    if (!threadStatus.receive(frame(R"({"type":"response","request_seq":4,"success":true,"body":{"threads":[]}})"), threadError) ||
+        threadStatus.threadsPending() || threadStatus.message() != "No threads reported") return 79;
+    if (!threadStatus.requestThreads(threadError)) return 80;
+    (void)threadStatus.takeOutbound();
+    if (!threadStatus.receive(frame(R"({"type":"response","request_seq":5,"success":false,"message":"unavailable"})"), threadError) ||
+        threadStatus.threadsPending() || !threadStatus.messageIsError() || threadStatus.message().find("unavailable") == std::string::npos) return 81;
+    Session withArguments; std::string argumentError;
+    withArguments.start("/tmp/program", "/tmp", std::map<std::string, std::vector<int>>{}, {"hello world", "quote\"value", ""}, {{"LUCID_TEST", "hello world"}});
+    (void)withArguments.takeOutbound();
+    if (!withArguments.receive(frame(R"({"type":"response","request_seq":1,"success":true})"), argumentError)) return 70;
+    const auto argumentLaunch = withArguments.takeOutbound();
+    if (argumentLaunch.find(R"("args":["hello world","quote\"value",""])") == std::string::npos ||
+        argumentLaunch.find(R"("env":{"LUCID_TEST":"hello world"})") == std::string::npos) return 71;
     Session s; std::string error;
     s.start("/tmp/a.out", "/tmp", "/tmp/a.cpp", {3});
     if (s.takeOutbound().find("\"initialize\"") == std::string::npos) return 1;
@@ -53,5 +82,33 @@ int main() {
     if (disconnected.state() != State::Failed || disconnected.message() != "Adapter disconnected" ||
         !disconnected.stack().empty() || !disconnected.variables().empty() || !disconnected.takeOutbound().empty()) return 34;
     if (disconnected.resume("continue", error)) return 35;
+    Session malformed;
+    malformed.start("/tmp/program", "/tmp", "/tmp/file.cpp", {});
+    (void)malformed.takeOutbound();
+    if (!malformed.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"pause","threadId":7}})"), error)) return 36;
+    if (malformed.receive(frame("{invalid"), error) || malformed.state() != State::Failed ||
+        error.empty() || malformed.message() != error || !malformed.stack().empty() ||
+        !malformed.variables().empty() || !malformed.takeOutbound().empty()) return 37;
+    Session rejected;
+    rejected.start("/tmp/program", "/tmp", "/tmp/file.cpp", {});
+    (void)rejected.takeOutbound();
+    if (!rejected.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"pause","threadId":7}})"), error)) return 38;
+    (void)rejected.takeOutbound();
+    if (!rejected.resume("next", error)) return 39;
+    (void)rejected.takeOutbound();
+    if (!rejected.receive(frame(R"({"type":"response","request_seq":3,"success":false,"message":"Step rejected"})"), error) ||
+        rejected.state() != State::Stopped || !rejected.messageIsError() || rejected.message().find("Step rejected") == std::string::npos ||
+        rejected.takeOutbound().find("stackTrace") == std::string::npos) return 40;
+    Session breakpointRetry;
+    breakpointRetry.start("/tmp/program", "/tmp", "/tmp/file.cpp", {3});
+    (void)breakpointRetry.takeOutbound();
+    if (!breakpointRetry.receive(frame(R"({"type":"event","event":"initialized"})"), error)) return 41;
+    (void)breakpointRetry.takeOutbound();
+    if (!breakpointRetry.receive(frame(R"({"type":"response","request_seq":2,"success":false,"message":"Unavailable"})"), error) ||
+        breakpointRetry.breakpointWarning().find("Unavailable") == std::string::npos || breakpointRetry.messageIsError()) return 42;
+    if (!breakpointRetry.setBreakpoints("/tmp/file.cpp", {3}, error)) return 43;
+    (void)breakpointRetry.takeOutbound();
+    if (!breakpointRetry.receive(frame(R"({"type":"response","request_seq":4,"success":true,"body":{"breakpoints":[{"verified":true}]}})"), error) ||
+        !breakpointRetry.breakpointWarning().empty() || breakpointRetry.messageIsError()) return 44;
     return 0;
 }

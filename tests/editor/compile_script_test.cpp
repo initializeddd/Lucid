@@ -92,6 +92,10 @@ int main() {
         shellQuote("a'b") != "'a'\\''b'") {
         return 9;
     }
+    const std::unordered_map<std::string, std::string> unsafe = {{"project", "/tmp/a b'$x"}};
+    if (lucid::editor::expandCompileShellVariables("%project%/build", unsafe) != "'/tmp/a b'\\''$x'/build" ||
+        lucid::editor::expandCompileShellVariables("\"%project%/build\"", unsafe) != "\"/tmp/a b'\\$x/build\"" ||
+        lucid::editor::expandCompileShellVariables("'%project%/build'", unsafe) != "'/tmp/a b'\\''$x/build'") return 15;
 
     const CompileScript empty = parseCompileScript({U"/* regular comment */"});
     if (!empty.functions.empty()) {

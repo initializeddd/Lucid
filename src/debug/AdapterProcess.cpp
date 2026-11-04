@@ -3,9 +3,15 @@
 #include <cstring>
 #include <cstdlib>
 #if defined(_WIN32)
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
+#if defined(__MINGW32__)
+#include <pthread.h>
+#endif
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -22,14 +28,21 @@ extern char **environ;
 namespace lucid::debug {
 #if defined(_WIN32)
 struct AdapterProcess::WindowsState {
-    HANDLE process = nullptr, job = nullptr, input = nullptr, output = nullptr;
-    std::thread reader, writer;
+    HANDLE process = nullptr, job = nullptr, input = nullptr, output = nullptr, diagnostics = nullptr;
+    std::thread reader, writer, diagnosticReader;
     std::mutex mutex;
     std::condition_variable ready;
-    std::string outgoing, incoming, failure;
-    bool stopping = false, eof = false;
+    std::string outgoing, incoming, failure, diagnosticText;
+    bool stopping = false, eof = false, diagnosticsDone = false;
 };
 namespace {
+HANDLE nativeThreadHandle(std::thread& thread) {
+#if defined(__MINGW32__)
+    return static_cast<HANDLE>(pthread_gethandle(thread.native_handle()));
+#else
+    return thread.native_handle();
+#endif
+}
 std::wstring wide(std::string_view value) {
     if (value.empty()) return {};
     const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
@@ -74,35 +87,46 @@ bool AdapterProcess::start(const std::string& executable, const std::vector<std:
 #if defined(_WIN32)
     auto* state = new WindowsState;
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-    HANDLE childInput = nullptr, childOutput = nullptr;
+    HANDLE childInput = nullptr, childOutput = nullptr, childError = nullptr;
     if (!CreatePipe(&childInput, &state->input, &security, 0) ||
         !CreatePipe(&state->output, &childOutput, &security, 0) ||
+        !CreatePipe(&state->diagnostics, &childError, &security, 0) ||
         !SetHandleInformation(state->input, HANDLE_FLAG_INHERIT, 0) ||
-        !SetHandleInformation(state->output, HANDLE_FLAG_INHERIT, 0)) {
-        if (childInput) CloseHandle(childInput); if (childOutput) CloseHandle(childOutput);
-        if (state->input) CloseHandle(state->input); if (state->output) CloseHandle(state->output);
+        !SetHandleInformation(state->output, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(state->diagnostics, HANDLE_FLAG_INHERIT, 0)) {
+        if (childInput) CloseHandle(childInput); if (childOutput) CloseHandle(childOutput); if (childError) CloseHandle(childError);
+        if (state->input) CloseHandle(state->input); if (state->output) CloseHandle(state->output); if (state->diagnostics) CloseHandle(state->diagnostics);
         delete state; error = "Could not create debugger pipes"; return false;
     }
     const auto program = wide(executable);
-    if (program.empty()) { CloseHandle(childInput); CloseHandle(childOutput); CloseHandle(state->input); CloseHandle(state->output); delete state; error = "Invalid debugger path"; return false; }
+    if (program.empty()) { CloseHandle(childInput); CloseHandle(childOutput); CloseHandle(childError); CloseHandle(state->input); CloseHandle(state->output); CloseHandle(state->diagnostics); delete state; error = "Invalid debugger path"; return false; }
     std::wstring command = quoteArgument(program);
-    for (const auto& arg : arguments) { const auto converted = wide(arg); if (!arg.empty() && converted.empty()) { CloseHandle(childInput); CloseHandle(childOutput); CloseHandle(state->input); CloseHandle(state->output); delete state; error = "Invalid debugger argument"; return false; } command += L" " + quoteArgument(converted); }
-    HANDLE nullError = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (nullError == INVALID_HANDLE_VALUE) { CloseHandle(childInput); CloseHandle(childOutput); CloseHandle(state->input); CloseHandle(state->output); delete state; error = "Could not redirect debug adapter diagnostics"; return false; }
+    for (const auto& arg : arguments) { const auto converted = wide(arg); if (!arg.empty() && converted.empty()) { CloseHandle(childInput); CloseHandle(childOutput); CloseHandle(childError); CloseHandle(state->input); CloseHandle(state->output); CloseHandle(state->diagnostics); delete state; error = "Invalid debugger argument"; return false; } command += L" " + quoteArgument(converted); }
     STARTUPINFOW startup{}; startup.cb = sizeof(startup); startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = childInput; startup.hStdOutput = childOutput; startup.hStdError = nullError;
+    startup.hStdInput = childInput; startup.hStdOutput = childOutput; startup.hStdError = childError;
     PROCESS_INFORMATION process{};
     state->job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     const bool jobReady = state->job && SetInformationJobObject(state->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     const bool started = jobReady && CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup, &process);
-    CloseHandle(childInput); CloseHandle(childOutput); CloseHandle(nullError);
+    CloseHandle(childInput); CloseHandle(childOutput); CloseHandle(childError);
     if (!started || !AssignProcessToJobObject(state->job, process.hProcess)) {
         const DWORD code = GetLastError(); if (started) { TerminateProcess(process.hProcess, 1); CloseHandle(process.hThread); CloseHandle(process.hProcess); }
-        if (state->job) CloseHandle(state->job); CloseHandle(state->input); CloseHandle(state->output); delete state;
+        if (state->job) CloseHandle(state->job); CloseHandle(state->input); CloseHandle(state->output); CloseHandle(state->diagnostics); delete state;
         error = "Could not start debug adapter (Windows error " + std::to_string(code) + "). Install LLVM lldb-dap and add it to PATH."; return false;
     }
     state->process = process.hProcess; ResumeThread(process.hThread); CloseHandle(process.hThread);
+    state->diagnosticReader = std::thread([state] {
+        char buffer[2048]; DWORD count = 0;
+        while (ReadFile(state->diagnostics, buffer, sizeof(buffer), &count, nullptr) && count) {
+            std::lock_guard lock(state->mutex);
+            constexpr std::size_t limit = 16384;
+            if (state->diagnosticText.size() < limit)
+                state->diagnosticText.append(buffer, std::min<std::size_t>(count, limit - state->diagnosticText.size()));
+        }
+        { std::lock_guard lock(state->mutex); state->diagnosticsDone = true; }
+        state->ready.notify_all();
+    });
     state->reader = std::thread([state] {
         char buffer[8192]; DWORD count = 0;
         while (ReadFile(state->output, buffer, sizeof(buffer), &count, nullptr) && count) {
@@ -171,10 +195,19 @@ bool AdapterProcess::send(std::string_view bytes, std::string& error) {
     if (!m_alive) { error = "Debug adapter is not running"; return false; }
     if (bytes.size() > 1024U * 1024U || m_pending.size() > 1024U * 1024U - bytes.size()) { error = "Debug adapter input exceeds limit"; return false; }
 #if defined(_WIN32)
+    bool disconnected = false;
     { std::lock_guard lock(m_windows->mutex);
-      if (!m_windows->failure.empty() || m_windows->eof) { error = "Debug adapter connection closed"; return false; }
-      if (m_windows->outgoing.size() > 1024U * 1024U - bytes.size()) { error = "Debug adapter input exceeds limit"; return false; }
-      m_windows->outgoing.append(bytes); }
+      disconnected = !m_windows->failure.empty() || m_windows->eof;
+      if (!disconnected) {
+          if (m_windows->outgoing.size() > 1024U * 1024U - bytes.size()) { error = "Debug adapter input exceeds limit"; return false; }
+          m_windows->outgoing.append(bytes);
+      }
+    }
+    if (disconnected) {
+        std::string ignored;
+        if (poll(ignored, error)) error = "Debug adapter connection closed";
+        return false;
+    }
     m_windows->ready.notify_one();
 #else
     m_pending.append(bytes);
@@ -187,8 +220,19 @@ bool AdapterProcess::poll(std::string& output, std::string& error) {
     if (!m_alive || !m_windows) { error = "Debug adapter is not running"; return false; }
     bool ended = false;
     { std::lock_guard lock(m_windows->mutex); output.swap(m_windows->incoming); error = m_windows->failure; ended = m_windows->eof; }
-    if (!error.empty()) { close(); return false; }
-    if (ended && output.empty()) { error = "Debug adapter exited"; close(); return false; }
+    if (!error.empty() || (ended && output.empty())) {
+        DWORD code = STILL_ACTIVE;
+        if (WaitForSingleObject(m_windows->process, 250) == WAIT_OBJECT_0) {
+            (void)GetExitCodeProcess(m_windows->process, &code);
+            std::unique_lock lock(m_windows->mutex);
+            (void)m_windows->ready.wait_for(lock, std::chrono::milliseconds(250), [this] { return m_windows->diagnosticsDone; });
+        }
+        if (error.empty()) error = "Debug adapter exited";
+        if (code != STILL_ACTIVE) error += " (code " + std::to_string(code) + ")";
+        if (code == 0xC0000135UL) error += ": A required DLL is missing; check the LLDB Python runtime on PATH";
+        { std::lock_guard lock(m_windows->mutex); if (!m_windows->diagnosticText.empty()) error += ": " + m_windows->diagnosticText; }
+        close(); return false;
+    }
     return true;
 #else
     if (!m_alive) { error = "Debug adapter is not running"; return false; }
@@ -225,11 +269,13 @@ void AdapterProcess::close() noexcept {
         { std::lock_guard lock(state->mutex); state->stopping = true; }
         state->ready.notify_all();
         if (state->job) TerminateJobObject(state->job, 1);
-        if (state->reader.joinable()) CancelSynchronousIo(state->reader.native_handle());
-        if (state->writer.joinable()) CancelSynchronousIo(state->writer.native_handle());
+        if (state->reader.joinable()) CancelSynchronousIo(nativeThreadHandle(state->reader));
+        if (state->writer.joinable()) CancelSynchronousIo(nativeThreadHandle(state->writer));
+        if (state->diagnosticReader.joinable()) CancelSynchronousIo(nativeThreadHandle(state->diagnosticReader));
         if (state->reader.joinable()) state->reader.join();
         if (state->writer.joinable()) state->writer.join();
-        if (state->input) CloseHandle(state->input); if (state->output) CloseHandle(state->output);
+        if (state->diagnosticReader.joinable()) state->diagnosticReader.join();
+        if (state->input) CloseHandle(state->input); if (state->output) CloseHandle(state->output); if (state->diagnostics) CloseHandle(state->diagnostics);
         if (state->process) CloseHandle(state->process); if (state->job) CloseHandle(state->job);
         delete state; m_windows = nullptr;
     }

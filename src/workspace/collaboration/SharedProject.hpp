@@ -17,9 +17,11 @@ public:
     [[nodiscard]] bool moveCursor(std::string_view id, Cursor cursor, std::string& error);
     [[nodiscard]] bool edit(std::string_view id, const Edit& edit, Edit& applied, std::string& error);
     [[nodiscard]] bool save(std::string_view path, std::string& error);
+    [[nodiscard]] Project projectCopy() const { return m_project; }
 private:
     struct User { std::string name, file; };
     struct File { std::unique_ptr<SharedDocument> document; std::string baseline; };
+    void releaseCleanFile(std::string_view path);
     Project m_project;
     std::map<std::string, User> m_users;
     std::map<std::string, File> m_files;

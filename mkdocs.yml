@@ -1,0 +1,82 @@
+site_name: Lucid
+site_description: A minimal, GPU-accelerated code editor built on Vulkan.
+site_url: https://initializeddd.github.io/Lucid/
+repo_url: https://github.com/initializeddd/Lucid
+repo_name: initializeddd/Lucid
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Lucid contributors
+
+theme:
+  name: material
+  logo: assets/branding/lucid-dark.svg
+  favicon: assets/branding/lucid-dark.svg
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+extra_css:
+  - assets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/initializeddd/Lucid
+      name: Lucid on GitHub
+    - icon: fontawesome/solid/comments
+      link: https://github.com/initializeddd/Lucid/discussions
+      name: Lucid Discussions
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Building: building.md
+  - Architecture: architecture.md
+  - Modules: modules.md
+  - Collaboration design: collaboration-design.md
+  - Roadmap: roadmap.md
+  - Project:
+      - Contributing: https://github.com/initializeddd/Lucid/blob/main/CONTRIBUTING.md
+      - Changelog: https://github.com/initializeddd/Lucid/blob/main/CHANGELOG.md
+      - Security: https://github.com/initializeddd/Lucid/blob/main/SECURITY.md
+      - Support: https://github.com/initializeddd/Lucid/blob/main/SUPPORT.md
+      - Discussions: https://github.com/initializeddd/Lucid/discussions
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true

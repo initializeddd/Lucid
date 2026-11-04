@@ -1,5 +1,6 @@
 #include "workspace/recovery/Snapshot.hpp"
 #include "workspace/recovery/History.hpp"
+#include "workspace/Project.hpp"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -11,6 +12,12 @@ int main() {
     original.openFiles.push_back({"src/b.cpp", 5, 4, 2});
     std::string error; Snapshot restored;
     if (!write(path, original, error) || !read(path, restored, error) || !(restored == original)) return 1;
+    auto invalid = original; invalid.openFiles[0].path.clear();
+    if (write(path, invalid, error) || error.empty() || !read(path, restored, error) || !(restored == original)) return 10;
+    invalid = original; invalid.line = 100000001;
+    if (write(path, invalid, error) || error.empty() || !read(path, restored, error) || !(restored == original)) return 11;
+    original.contents.assign(lucid::workspace::Project::maxFileSize + 1, 'x');
+    if (!write(path, original, error) || !read(path, restored, error) || restored.contents != original.contents) return 9;
     original.contents = "second";
     if (!write(path, original, error) || !read(path, restored, error) || !(restored == original)) return 2;
     { std::ofstream f(path, std::ios::trunc); f << "{bad"; }

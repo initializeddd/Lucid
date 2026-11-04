@@ -6,6 +6,10 @@ CMakeLists.txt text eol=lf
 
 *.png       binary
 *.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.mp4       binary
 *.ico       binary
 *.icns      binary
 *.car       binary
@@ -13,6 +17,7 @@ CMakeLists.txt text eol=lf
 *.otf       binary
 *.woff      binary
 *.woff2     binary
+*.svg       text eol=lf
 
 *.sln       text eol=crlf
 *.vcxproj   text eol=crlf

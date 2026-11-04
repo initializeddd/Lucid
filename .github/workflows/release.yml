@@ -217,7 +217,10 @@ jobs:
           merge-multiple: true
 
       - name: Create checksums
-        run: cd dist && sha256sum * > SHA256SUMS.txt
+        run: |
+          cd dist
+          sha256sum -- * > "$RUNNER_TEMP/lucid-SHA256SUMS.txt"
+          mv "$RUNNER_TEMP/lucid-SHA256SUMS.txt" SHA256SUMS.txt
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2

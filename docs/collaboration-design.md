@@ -9,6 +9,14 @@ concurrent edits, and rejects overlapping or stale edits without changing the
 host document. The replica model retains local text when it cannot safely merge.
 A bounded host listener and client transport exchange versioned, framed
 messages using a random bearer token. The loopback test runs multiple clients.
+Protocol version 3 requires the canonical file path and the per-opening context
+from the snapshot on edit, cursor, and save requests. Delayed operations cannot
+affect a different file, including an older opening of the same path.
+Authenticated clients can request a current file list with a `files` message;
+the response echoes the request ID and provides a generation, next offset, and
+truncation flag. Later pages include that generation; a changed project list
+requires browsing to restart. File scanning runs on a background worker, with one scan at a time
+to bound resource use; editor integration and large-project testing remain.
 
 The transport does **not** encrypt traffic. A future user-facing release must
 require a trusted encrypted overlay such as Tailscale, protect share links as

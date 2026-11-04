@@ -62,6 +62,7 @@ bool HostServer::start(Project project, const std::string& bindAddress, std::uin
             const auto id = found->second.id; ::close(fd); peers.erase(found); deliver(session.disconnect(id));
         };
         while (!state->stopping) {
+            deliver(session.poll());
             std::vector<pollfd> descriptors{{state->listener, POLLIN, 0}};
             for (const auto& [fd, peer] : peers) descriptors.push_back({fd, static_cast<short>(POLLIN | (peer.output.empty() ? 0 : POLLOUT)), 0});
             const int ready = ::poll(descriptors.data(), static_cast<nfds_t>(descriptors.size()), 100);
@@ -81,7 +82,10 @@ bool HostServer::start(Project project, const std::string& bindAddress, std::uin
             }
             for (std::size_t i = 1; i < descriptors.size(); ++i) {
                 const int fd = descriptors[i].fd; auto found = peers.find(fd); if (found == peers.end()) continue;
-                if (descriptors[i].revents & (POLLERR | POLLHUP | POLLNVAL)) { drop(fd); continue; }
+                // A peer may close immediately after sending a final frame.
+                // Drain readable data before treating a hangup as a disconnect.
+                if ((descriptors[i].revents & (POLLERR | POLLNVAL)) ||
+                    ((descriptors[i].revents & POLLHUP) && !(descriptors[i].revents & POLLIN))) { drop(fd); continue; }
                 if (descriptors[i].revents & POLLIN) {
                     char buffer[8192]; const auto n = recv(fd, buffer, sizeof(buffer), 0);
                     if (n <= 0) { if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) drop(fd); continue; }

@@ -7,6 +7,8 @@
 #include "renderer/vulkan/Device.hpp"
 #include "renderer/vulkan/VulkanCommon.hpp"
 #include "text/font/FontAtlas.hpp"
+#include "text/Utf8.hpp"
+#include "text/Wrap.hpp"
 
 #include <cstdint>
 
@@ -686,29 +688,54 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const auto line = state.visibleLines[static_cast<std::size_t>(state.cursorRow)];
         const auto col = std::min(line.size(), static_cast<std::size_t>(std::max(0, state.cursorColumn)));
         const float width = std::min(280.0F * contentScale, viewportWidth);
-        const std::size_t rowCount = std::max<std::size_t>(1, state.completions.size());
-        const float height = lineHeight * static_cast<float>(rowCount) + 8.0F * contentScale;
+        const auto layout = ui::completionListLayout(editorTop, viewportHeight - editorBottom,
+            editorTop + static_cast<float>(state.cursorRow) * lineHeight, lineHeight,
+            8.0F * contentScale, state.completions.size(),
+            static_cast<std::size_t>(std::max(0, state.selectedCompletion)));
+        const float height = layout.height;
         const float x = std::clamp(codeLeft + measureText(line.substr(0, col)), 0.0F,
                                    std::max(0.0F, viewportWidth - width));
-        float y = editorTop + static_cast<float>(state.cursorRow + 1) * lineHeight;
-        if (y + height > viewportHeight - editorBottom) y = std::max(editorTop, y - height - lineHeight);
+        const float y = layout.y;
         completionRects.push_back({x, y, x + width, y + height, 5.0F * contentScale,
                                    contentScale, 0.0F, 1.0F, ui::theme::kSurface, ui::theme::kBorder});
         const std::size_t first = vertices.size();
+        const float labelWidth = std::max(0.0F, width - 16.0F * contentScale);
+        const auto fitLabel = [this, labelWidth](std::string_view label) {
+            const float tabAdvance = m_font.glyph(U' ').advance * 4.0F;
+            const auto advance = [this, tabAdvance](char32_t c) {
+                return c == U'\t' ? tabAdvance : m_font.glyph(c).advance;
+            };
+            const auto fit = text::fitUtf8Prefix(label, labelWidth, advance);
+            if (fit == label.size()) return std::string(label);
+            const std::string_view dots = "...";
+            const auto dotsFit = text::fitUtf8Prefix(dots, labelWidth, advance);
+            const auto suffix = dots.substr(0, dotsFit);
+            const auto prefix = text::fitUtf8Prefix(label, std::max(0.0F, labelWidth - measureText(suffix)), advance);
+            return std::string(label.substr(0, prefix)) + std::string(suffix);
+        };
         if (state.completions.empty()) {
-            appendText(vertices, "No matching functions", x + 8.0F * contentScale,
+            appendText(vertices, fitLabel("No matching functions"), x + 8.0F * contentScale,
                        y + 4.0F * contentScale + lineHeight * 0.5F + fontCenter,
                        toGpuColor(ui::theme::kTextMuted));
         }
-        for (std::size_t i = 0; i < state.completions.size(); ++i) {
-            const float row = y + 4.0F * contentScale + static_cast<float>(i) * lineHeight;
+        for (std::size_t i = layout.first; i < std::min(state.completions.size(), layout.first + layout.count); ++i) {
+            const float row = y + 4.0F * contentScale + static_cast<float>(i - layout.first) * lineHeight;
             if (static_cast<int>(i) == state.selectedCompletion)
                 completionRects.push_back({x + 2.0F * contentScale, row, x + width - 2.0F * contentScale,
                     row + lineHeight, 3.0F * contentScale, 0.0F, 0.0F, 1.0F,
                     ui::theme::kSelection, ui::theme::kSelection});
-            appendText(vertices, state.completions[i], x + 8.0F * contentScale,
+            appendText(vertices, fitLabel(state.completions[i]), x + 8.0F * contentScale,
                        row + lineHeight * 0.5F + fontCenter, toGpuColor(ui::theme::kText));
         }
+        const float cueWidth = std::min(28.0F * contentScale, width * 0.4F);
+        const float cueX = x + (width - cueWidth) * 0.5F;
+        const float cueHeight = std::max(1.0F, contentScale);
+        if (layout.first > 0)
+            completionRects.push_back({cueX, y + contentScale, cueX + cueWidth, y + contentScale + cueHeight,
+                cueHeight * 0.5F, 0.0F, 0.0F, 0.55F, ui::theme::kTextMuted, ui::theme::kTextMuted});
+        if (layout.first + layout.count < state.completions.size())
+            completionRects.push_back({cueX, y + height - contentScale - cueHeight, cueX + cueWidth, y + height - contentScale,
+                cueHeight * 0.5F, 0.0F, 0.0F, 0.55F, ui::theme::kTextMuted, ui::theme::kTextMuted});
         if (vertices.size() > first) { completionRange = makeRange(first, fullScissor); hasCompletionText = true; }
     }
 
@@ -831,7 +858,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             std::max(80.0F * contentScale, viewportWidth - 160.0F * contentScale);
         bool truncated = false;
         while (!title.empty() && measureText(title) > maxWidth) {
-            title.pop_back();
+            title.resize(text::lastUtf8Start(title));
             truncated = true;
         }
         if (truncated) {
@@ -961,7 +988,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             message += state.settingsErrorText;
             const float maxWidth = textRect.x1 - textRect.x0;
             while (!message.empty() && measureText(message) > maxWidth) {
-                message.pop_back();
+                message.resize(text::lastUtf8Start(message));
             }
             if (!message.empty() && message.back() != '.') {
                 message += "...";
@@ -1031,7 +1058,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             bool truncated = false;
             while (!message.empty() &&
                    measureText(message) > maxWidth) {
-                message.pop_back();
+                message.resize(text::lastUtf8Start(message));
                 truncated = true;
             }
             if (truncated) {
@@ -1738,7 +1765,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             bool truncated = false;
             while (!projectName.empty() &&
                    measureText(projectName) > maxTextWidth) {
-                projectName.pop_back();
+                projectName.resize(text::lastUtf8Start(projectName));
                 truncated = true;
             }
             if (truncated) {
@@ -1832,6 +1859,9 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
     float suggestionRailX1 = 0.0F;
     float suggestionRailY1 = 0.0F;
     bool hasCommandCaret = false;
+    bool hasCommandSelection = false;
+    float commandSelectionX0 = 0.0F, commandSelectionX1 = 0.0F;
+    float commandSelectionY0 = 0.0F, commandSelectionY1 = 0.0F;
     float commandCaretX0 = 0.0F;
     float commandCaretX1 = 0.0F;
     float commandCaretY0 = 0.0F;
@@ -1867,7 +1897,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             barBlur = state.blur * contentScale;
 
             const float padding = ui::theme::kSearchBarPadding * contentScale;
-            const float textX = baseX0 + padding;
+            float textX = baseX0 + padding;
             const float centerY = baseY0 + barHeight * 0.5F;
             const float baseline = centerY + fontCenter;
             const bool empty = state.commandQuery.empty();
@@ -1893,8 +1923,26 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             const std::array<float, 4> textColor =
                 empty ? mutedColor : primaryColor;
 
+            const float textRight = baseX0 + std::max(barWidth, std::min(viewportWidth - margin * 2.0F,
+                                                                       520.0F * contentScale));
+            const auto cursor = std::min(state.commandCursor, state.commandQuery.size());
+            const float cursorWidth = measureText(state.commandQuery.substr(0, cursor));
+            if (!empty) textX -= std::max(0.0F, textX + cursorWidth + 4.0F * contentScale - textRight);
+            const auto selectionStart = std::min(state.commandSelectionStart, state.commandQuery.size());
+            const auto selectionEnd = std::min(state.commandSelectionEnd, state.commandQuery.size());
+            if (selectionStart < selectionEnd) {
+                const float left = std::max(baseX0, textX + measureText(state.commandQuery.substr(0, selectionStart)));
+                const float right = std::min(textRight, textX + measureText(state.commandQuery.substr(0, selectionEnd)));
+                if (right > left) {
+                    hasCommandSelection = true;
+                    commandSelectionX0 = transformX(left); commandSelectionX1 = transformX(right);
+                    commandSelectionY0 = transformY(centerY - caretHeight * 0.55F);
+                    commandSelectionY1 = transformY(centerY + caretHeight * 0.55F);
+                }
+            }
+
             const std::size_t textFirst = vertices.size();
-            const float penX = appendText(vertices, text, textX, baseline, textColor);
+            appendText(vertices, text, textX, baseline, textColor);
             for (std::size_t index = textFirst; index < vertices.size(); ++index) {
                 vertices[index].x = transformX(vertices[index].x);
                 vertices[index].y = transformY(vertices[index].y);
@@ -1928,7 +1976,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
 
             if (!empty && std::fmod(state.timeSeconds, 1.06) < 0.53) {
                 const float caretWidth = std::max(1.0F, 1.5F * contentScale);
-                const float caretBaseX = penX + 2.0F * contentScale;
+                const float caretBaseX = textX + cursorWidth + 2.0F * contentScale;
                 const float caretTop = centerY - caretHeight * 0.5F;
 
                 hasCommandCaret = true;
@@ -1939,7 +1987,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             }
 
             const float statusLeft = barX0 + 12.0F * contentScale;
-            float suggestionTop = barY1 + ui::theme::kSuggestionGap * contentScale;
+            float suggestionTop = barY1 + ui::commandSuggestionGap(viewportHeight / contentScale) * contentScale;
             const float suggestionWidth = std::max(
                 barWidth, std::min(viewportWidth - margin * 2.0F, 520.0F * contentScale));
             const float suggestionX0 = barX0;
@@ -1959,23 +2007,30 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 return easeOutCubic(local);
             };
 
-            if (!state.commandStatus.empty()) {
+            if (state.commandStatusRows > 0) {
                 const std::size_t commandStatusFirst = vertices.size();
-                const float statusBaseline =
-                    suggestionTop + lineHeight * 0.5F + fontCenter;
                 const std::string statusLabel = state.commandStatusIsError ? "Error: " + std::string(state.commandStatus) : std::string(state.commandStatus);
-                appendText(vertices, statusLabel, statusLeft, statusBaseline,
-                           toGpuColor(state.commandStatusIsError ? ui::theme::kError
-                                                                 : ui::theme::kTextMuted));
+                const auto statusLines = text::wrapLines(statusLabel, state.commandStatusColumns);
+                for (std::size_t row = 0; row < std::min(state.commandStatusRows, statusLines.size()); ++row) {
+                    std::string display = statusLines[row];
+                    if (row + 1 == state.commandStatusRows && statusLines.size() > state.commandStatusRows) {
+                        const auto dots = std::min<std::size_t>(3, state.commandStatusColumns);
+                        const auto prefix = text::wrapLines(display, std::max<std::size_t>(1, state.commandStatusColumns - dots));
+                        display = (state.commandStatusColumns > dots && !prefix.empty() ? prefix.front() : "") + std::string(dots, '.');
+                    }
+                    appendText(vertices, display, statusLeft,
+                               suggestionTop + static_cast<float>(row) * suggestionLineHeight + lineHeight * 0.5F + fontCenter,
+                               toGpuColor(state.commandStatusIsError ? ui::theme::kError : ui::theme::kTextMuted));
+                }
                 const VkRect2D statusScissor = makeScissorRect(
                     suggestionX0, suggestionTop, suggestionX1,
-                    suggestionTop + lineHeight);
+                    suggestionTop + static_cast<float>(state.commandStatusRows) * suggestionLineHeight);
                 if (statusScissor.extent.width > 0 && statusScissor.extent.height > 0 &&
                     vertices.size() > commandStatusFirst) {
                     commandStatusRange = makeRange(commandStatusFirst, statusScissor);
                     hasCommandStatus = true;
                 }
-                suggestionTop += suggestionLineHeight;
+                suggestionTop += static_cast<float>(state.commandStatusRows) * suggestionLineHeight;
             }
 
             const std::size_t count =
@@ -2055,19 +2110,38 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                         if (suggestion.kind == ui::SuggestionKind::Function)
                             pen = appendText(vertices, "@", pathX, suggestionBaseline,
                                              selected ? accentColor : mutedColor);
-                        pen = appendText(vertices, suggestion.path, pen,
-                                         suggestionBaseline,
-                                         selected ? accentColor : primaryColor);
-                        if (!suggestion.detail.empty()) {
-                            const float detailWidth = measureText(suggestion.detail);
-                            const float detailX =
-                                suggestionX1 - suggestionInset - pathPadding -
-                                detailWidth;
-                            if (detailX > pen + 10.0F * contentScale) {
-                                appendText(vertices, suggestion.detail, detailX,
-                                           suggestionBaseline, mutedColor);
+                        const float right = suggestionX1 - suggestionInset - pathPadding;
+                        const float available = std::max(0.0F, right - pen);
+                        const auto fit = [this](std::string_view text, float width) {
+                            if (measureText(text) <= width) return std::string(text);
+                            constexpr std::string_view suffix = "...";
+                            const float suffixWidth = measureText(suffix);
+                            if (suffixWidth > width) return std::string{};
+                            const auto boundary = [text](std::size_t offset) {
+                                while (offset > 0 && offset < text.size() &&
+                                       (static_cast<unsigned char>(text[offset]) & 0xc0U) == 0x80U) --offset;
+                                return offset;
+                            };
+                            std::size_t low = 0, high = text.size();
+                            while (low < high) {
+                                const auto middle = low + (high - low + 1) / 2;
+                                if (measureText(text.substr(0, boundary(middle))) + suffixWidth <= width) low = middle;
+                                else high = middle - 1;
                             }
-                        }
+                            return std::string(text.substr(0, boundary(low))) + std::string(suffix);
+                        };
+                        const float gap = 12.0F * contentScale;
+                        std::string detail;
+                        if (!suggestion.detail.empty() && available > 100.0F * contentScale)
+                            detail = fit(suggestion.detail, available * 0.42F);
+                        const float detailWidth = measureText(detail);
+                        const float labelWidth = std::max(0.0F, available - (detail.empty() ? 0.0F : detailWidth + gap));
+                        const std::string label = fit(suggestion.path, labelWidth);
+                        appendText(vertices, label, pen, suggestionBaseline,
+                                   selected ? accentColor : primaryColor);
+                        if (!detail.empty())
+                            appendText(vertices, detail, right - detailWidth,
+                                       suggestionBaseline, mutedColor);
                     } else if (suggestion.kind == ui::SuggestionKind::CreateFile ||
                         suggestion.kind == ui::SuggestionKind::CreateDirectory) {
                         const bool directory =
@@ -2373,7 +2447,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 : statusX0 - (trafficLights.x1 + 12.0F * contentScale) -
                       10.0F * contentScale;
         while (!title.empty() && measureText(title) > titleMaxWidth) {
-            title.pop_back();
+            title.resize(text::lastUtf8Start(title));
         }
         const float titleWidth = measureText(title);
         const float titleX =
@@ -2406,9 +2480,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
              index < std::min(static_cast<int>(outputLines.size()), firstOutputLine + maxOutputLines); ++index) {
             std::string_view line = outputLines[static_cast<std::size_t>(index)];
             const std::size_t lineOffset = static_cast<std::size_t>(line.data() - outputText.data());
-            while (!line.empty() && measureText(line) > outputMaxWidth) {
-                line.remove_suffix(1);
-            }
+            const float tabAdvance = m_font.glyph(U' ').advance * 4.0F;
+            const auto fit = text::fitUtf8Prefix(line, outputMaxWidth, [this, tabAdvance](char32_t character) {
+                return character == U'\t' ? tabAdvance : m_font.glyph(character).advance;
+            });
+            line = line.substr(0, fit);
             const std::size_t selectionStart = std::max(state.compileSelectionStart, lineOffset);
             const std::size_t selectionEnd = std::min(state.compileSelectionEnd, lineOffset + line.size());
             if (selectionStart < selectionEnd) {
@@ -2431,7 +2507,9 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             }
             const float inputMaxWidth = input.x1 - input.x0;
             while (inputLine.size() > 2 && measureText(inputLine) > inputMaxWidth) {
-                inputLine.erase(2, 1);
+                std::size_t end = 2;
+                (void)text::nextUtf8(inputLine, end);
+                inputLine.erase(2, end - 2);
             }
             const float promptWidth = measureText("> ");
             appendText(vertices, "> ", input.x0,
@@ -2908,6 +2986,13 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             drawRect(commandBuffer, iconPushConstants);
         }
 
+        if (hasCommandSelection) {
+            RectPushConstants selectionPushConstants{};
+            fillRectPushConstants(selectionPushConstants, commandSelectionX0, commandSelectionY0,
+                                  commandSelectionX1, commandSelectionY1, 0.0F, 0.0F, barBlur,
+                                  barOpacity, ui::theme::kSelection, ui::theme::kSelection);
+            drawRect(commandBuffer, selectionPushConstants);
+        }
         if (hasCommandText) {
             drawTextRange(commandTextRange, barBlur, barOpacity);
         }
@@ -3013,14 +3098,14 @@ float UiPass::appendText(std::vector<TextVertex>& vertices, std::string_view tex
     float pen = x;
     const float tabWidth = m_font.glyph(U' ').advance * 4.0F;
 
-    for (const char character : text) {
-        if (character == '\t') {
+    for (std::size_t offset = 0; offset < text.size();) {
+        const char32_t character = text::nextUtf8(text, offset);
+        if (character == U'\t') {
             pen += tabWidth;
             continue;
         }
 
-        const text::Glyph& glyph =
-            m_font.glyph(static_cast<char32_t>(static_cast<unsigned char>(character)));
+        const text::Glyph& glyph = m_font.glyph(character);
         if (glyph.hasPixels) {
             const float left = pen + glyph.x0;
             const float right = pen + glyph.x1;
@@ -3087,13 +3172,12 @@ float UiPass::measureText(std::string_view text) const {
     float width = 0.0F;
     const float tabWidth = m_font.glyph(U' ').advance * 4.0F;
 
-    for (const char character : text) {
-        if (character == '\t') {
+    for (std::size_t offset = 0; offset < text.size();) {
+        const char32_t character = text::nextUtf8(text, offset);
+        if (character == U'\t') {
             width += tabWidth;
         } else {
-            width += m_font
-                         .glyph(static_cast<char32_t>(static_cast<unsigned char>(character)))
-                         .advance;
+            width += m_font.glyph(character).advance;
         }
     }
     return width;

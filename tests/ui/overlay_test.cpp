@@ -39,6 +39,14 @@ int main() {
         !near(commandBarTop(40.0F), 16.0F)) {
         return 23;
     }
+    if (!near(lucid::ui::commandSuggestionGap(800.0F), 28.0F) ||
+        !near(lucid::ui::commandSuggestionGap(132.0F), 15.0F) ||
+        !near(lucid::ui::commandSuggestionGap(40.0F), 4.0F)) return 24;
+    const auto completion = lucid::ui::completionListLayout(52.0F, 210.0F, 124.0F, 18.0F, 8.0F, 8, 7);
+    if (completion.count >= 8 || completion.first + completion.count != 8 ||
+        completion.y < 52.0F || completion.y + completion.height > 210.0F) return 25;
+    const auto completionAbove = lucid::ui::completionListLayout(52.0F, 400.0F, 350.0F, 18.0F, 8.0F, 8, 0);
+    if (completionAbove.count != 8 || completionAbove.y + completionAbove.height > 350.0F) return 26;
 
     const auto terminal = compileTerminalLayout(1200.0F, 800.0F, 200.0F);
     if (!near(terminal.panel.x0, 564.0F) ||

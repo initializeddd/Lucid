@@ -43,7 +43,7 @@ int main() {
         std::filesystem::create_directories(fakeDir);
         const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8"}}})";
         { std::ofstream script(fakeDir / "clangd");
-          script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/sleep 5\n"; }
+          script << "#!/bin/sh\n/usr/bin/printf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/sleep 5\n"; }
         std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
         const char* pathValue = std::getenv("PATH"); const bool hadPath = pathValue != nullptr;
         const std::string oldPath = pathValue ? pathValue : "";

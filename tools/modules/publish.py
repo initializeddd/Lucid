@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,9 +56,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--owner", default="initializeddd")
     parser.add_argument("--publish", action="store_true")
+    parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
     entries = collect(args.owner)
     catalog = {"modules": entries}
+    if args.verify:
+        artifacts = [(f"ghcr.io/{entry['package']}:{entry['version']}", f"modules/{entry['id']}/module.json", "application/vnd.lucid.module.v1+json") for entry in entries]
+        artifacts.append((f"ghcr.io/{args.owner}/lucid-module-catalog:latest", "modules/catalog.json", "application/vnd.lucid.catalog.v1+json"))
+        with tempfile.TemporaryDirectory(prefix="lucid-module-verify-") as temporary:
+            for index, (reference, source, media_type) in enumerate(artifacts):
+                output = Path(temporary) / str(index)
+                subprocess.run(["oras", "pull", reference, "--output", str(output)], cwd=ROOT, check=True)
+                if (ROOT / source).read_bytes() != (output / source).read_bytes():
+                    raise ValueError(f"Published content differs: {reference}")
+                metadata = json.loads(subprocess.check_output(["oras", "manifest", "fetch", reference], cwd=ROOT))
+                layers = metadata.get("layers", [])
+                if len(layers) != 1 or layers[0].get("mediaType") != media_type:
+                    raise ValueError(f"Unexpected published layer: {reference}")
+        return
     if not args.publish:
         print(json.dumps(catalog, indent=2, ensure_ascii=False))
         return

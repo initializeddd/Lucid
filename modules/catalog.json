@@ -1,0 +1,9 @@
+{
+  "modules": [
+    {
+      "id": "lucid-cpp-starter",
+      "package": "initializeddd/lucid-module-cpp-starter",
+      "version": "1.0.0"
+    }
+  ]
+}

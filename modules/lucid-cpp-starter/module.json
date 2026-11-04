@@ -1,0 +1,21 @@
+{
+  "name": "C++ Starter",
+  "version": "1.0.0",
+  "description": "Insert small C++ starting points without leaving the editor.",
+  "permissions": {
+    "project": false,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Insert C++ main function",
+      "insert": "#include <iostream>\n\nint main() {\n    std::cout << \"Hello, world!\\n\";\n    return 0;\n}\n"
+    },
+    {
+      "title": "Insert C++ header guard",
+      "insert": "#pragma once\n"
+    }
+  ]
+}

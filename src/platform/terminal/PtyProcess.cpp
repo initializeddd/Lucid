@@ -35,7 +35,9 @@ namespace {
 
 constexpr std::size_t kMaxRawOutput = 256U * 1024U;
 constexpr std::size_t kMaxOutput = 64U * 1024U;
-constexpr const char kEchoOffCommand[] = "stty -echo 2>/dev/null; printf '\\n__LUCID_ECHO_OFF__\\n'\n";
+constexpr const char kEchoOffCommand[] =
+    "set +o emacs 2>/dev/null; set +o vi 2>/dev/null; "
+    "stty -echo 2>/dev/null; printf '\\n__LUCID_ECHO_OFF__\\n'\n";
 constexpr std::string_view kEchoSentinel = "\n__LUCID_ECHO_OFF__";
 
 [[nodiscard]] std::string makeMarker() {

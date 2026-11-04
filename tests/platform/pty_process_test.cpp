@@ -2,6 +2,7 @@
 #include "editor/compile/CompileScript.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -30,27 +31,35 @@ int main() {
     const auto exitCodes = process.exitCodes();
     process.close();
 
+    const auto fail = [&](int code) {
+        std::fprintf(stderr, "pty test failed with code %d\n", code);
+        std::fprintf(stderr, "exit codes:");
+        for (const int value : exitCodes) std::fprintf(stderr, " %d", value);
+        std::fprintf(stderr, "\noutput:\n%s\n", output.c_str());
+        return code;
+    };
+
     if (output.find("hello") == std::string::npos) {
-        return 2;
+        return fail(2);
     }
     if (output.find("world") == std::string::npos) {
-        return 3;
+        return fail(3);
     }
     if (output.find("__LUCID_DONE_") != std::string::npos) {
-        return 4;
+        return fail(4);
     }
     if (output.find('\r') != std::string::npos ||
         output.find('\x1b') != std::string::npos) {
-        return 5;
+        return fail(5);
     }
 
-    if (exitCodes != std::vector<int>{0, 1, 0, 0}) return 6;
-    if (output.find("[Command 2 failed with exit code 1]") == std::string::npos) return 24;
+    if (exitCodes != std::vector<int>{0, 1, 0, 0}) return fail(6);
+    if (output.find("[Command 2 failed with exit code 1]") == std::string::npos) return fail(24);
     if (output.find("[Command 1 finished in ") == std::string::npos ||
         output.find(" ms; exit code 0]") == std::string::npos ||
-        output.find(" ms; exit code 1]") == std::string::npos) return 25;
+        output.find(" ms; exit code 1]") == std::string::npos) return fail(25);
     if (output.find("\xc3\xa9") != std::string::npos || output.find("X\n") == std::string::npos ||
-        output.find('\xc3') != std::string::npos) return 7;
+        output.find('\xc3') != std::string::npos) return fail(7);
     if (!process.start(".", {"awk 'BEGIN { for (i=0; i<33001; i++) printf \"\\303\\251\"; printf \"\\n\" }'"}, error)) return 8;
     for (int attempt = 0; attempt < 600 && !process.commandsDone(); ++attempt) {
         process.update();
@@ -59,7 +68,11 @@ int main() {
     const std::string longOutput(process.output());
     const bool done = process.commandsDone();
     process.close();
-    if (!done || longOutput.size() < 64000 || (static_cast<unsigned char>(longOutput.front()) & 0xc0U) == 0x80U) return 9;
+    if (!done || longOutput.size() < 64000 || (static_cast<unsigned char>(longOutput.front()) & 0xc0U) == 0x80U) {
+        std::fprintf(stderr, "long output failed: done=%d size=%zu first=0x%02x\n", done ? 1 : 0,
+                     longOutput.size(), longOutput.empty() ? 0 : static_cast<unsigned char>(longOutput.front()));
+        return 9;
+    }
     const std::string path = "/tmp/a b'\"$HOME`bad`\\folder";
     const std::unordered_map<std::string, std::string> vars{{"project", path}};
     const auto expand = [&vars](std::string_view command) { return lucid::editor::expandCompileShellVariables(command, vars); };

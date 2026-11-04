@@ -18,7 +18,7 @@ ctest --test-dir build --output-on-failure
 
 ## Checklist
 
-- [ ] I read [CONTRIBUTING.md](../CONTRIBUTING.md).
+- [ ] I read the [contribution guide](https://github.com/initializeddd/Lucid/blob/main/CONTRIBUTING.md).
 - [ ] The change is focused and contains no unrelated formatting churn.
 - [ ] I added or updated tests for behaviour changes.
 - [ ] I updated the README or `docs/` if requirements or behaviour changed.

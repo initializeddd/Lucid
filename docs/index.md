@@ -8,10 +8,9 @@ Keyboard-first. Path-native. Drawn entirely on the GPU.
 [Get started](getting-started.md){ .md-button }
 [View on GitHub](https://github.com/initializeddd/Lucid){ .md-button }
 
-![The Lucid editor showing a C++ file](assets/screenshots/editor.png)
-
 !!! warning "Beta software"
-    Lucid is in beta. File formats and behavior may change between releases. See the
+    Lucid is in beta. File formats and behavior may change between releases. These guides describe
+    the current source tree, which can differ from the downloadable beta. See the
     [changelog](https://github.com/initializeddd/Lucid/blob/main/CHANGELOG.md) and
     [roadmap](roadmap.md).
 
@@ -52,12 +51,15 @@ Keyboard-first. Path-native. Drawn entirely on the GPU.
 
 ## See it in action
 
-![Opening a C++ file and scrolling through the code](assets/screenshots/demo.gif)
+**Welcome screen**
 
-A short [MP4 version](assets/screenshots/demo.mp4) is available for reduced-motion or
-lower-bandwidth viewing.
+![Lucid's welcome screen with the animated ocean lighthouse background](assets/screenshots/lighthouse-welcome.gif)
 
-![The Lucid start surface](assets/screenshots/start.png)
+**Editing a file**
+
+![A C++ file open in Lucid over the softly blurred lighthouse background](assets/screenshots/lighthouse-editor.gif)
+
+These short, sampled animations show the lighthouse scene in the welcome screen and editor.
 
 ## Install
 

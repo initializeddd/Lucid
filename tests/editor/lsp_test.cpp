@@ -40,7 +40,7 @@ int main() {
         if (!capabilities.ready() || !capabilities.supports("textDocument/completion") || capabilities.supports("textDocument/signatureHelp") || !capabilities.supports("workspace/symbol") || !capabilities.supports("textDocument/documentSymbol") || !capabilities.supports("textDocument/definition") || !capabilities.supports("textDocument/declaration") ||
             !capabilities.supports("textDocument/formatting") || capabilities.supports("textDocument/references") ||
             capabilities.supports("textDocument/rangeFormatting") || capabilities.request("textDocument/references", "{}", requestId, error) ||
-            requestId != 0 || error.find("does not support") == std::string::npos) return 33;
+            requestId != 0 || error.find("does not support") == std::string::npos) { std::fprintf(stderr, "capabilities test failed: ready=%d error=%s messages=%zu\n", capabilities.ready(), error.c_str(), messages.size()); return 33; }
         if (capabilities.request("textDocument/signatureHelp", "{}", requestId, error) || requestId != 0 || error.find("does not support") == std::string::npos) return 42;
         if (!capabilities.request("textDocument/definition", "{}", requestId, error) || !capabilities.cancel(requestId, error)) return 35;
         bool receivedCancel = false;
@@ -50,7 +50,7 @@ int main() {
             if (data.find("\"method\":\"$/cancelRequest\"") != std::string::npos && data.find("\"params\":{\"id\":" + std::to_string(requestId) + "}") != std::string::npos && data.find("\"id\":\"config-1\",\"result\":[null,null]") != std::string::npos) { receivedCancel = true; break; }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        if (!receivedCancel) return 36;
+        if (!receivedCancel) { std::ifstream recorded(fakeDir / "received"); const std::string data((std::istreambuf_iterator<char>(recorded)), {}); std::fprintf(stderr, "cancel test failed: error=%s received=%s\n", error.c_str(), data.c_str()); return 36; }
         capabilities.close(); std::filesystem::remove_all(fakeDir);
         if (capabilities.supports("textDocument/completion")) return 34;
     }

@@ -163,6 +163,7 @@ int main() {
     std::error_code symlinkError; fs::create_directory_symlink(exportRoot / "real-dir", exportRoot / "linked-dir", symlinkError);
     if (!symlinkError) saved = saved && !saveSqlResultCsv(project, "data.csv", "linked-dir/result.csv", csv, exportError) && !fs::exists(exportRoot / "real-dir" / "result.csv");
     std::ifstream dbFile(exportRoot / "data.csv", std::ios::binary); const std::string afterDb((std::istreambuf_iterator<char>(dbFile)), {});
+    dbFile.close();
     saved = saved && afterDb == snapshot;
     fs::remove_all(exportRoot); if (!saved) return 57;
     return 0;

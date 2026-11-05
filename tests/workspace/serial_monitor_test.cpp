@@ -2,12 +2,14 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
-#if defined(__APPLE__)
-#include <util.h>
-#elif defined(__linux__)
-#include <pty.h>
-#endif
 #if !defined(_WIN32)
+#if defined(__linux__)
+#include <pty.h>
+#elif defined(__FreeBSD__)
+#include <libutil.h>
+#else
+#include <util.h>
+#endif
 #include <unistd.h>
 #endif
 int main() {

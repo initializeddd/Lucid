@@ -33,6 +33,7 @@ int main() {
         !saveCMakeBoolCacheUpdate(project, update, error)) return 9;
     std::ifstream unicodeInput(unicodeCache, std::ios::binary);
     const std::string unicodeContents((std::istreambuf_iterator<char>(unicodeInput)), {});
+    unicodeInput.close();
     if (unicodeContents != "// Comment\r\nFEATURE:BOOL=ON\r\nOTHER:STRING=x\r\n") return 10;
     const auto reply = root / "bad" / ".cmake/api/v1/reply";
     fs::create_directories(reply);

@@ -6,11 +6,11 @@ using namespace lucid::modules;
 int main() {
     namespace fs = std::filesystem; std::error_code ec;
     auto root = fs::canonical(fs::temp_directory_path()) / ("lucid-pref-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    auto settings = root / "settings", a = root / "prójéct", b = root / "other";
+    auto settings = root / "settings", a = root / fs::path(u8"prójéct"), b = root / "other";
     fs::create_directories(settings); fs::create_directories(a); fs::create_directories(b);
     PythonPreference pa, pb, stale; std::string error;
     if (!loadPythonPreference(settings, a, pa, error) || pa.exists || !loadPythonPreference(settings, b, pb, error) || pa.filename == pb.filename) return 1;
-    auto python = fs::path("/tmp") / "python-é";
+    auto python = root / fs::path(u8"python-é");
     if (!savePythonPreference(settings, pa, python, error) || !loadPythonPreference(settings, a, stale, error) || stale.interpreter != python) return 2;
     if (!savePythonPreference(settings, pa, {}, error) || savePythonPreference(settings, stale, python, error)) return 3;
     if (!loadPythonPreference(settings, a, stale, error) || !stale.interpreter.empty()) return 4;

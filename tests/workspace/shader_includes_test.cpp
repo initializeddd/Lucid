@@ -7,9 +7,9 @@ int main() {
     namespace fs = std::filesystem;
     const auto root=fs::temp_directory_path()/("lucid-shader-includes-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(root/"sub");
-    { std::ofstream file(root/"main.vert"); file << "// #include \"ignored\"\n#include \"sub/a.glsl\"\n#include <system>\n#include MACRO\n#include \"missing.glsl\"\n#include \"../outside\"\n"; }
-    { std::ofstream file(root/"sub"/"a.glsl"); file << "/* #include \"no\" */\n#include \"../main.vert\"\n#include \"common.glsl\"\n"; }
-    { std::ofstream file(root/"sub"/"common.glsl"); file << "float x;\n"; }
+    { std::ofstream file(root/"main.vert", std::ios::binary); file << "// #include \"ignored\"\n#include \"sub/a.glsl\"\n#include <system>\n#include MACRO\n#include \"missing.glsl\"\n#include \"../outside\"\n"; }
+    { std::ofstream file(root/"sub"/"a.glsl", std::ios::binary); file << "/* #include \"no\" */\n#include \"../main.vert\"\n#include \"common.glsl\"\n"; }
+    { std::ofstream file(root/"sub"/"common.glsl", std::ios::binary); file << "float x;\n"; }
     bool created=false; std::string error; auto project=lucid::workspace::Project::openOrCreate(root,created,error,false,false);
     auto graph=inspectShaderIncludes(project,"main.vert");
     if (!graph.incomplete || graph.cancelled || graph.edges.size()!=7 || graph.snapshots.size()!=3) return 1;
@@ -17,10 +17,10 @@ int main() {
     if (graph.snapshots.at("sub/common.glsl")!="float x;\n") return 3;
     std::atomic_bool cancel{true}; graph=inspectShaderIncludes(project,"main.vert",&cancel); if (!graph.cancelled || !graph.incomplete || !graph.snapshots.empty()) return 4;
     graph=inspectShaderIncludes(project,"../outside"); if (!graph.incomplete || !graph.snapshots.empty()) return 5;
-    { std::ofstream file(root/"sub"/"common.glsl"); file << "#include \"main.vert\"\\\n"; }
+    { std::ofstream file(root/"sub"/"common.glsl", std::ios::binary); file << "#include \"main.vert\"\\\n"; }
     graph=inspectShaderIncludes(project,"sub/common.glsl"); if (!graph.incomplete || graph.edges.size()!=1 || graph.edges[0].status!=ShaderIncludeStatus::Unsupported) return 6;
     { std::ofstream file(root/"continued.vert",std::ios::binary); file << "// ignored \\\n#include \"missing.glsl\"\n#inc\\\r\nlude \\\r\n  \"sub/common.glsl\"\n"; }
-    { std::ofstream file(root/"sub"/"common.glsl"); file << "float x;\n"; }
+    { std::ofstream file(root/"sub"/"common.glsl", std::ios::binary); file << "float x;\n"; }
     graph=inspectShaderIncludes(project,"continued.vert");
     if (graph.incomplete || graph.edges.size()!=1 || graph.edges[0].status!=ShaderIncludeStatus::Resolved || graph.edges[0].line!=3 || graph.edges[0].target!="sub/common.glsl") return 7;
     fs::remove_all(root); return 0;

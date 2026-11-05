@@ -39,7 +39,7 @@ bool expression(const std::string& name, std::string& out) {
     out = "^";
     for (unsigned char c : name) {
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '/' || c == ':' || c == ' ') out += static_cast<char>(c);
-        else if (c == '.') out += "\\.";
+        else if (std::string_view(".[]()+*?|^$").find(static_cast<char>(c)) != std::string_view::npos) { out += '\\'; out += static_cast<char>(c); }
         else return false;
     }
     out += '$'; return true;

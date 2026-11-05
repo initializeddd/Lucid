@@ -3552,6 +3552,7 @@ void Application::refreshModuleSuggestions() {
                 for (std::size_t i = 0; i < m_containerListing.containers.size(); ++i) { const auto& item = m_containerListing.containers[i]; add(clean(item.names.empty() ? item.id : item.names), clean(item.image + " · " + item.status), static_cast<int>(i)); }
                 if (!m_containerListing.warnings.empty()) add("Listing contains unsupported fields", "Some runtime information was omitted", -99, ui::SuggestionKind::ReadOnlyText);
             } else if (m_containerStage == 2 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size()) {
+                add("Inspect container details", "Reads state, ports and mounts from the selected runtime. Enter confirms.", -314);
                 add("Read recent container logs", "Runs the selected runtime; logs may contain secrets. Enter confirms.", -98);
                 if (std::find(m.requirements.begin(), m.requirements.end(), "container-lifecycle-v1") != m.requirements.end()) {
                     add("Start container…", "Review the selected target before starting", -130);
@@ -3563,6 +3564,16 @@ void Application::refreshModuleSuggestions() {
                 const auto& target = m_containerListing.containers[*m_containerSelected];
                 add("Confirm " + m_containerOperation + " container " + target.id, "Runs the selected runtime on its configured host. This changes container state.", -133);
                 add("< Cancel", "No action is run", -134);
+            } else if (m_containerStage == 9) {
+                add("< Back to containers", "", -95);
+                auto clean=[](std::string s) { for(char& c:s) if(static_cast<unsigned char>(c)<32 || c==127)c=' '; std::string error; return editor::Document::canEditLosslessly(s,error)?s:std::string("[Invalid text]"); };
+                add("Container details", "Metadata can contain sensitive paths and addresses", -99, ui::SuggestionKind::ReadOnlyText);
+                add("Name",clean(m_containerDetails.name),-99,ui::SuggestionKind::ReadOnlyText);
+                add("Image",clean(m_containerDetails.image),-99,ui::SuggestionKind::ReadOnlyText);
+                add("Status",clean(m_containerDetails.status + (m_containerDetails.health.empty()?"":" · health: "+m_containerDetails.health)),-99,ui::SuggestionKind::ReadOnlyText);
+                for(const auto& port:m_containerDetails.ports) add("Port",clean(port),-99,ui::SuggestionKind::ReadOnlyText);
+                for(const auto& mount:m_containerDetails.mounts) add("Mount",clean(mount),-99,ui::SuggestionKind::ReadOnlyText);
+                if(m_containerDetails.incomplete) add("Details incomplete", "Some metadata was missing, unsupported or limited",-99,ui::SuggestionKind::ReadOnlyText);
             } else if (m_containerStage == 3) {
                 add("< Back to containers", "", -95);
                 add("Recent logs", "May contain sensitive data; output is limited", -99, ui::SuggestionKind::ReadOnlyText);
@@ -5049,7 +5060,7 @@ void Application::applyModuleCommand() {
             }
             return;
         }
-        if (choice == -95) { m_containerStage = 1; m_containerSelected.reset(); m_containerOperation.clear(); m_containerOutput.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -95) { m_containerStage = 1; m_containerSelected.reset(); m_containerOperation.clear(); m_containerOutput.clear(); m_containerDetails = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
         if (choice == -134 && m_containerStage == 4) { m_containerOperation.clear(); m_containerStage = 2; m_selectedSuggestion = -1; refreshSuggestions(); return; }
         if (!m_containerProjectRoot.empty() && (!m_hasProject || m_project.root().generic_string() != m_containerProjectRoot)) { m_containerShowing = false; m_containerListing = {}; m_containerSelected.reset(); m_containerProjectRoot.clear(); refreshSuggestions(); setCommandStatus("Project changed; reopen container tools", true); return; }
         if (choice >= 0 && m_containerStage == 1 && static_cast<std::size_t>(choice) < m_containerListing.containers.size()) { m_containerSelected = static_cast<std::size_t>(choice); m_containerStage = 2; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
@@ -5059,17 +5070,20 @@ void Application::applyModuleCommand() {
             m_containerOperation = choice == -130 ? "start" : choice == -131 ? "stop" : "restart";
             m_containerStage = 4; m_selectedSuggestion = -1; refreshSuggestions(); return;
         }
-        if (((choice == -97 || choice == -135) && m_containerStage == 0) || (choice == -98 && m_containerStage == 2 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size()) || (choice == -133 && m_containerStage == 4 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size())) {
+        if (((choice == -97 || choice == -135) && m_containerStage == 0) || ((choice == -98 || choice == -314) && m_containerStage == 2 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size()) || (choice == -133 && m_containerStage == 4 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size())) {
             std::vector<modules::Module> fresh; std::string error;
             if (m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_containerModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_containerModule && m.enabled && m.valid && m.processes && m.network && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "inspect-containers"; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
             if (m_containerFuture.valid()) { setCommandStatus("A container operation is still finishing", false); return; }
             if (choice == -133 && std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_containerModule && std::find(m.requirements.begin(), m.requirements.end(), "container-lifecycle-v1") != m.requirements.end(); })) { setCommandStatus("Module no longer permits container actions", true); return; }
             m_containerRunningLogs = choice == -98;
+            m_containerRunningDetails = choice == -314;
+            if(m_containerRunningDetails) m_containerDetails = {};
             std::vector<std::string> args;
-            if (m_containerRunningLogs || choice == -133) {
+            if (m_containerRunningLogs || m_containerRunningDetails || choice == -133) {
                 const auto& id = m_containerListing.containers[*m_containerSelected].id;
                 if (id.empty() || id.size() > 64 || !std::all_of(id.begin(), id.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); })) { setCommandStatus("Runtime returned an unsupported container ID", true); return; }
                 if (m_containerRunningLogs) args = {"logs", "--tail", "200", id};
+                else if (m_containerRunningDetails) args = {"inspect", "--", id};
                 else {
                     if (m_containerOperation != "start" && m_containerOperation != "stop" && m_containerOperation != "restart") { setCommandStatus("Invalid container action", true); return; }
                     args = {m_containerOperation, id};
@@ -5085,9 +5099,10 @@ void Application::applyModuleCommand() {
                     args.push_back("label=com.docker.compose.project.working_dir=" + std::string(native.begin(), native.end()));
                 }
             }
-            const auto runtime = m_containerRuntime; const bool logs = m_containerRunningLogs, lifecycle = choice == -133;
+            const auto runtime = m_containerRuntime; const bool logs = m_containerRunningLogs, details = m_containerRunningDetails, lifecycle = choice == -133;
+            const auto expectedId = details ? m_containerListing.containers[*m_containerSelected].id : std::string{};
             m_containerCancel = std::make_shared<std::atomic_bool>(false);
-            m_containerFuture = std::async(std::launch::async, [runtime, args, logs, lifecycle, cancel = m_containerCancel] { ContainerResult result; result.process = modules::runModuleProcess(runtime, args, std::chrono::seconds(30), 1024U * 1024U, cancel.get()); if (!result.process.error.empty() || result.process.exitCode != 0 || result.process.timedOut || result.process.cancelled) result.error = "Container runtime failed, timed out or was cancelled"; else if (!logs && !lifecycle && result.process.outputTruncated) result.error = "Container listing exceeded the output limit"; else if (!logs && !lifecycle) (void)modules::parseContainerListing(result.process.output, result.listing, result.error); return result; });
+            m_containerFuture = std::async(std::launch::async, [runtime, args, logs, details, lifecycle, expectedId, cancel = m_containerCancel] { ContainerResult result; result.process = modules::runModuleProcess(runtime, args, std::chrono::seconds(30), 1024U * 1024U, cancel.get()); if (!result.process.error.empty() || result.process.exitCode != 0 || result.process.timedOut || result.process.cancelled) result.error = "Container runtime failed, timed out or was cancelled"; else if (!logs && !lifecycle && result.process.outputTruncated) result.error = "Container data exceeded the output limit"; else if(details) { if(modules::parseContainerDetails(result.process.output,result.details,result.error) && !result.details.id.starts_with(expectedId)) result.error="Container identity changed; refresh the listing"; result.process.output.clear(); } else if (!logs && !lifecycle) (void)modules::parseContainerListing(result.process.output, result.listing, result.error); return result; });
             m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Running container command… Escape cancels", false); return;
         }
         return;
@@ -6533,7 +6548,7 @@ void Application::pollModules() {
                 return;
             }
             const bool lifecycle = !m_containerOperation.empty() && m_containerStage == 4;
-            if (result.error.empty()) { if (m_containerRunningLogs) { m_containerOutput = std::move(result.process.output); if (result.process.outputTruncated) m_containerOutput += "\n[Output truncated]"; m_containerStage = 3; } else if (lifecycle) { m_containerStage = 0; m_containerListing = {}; m_containerSelected.reset(); } else { m_containerListing = std::move(result.listing); m_containerStage = 1; } }
+            if (result.error.empty()) { if (m_containerRunningLogs) { m_containerOutput = std::move(result.process.output); if (result.process.outputTruncated) m_containerOutput += "\n[Output truncated]"; m_containerStage = 3; } else if(m_containerRunningDetails) {m_containerDetails=std::move(result.details);m_containerStage=9;} else if (lifecycle) { m_containerStage = 0; m_containerListing = {}; m_containerSelected.reset(); } else { m_containerListing = std::move(result.listing); m_containerStage = 1; } }
             if (lifecycle && !result.error.empty()) m_containerStage = 2;
             m_containerOperation.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(result.error.empty() ? (lifecycle ? "Container action completed; refresh the listing" : "Container data loaded") : result.error, !result.error.empty());
         } else if (!m_containerProjectRoot.empty() && m_containerShowing && (!m_hasProject || m_project.root().generic_string() != m_containerProjectRoot)) {

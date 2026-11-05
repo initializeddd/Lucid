@@ -236,6 +236,12 @@ each require a separate confirmation identifying the container, and operate on
 the runtime's configured host. A completed action clears the listing so it can
 be refreshed. Output and runtime duration are bounded; cancellation cannot undo
 an action already accepted by the runtime.
+**Inspect container details** separately runs the selected runtime to show image,
+state, health, published ports and mounts. The runtime's full inspect response
+can contain secrets and is held temporarily in memory; environment variables and
+credentials are not displayed or retained in the parsed view. Mount paths and
+addresses can themselves be sensitive. Unsupported or limited metadata is marked
+incomplete, and results are a snapshot that can become stale.
 
 **Configured project actions** reads a project-relative JSON file, for example
 `{"version":1,"actions":[{"name":"Build web","operation":"build","composeFile":"compose.yaml","services":["web"]}]}`.
@@ -438,7 +444,7 @@ still matches the content reviewed before compilation; creation is exclusive.
 Another process can still race the final file check. **Inspect includes** reads
 saved project-local files without running the compiler and shows an advisory graph
 of literal quoted includes. It does not evaluate conditions, macros or compiler
-search paths; unsupported, missing, cyclic and bounded results are marked
+search paths; backslash-continued literal directives are followed, while unsupported, missing, cyclic and bounded results are marked
 incomplete. Select a directive to navigate only while its source still matches
 the captured bytes and has no unsaved edits. After saving a
 SPIR-V artifact, **Inspect saved SPIR-V metadata** reads the current file and
@@ -521,7 +527,8 @@ CTest discovery and tests can execute project code with the user's privileges,
 including network access. Automatic fixture setup and cleanup tests are excluded to
 avoid running unselected tests; this can change a fixture-dependent test's behavior.
 Escape requests cancellation of discovery or a selected run. Windows execution is
-implemented but has not yet been verified on Windows. Some test-name characters and
+implemented but has not yet been verified on Windows. Common parameterized names
+with `[]`, parentheses and regex metacharacters are matched literally; some other test-name characters and
 builds outside the open project are not yet supported.
 
 Hex Editor opens a project-local file up to 16 MiB in a paged hexadecimal view.

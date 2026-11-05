@@ -54,9 +54,9 @@ int main() {
     if (!planFailedCTestReruns(discovered, {{{pass, duplicate, missing, unsafe, ambiguous}}, {{other}}, {{fail, ambiguous, ambiguous}}}, plan, error) || plan.size() != 5) return 21;
     if (plan[0].name != "ambiguous" || plan[0].status != FailedRerunStatus::AmbiguousResult || plan[0].lastObservedRun != 2 ||
         plan[1].status != FailedRerunStatus::AmbiguousDiscovery || plan[2].name != "flaky" || plan[2].status != FailedRerunStatus::Ready || plan[2].lastObservedRun != 2 ||
-        plan[3].status != FailedRerunStatus::NotDiscovered || plan[4].status != FailedRerunStatus::UnsupportedName) return 22;
+        plan[3].status != FailedRerunStatus::NotDiscovered || plan[4].status != FailedRerunStatus::Ready) return 22;
     if (!planFailedCTestReruns(discovered, {{{fail}}, {{other}}, {{pass}}}, plan, error) || !plan.empty()) return 23;
     if (planFailedCTestReruns(discovered, std::vector<TestResults>(11), plan, error) || error.empty() || !plan.empty()) return 24;
-    if (!canRunCTestNameExactly("suite.test 1") || canRunCTestNameExactly("suite[1]") || canRunCTestNameExactly(std::string(1025, 'a')) || canRunCTestNameExactly("")) return 25;
+    if (!canRunCTestNameExactly("suite.test 1") || !canRunCTestNameExactly("suite[1]") || !canRunCTestNameExactly("case(a+b)?") || canRunCTestNameExactly("suite\\1") || canRunCTestNameExactly(std::string(1025, 'a')) || canRunCTestNameExactly("")) return 25;
     return 0;
 }

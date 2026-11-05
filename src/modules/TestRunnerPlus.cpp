@@ -223,7 +223,7 @@ std::vector<TestHistorySummary> summarizeCTestHistory(const std::vector<TestResu
 
 bool canRunCTestNameExactly(std::string_view name) noexcept {
     if (name.empty() || name.size() > 1024) return false;
-    for (unsigned char c : name) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '/' || c == ':' || c == ' ' || c == '.')) return false;
+    for (unsigned char c : name) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '/' || c == ':' || c == ' ' || std::string_view(".[]()+*?|^$").find(static_cast<char>(c)) != std::string_view::npos)) return false;
     return true;
 }
 

@@ -19,5 +19,9 @@ int main() {
     graph=inspectShaderIncludes(project,"../outside"); if (!graph.incomplete || !graph.snapshots.empty()) return 5;
     { std::ofstream file(root/"sub"/"common.glsl"); file << "#include \"main.vert\"\\\n"; }
     graph=inspectShaderIncludes(project,"sub/common.glsl"); if (!graph.incomplete || graph.edges.size()!=1 || graph.edges[0].status!=ShaderIncludeStatus::Unsupported) return 6;
+    { std::ofstream file(root/"continued.vert",std::ios::binary); file << "// ignored \\\n#include \"missing.glsl\"\n#inc\\\r\nlude \\\r\n  \"sub/common.glsl\"\n"; }
+    { std::ofstream file(root/"sub"/"common.glsl"); file << "float x;\n"; }
+    graph=inspectShaderIncludes(project,"continued.vert");
+    if (graph.incomplete || graph.edges.size()!=1 || graph.edges[0].status!=ShaderIncludeStatus::Resolved || graph.edges[0].line!=3 || graph.edges[0].target!="sub/common.glsl") return 7;
     fs::remove_all(root); return 0;
 }

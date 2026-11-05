@@ -1098,7 +1098,7 @@ struct ApplicationInteractionTest {
         {
             const auto oldRoot = app.m_moduleRoot; auto oldModules = app.m_modules; const auto oldSelected = app.m_moduleSelected;
             const auto runtime = temp / "docker"; const auto marker = temp / "container-ran";
-            { std::ofstream script(runtime); script << "#!/bin/sh\nif [ \"$1\" = ps ]; then printf '%s\\n' \"$@\" > '" << marker.string() << "'; printf '%s\\n' '{\"ID\":\"abcdef123456\",\"Image\":\"demo\",\"Names\":\"sample\",\"Status\":\"Up\"}'; else printf '%s %s' \"$1\" \"$2\" > '" << marker.string() << "'; printf 'hello log\\n'; fi\n"; }
+            { std::ofstream script(runtime); script << "#!/bin/sh\nif [ \"$1\" = ps ]; then printf '%s\\n' \"$@\" > '" << marker.string() << "'; printf '%s\\n' '{\"ID\":\"abcdef123456\",\"Image\":\"demo\",\"Names\":\"sample\",\"Status\":\"Up\"}'; elif [ \"$1\" = inspect ]; then printf '%s\\n' \"$@\" > '" << marker.string() << "'; printf '%s\\n' '[{\"Id\":\"abcdef123456abcd\",\"Name\":\"sample\",\"Config\":{\"Image\":\"demo\",\"Env\":[\"SECRET=hidden\"]},\"State\":{\"Status\":\"running\"},\"Mounts\":[],\"NetworkSettings\":{\"Ports\":{}}}]'; else printf '%s %s' \"$1\" \"$2\" > '" << marker.string() << "'; printf 'hello log\\n'; fi\n"; }
             std::filesystem::permissions(runtime, std::filesystem::perms::owner_all);
             std::string error; app.m_moduleRoot = temp / "container-modules";
             const std::string manifest = R"({"name":"Container","version":"1","requires":["container-inspection-v1","container-lifecycle-v1"],"permissions":{"project":false,"network":true,"processes":true,"settings":false},"commands":[{"title":"Inspect","action":"inspect-containers"}]})";
@@ -1116,6 +1116,10 @@ struct ApplicationInteractionTest {
             if (!select(0) || app.m_containerStage != 2 || std::filesystem::exists(marker) || !select(-98)) return 605;
             while (app.m_containerFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             if (app.m_containerFuture.valid() || app.m_containerStage != 3 || app.m_containerOutput.find("hello log") == std::string::npos || !std::filesystem::exists(marker)) return 606;
+            std::filesystem::remove(marker);
+            if (!select(-95) || !select(0) || !select(-314)) return 1101;
+            while (app.m_containerFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+            if (app.m_containerFuture.valid() || app.m_containerStage != 9 || app.m_containerDetails.image != "demo" || app.m_containerOutput.find("SECRET") != std::string::npos || !std::filesystem::exists(marker)) return 1102;
             std::filesystem::remove(marker);
             if (!select(-95) || !select(0) || !select(-131) || app.m_containerStage != 4 || std::filesystem::exists(marker)) return 650;
             if (!select(-134) || app.m_containerStage != 2 || std::filesystem::exists(marker)) return 651;

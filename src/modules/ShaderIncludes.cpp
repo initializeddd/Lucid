@@ -37,20 +37,29 @@ ShaderIncludeGraph inspectShaderIncludes(const workspace::Project& project, std:
         std::string data,error;
         if (!project.readFileBounded(path,data,error,1024U*1024U,cancel) || data.size()>4U*1024U*1024U-total) { graph.incomplete=true; (void)stopped(); return; }
         total+=data.size(); graph.snapshots.emplace(path,data); active.insert(path);
-        bool block=false, continued=false; std::size_t pos=0,lineNo=0;
+        bool block=false; std::size_t pos=0,lineNo=0;
         while (pos<data.size() && !stopped()) {
-            const auto end=data.find('\n',pos); const auto count=(end==std::string::npos?data.size():end)-pos;
-            auto stripped=strip(std::string_view(data).substr(pos,count),block); ++lineNo;
-            pos=end==std::string::npos?data.size():end+1;
+            const auto firstLine=lineNo+1; std::string logical; bool dangling=false;
+            // GLSL preprocessing splices a backslash immediately followed by a
+            // newline before comment removal. Keep the first physical line for navigation.
+            do {
+                const auto end=data.find('\n',pos); auto count=(end==std::string::npos?data.size():end)-pos;
+                if(count && data[pos+count-1]=='\r') --count;
+                const bool splice=count && data[pos+count-1]=='\\';
+                logical.append(data,pos,count-(splice?1:0)); ++lineNo;
+                pos=end==std::string::npos?data.size():end+1;
+                dangling=splice && pos>=data.size();
+                if(!splice || dangling) break;
+            } while(!stopped());
+            auto stripped=strip(logical,block);
             auto text=trim(stripped);
-            const bool wasContinued=continued; continued=!text.empty() && text.back()=='\\';
-            if (continued) graph.incomplete=true;
-            if (wasContinued || text.empty() || text.front()!='#') continue;
+            if (dangling) { graph.incomplete=true; stripped.push_back('\\'); text=trim(stripped); }
+            if (text.empty() || text.front()!='#') continue;
             text=trim(text.substr(1)); constexpr std::string_view keyword="include";
             if (!text.starts_with(keyword) || (text.size()>keyword.size() && text[keyword.size()]!=' ' && text[keyword.size()]!='\t' && text[keyword.size()]!='"' && text[keyword.size()]!='<')) continue;
             text=trim(text.substr(keyword.size()));
             if (graph.edges.size()>=1024) { graph.incomplete=true; break; }
-            ShaderIncludeEdge edge; edge.source=path; edge.line=lineNo;
+            ShaderIncludeEdge edge; edge.source=path; edge.line=firstLine;
             if (text.size()<2 || text.front()!='"' || text.find('"',1)==std::string_view::npos) { edge.status=ShaderIncludeStatus::Unsupported; graph.incomplete=true; graph.edges.push_back(std::move(edge)); continue; }
             const auto close=text.find('"',1); const auto name=text.substr(1,close-1); const auto trailing=trim(text.substr(close+1));
             if (name.empty() || name.size()>4096 || name.find('\\')!=name.npos || name.find('\0')!=name.npos || !trailing.empty()) { edge.status=ShaderIncludeStatus::Unsupported; graph.incomplete=true; graph.edges.push_back(std::move(edge)); continue; }

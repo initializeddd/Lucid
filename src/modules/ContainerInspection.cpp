@@ -49,4 +49,29 @@ ContainerLog parseContainerLog(std::string_view input, std::size_t limit) {
     limit = std::min(limit, maxBytes); ContainerLog result;
     result.text.assign(input.substr(0, limit)); result.truncated = input.size() > limit; return result;
 }
+bool parseContainerDetails(std::string_view input, ContainerDetails& output, std::string& error) {
+    output={}; error.clear(); if(input.size()>1024U*1024U) {error="Container details exceed size limit";return false;}
+    editor::JsonError e; const auto root=editor::parseJson(input,e);
+    if(!root || root->type!=editor::JsonType::Array || root->children.size()!=1 || root->children[0].type!=editor::JsonType::Object) {error="Invalid container details";return false;}
+    ContainerDetails result;
+    // Duplicate relevant keys are ambiguous; do not display potentially misleading metadata.
+    const auto field=[](const editor::JsonValue& obj,std::string_view key)->const editor::JsonValue* {const editor::JsonValue* found=nullptr; for(const auto& v:obj.children) if(v.key==key) {if(found)return nullptr;found=&v;} return found;};
+    const auto read=[&](const editor::JsonValue& obj,const char* key,std::string& dest) {const auto* v=field(obj,key); if(v && v->type==editor::JsonType::String && v->stringValue.size()<=4096) dest=v->stringValue; else result.incomplete=true;};
+    const auto& obj=root->children[0]; read(obj,"Id",result.id); read(obj,"Name",result.name);
+    if(const auto* config=field(obj,"Config");config && config->type==editor::JsonType::Object) read(*config,"Image",result.image); else result.incomplete=true;
+    if(const auto* state=field(obj,"State");state && state->type==editor::JsonType::Object) {read(*state,"Status",result.status); if(const auto* health=field(*state,"Health"); health && health->type==editor::JsonType::Object) read(*health,"Status",result.health);} else result.incomplete=true;
+    if(const auto* mounts=field(obj,"Mounts");mounts && mounts->type==editor::JsonType::Array) {
+        for(const auto& m:mounts->children) {if(result.mounts.size()>=100){result.incomplete=true;break;} if(m.type!=editor::JsonType::Object){result.incomplete=true;continue;} std::string source,dest,type; read(m,"Source",source);read(m,"Destination",dest);read(m,"Type",type);if(!dest.empty()) result.mounts.push_back(type+": "+source+" → "+dest);}
+    } else result.incomplete=true;
+    const auto* net=field(obj,"NetworkSettings"); const auto* ports=net && net->type==editor::JsonType::Object ? field(*net,"Ports") : nullptr;
+    if(ports && ports->type==editor::JsonType::Object) for(const auto& p:ports->children) {
+        if(result.ports.size()>=100) {result.incomplete=true;break;}
+        if(p.key.size()>256) {result.incomplete=true;continue;}
+        if(p.type==editor::JsonType::Null) {result.ports.push_back(p.key+" (unpublished)");continue;}
+        if(p.type!=editor::JsonType::Array){result.incomplete=true;continue;}
+        for(const auto& binding:p.children) {if(result.ports.size()>=100){result.incomplete=true;break;} if(binding.type!=editor::JsonType::Object){result.incomplete=true;continue;}std::string host,port;read(binding,"HostIp",host);read(binding,"HostPort",port);result.ports.push_back(p.key+" → "+host+":"+port);}
+    } else if(!ports || ports->type!=editor::JsonType::Null) result.incomplete=true;
+    if(result.id.empty()) {error="Container identity is missing or ambiguous";return false;}
+    output=std::move(result);return true;
+}
 }

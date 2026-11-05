@@ -28,13 +28,17 @@ int main(int argc, char** argv) {
     namespace fs = std::filesystem; const auto root = fs::temp_directory_path() / ("lucid-ctest-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(root);
     const auto self = fs::absolute(argv[0]).generic_string();
-    { std::ofstream file(root / "CTestTestfile.cmake"); file << "add_test(\"ok.test\" \"" << self << "\" \"--pass\")\nadd_test(\"fail.test\" \"" << self << "\" \"--fail\")\nadd_test(\"okXtest\" \"" << self << "\" \"--fail\")\nadd_test(\"setup\" \"" << self << "\" \"--fail\")\nset_tests_properties(setup PROPERTIES FIXTURES_SETUP example)\nset_tests_properties(ok.test PROPERTIES FIXTURES_REQUIRED example)\n"; }
+    { std::ofstream file(root / "CTestTestfile.cmake"); file << "add_test(\"ok.test\" \"" << self << "\" \"--pass\")\nadd_test(\"fail.test\" \"" << self << "\" \"--fail\")\nadd_test(\"okXtest\" \"" << self << "\" \"--fail\")\nadd_test(\"setup\" \"" << self << "\" \"--fail\")\nset_tests_properties(setup PROPERTIES FIXTURES_SETUP example)\nset_tests_properties(ok.test PROPERTIES FIXTURES_REQUIRED example)\nadd_test([=[suite[1]]=] \"" << self << "\" \"--pass\")\nadd_test([=[suite1]=] \"" << self << "\" \"--fail\")\nadd_test([=[case(a+b)?]=] \"" << self << "\" \"--pass\")\nadd_test([=[caseaaab]=] \"" << self << "\" \"--fail\")\n"; }
     auto discovery = discoverCTest(argv[1], root);
-    if (!discovery.ok || discovery.discovery.tests.size() != 4) return 2;
+    if (!discovery.ok || discovery.discovery.tests.size() != 8) return 2;
     auto passed = runCTestSingle(argv[1], root, "ok.test");
     if (!passed.ok || passed.results.tests.size() != 1 || passed.results.tests[0].status != TestResultStatus::Passed) return 3;
     auto failed = runCTestSingle(argv[1], root, "fail.test");
     if (!failed.ok || failed.process.exitCode == 0 || failed.results.tests[0].status != TestResultStatus::Failed) return 4;
+    for (const char* name : {"suite[1]", "case(a+b)?"}) {
+        auto run = runCTestSingle(argv[1], root, name);
+        if (!run.ok || run.results.tests.size()!=1 || run.results.tests[0].name!=name || run.results.tests[0].status!=TestResultStatus::Passed) return 10;
+    }
     if (runCTestSingle(argv[1], root, "missing").ok || runCTestSingle(argv[1], root, "ok.*").ok || runCTestSingle("ctest", root, "ok.test").ok) return 5;
     if (runCTestSingle(argv[1], root, "ok.test", std::chrono::milliseconds(0)).ok) return 6;
     std::atomic_bool cancel{true};

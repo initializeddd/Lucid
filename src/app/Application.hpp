@@ -624,7 +624,7 @@ private:
     std::string m_releaseNotesRoot, m_releaseNotesFile, m_releaseNotesModule;
     std::uint64_t m_releaseNotesRevision = 0, m_releaseNotesGeneration = 0;
     bool m_releaseNotesShowing = false;
-    struct ContainerResult { modules::ContainerListing listing; modules::ModuleProcessResult process; std::string error; };
+    struct ContainerResult { modules::ContainerListing listing; modules::ContainerDetails details; modules::ModuleProcessResult process; std::string error; };
     struct ContainerActionPrepareResult { modules::ContainerActionReview review; std::string error; };
     std::future<ContainerActionPrepareResult> m_containerActionPrepareFuture;
     std::vector<modules::ContainerProjectAction> m_containerProjectActions;
@@ -634,13 +634,14 @@ private:
     std::future<ContainerResult> m_containerFuture;
     std::shared_ptr<std::atomic_bool> m_containerCancel;
     modules::ContainerListing m_containerListing;
+    modules::ContainerDetails m_containerDetails;
     std::filesystem::path m_containerRuntime;
     std::string m_containerModule, m_containerOutput, m_containerProjectRoot;
     std::uint64_t m_containerGeneration = 0;
     std::optional<std::size_t> m_containerSelected;
     std::string m_containerOperation;
     int m_containerStage = 0;
-    bool m_containerShowing = false, m_containerRunningLogs = false;
+    bool m_containerShowing = false, m_containerRunningLogs = false, m_containerRunningDetails = false;
     std::future<modules::ShaderCompilation> m_shaderFuture;
     std::future<modules::ShaderIncludeGraph> m_shaderIncludesFuture;
     std::shared_ptr<std::atomic_bool> m_shaderIncludesCancel;

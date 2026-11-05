@@ -15,6 +15,7 @@ struct TextPosition {
     std::size_t line = 0;
     std::size_t column = 0;
 };
+struct TextRange { TextPosition start, end; };
 
 class Document {
 public:
@@ -58,6 +59,10 @@ public:
     // Amend the immediately preceding edit, retaining its undo snapshot. The
     // caller must pass the revision observed after that edit.
     [[nodiscard]] bool amendLastEditUtf8(std::string_view text, std::uint64_t expectedRevision);
+    // Replace sorted, non-overlapping ranges in descending order without adding
+    // another undo snapshot. All positions are in the current document.
+    [[nodiscard]] bool amendLastEditRangesUtf8(const std::vector<TextRange>& ranges,
+                                              std::string_view text, std::uint64_t expectedRevision);
     void insertJsonBlock(char32_t open, char32_t close, std::size_t spaces = 4);
     [[nodiscard]] bool insertJsonQuote();
     [[nodiscard]] bool movePast(char32_t codepoint);

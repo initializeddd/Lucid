@@ -20,14 +20,14 @@ struct SqlChangePreview {
     std::vector<SqlRowChange> observedRows;
     bool observedRowsTruncated = false;
 };
-// Supports one INSERT/UPDATE/DELETE/REPLACE without RETURNING,
+// Supports one INSERT/UPDATE/DELETE/REPLACE, including a WITH prefix, without RETURNING,
 // triggers or schema changes. Bounded SQLite VM execution; no external files.
 [[nodiscard]] SqlChangePreview previewSqliteChange(std::string_view database, std::string_view sql,
     const std::atomic_bool* cancel = nullptr);
 // Named :name, @name, $name or contiguous numbered ?1.. ?64 SQLite bindings
 // must all be supplied exactly once. Mixed, anonymous, missing, duplicate and unused parameters are rejected. Values
 // are never interpolated into SQL or included in errors; bounded to 64 bindings,
-// 256 KiB each and 1 MiB in total. The lexical policy currently rejects $name.
+// 256 KiB each and 1 MiB in total.
 [[nodiscard]] SqlChangePreview previewSqliteChangeBound(std::string_view database, std::string_view sql,
     const std::vector<SqlParameter>& parameters, const std::atomic_bool* cancel = nullptr);
 // Only creates a new .db file after explicit confirmation and an exact source

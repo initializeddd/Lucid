@@ -48,6 +48,14 @@ int main() {
         ok = ok && written == 11 && capture.error.empty() && capture.bytes == "hello" && capture.truncated && !capture.restoreFailed;
         const tcflag_t localModes = ECHO | ICANON | ISIG | IEXTEN;
         ok = ok && tcgetattr(slave, &after) == 0 && before.c_iflag == after.c_iflag && before.c_oflag == after.c_oflag && before.c_cflag == after.c_cflag && (before.c_lflag & localModes) == (after.c_lflag & localModes) && cfgetispeed(&before) == cfgetispeed(&after) && cfgetospeed(&before) == cfgetospeed(&after);
+        // The additional speeds exposed in the picker must configure a real
+        // pseudo-terminal successfully and restore its original settings.
+        for (unsigned baud : {19200U, 38400U, 57600U}) {
+            const auto result = captureSerial(name, baud, std::chrono::milliseconds(10), 32);
+            ok = ok && result.error.empty() && !result.restoreFailed &&
+                tcgetattr(slave, &after) == 0 && before.c_cflag == after.c_cflag &&
+                cfgetispeed(&before) == cfgetispeed(&after) && cfgetospeed(&before) == cfgetospeed(&after);
+        }
 #ifdef O_NOFOLLOW
         std::error_code symlinkError;
         fs::create_symlink(name, root / "serial-link", symlinkError);

@@ -441,6 +441,42 @@ bool Document::amendLastEditUtf8(std::string_view text, std::uint64_t expectedRe
     clampCursor(); resetPreferredColumn(); markEdited(); return true;
 }
 
+bool Document::amendLastEditRangesUtf8(const std::vector<TextRange>& ranges,
+                                       std::string_view text, std::uint64_t expectedRevision) {
+    if (m_revision != expectedRevision || m_undo.empty() || !m_redo.empty() || ranges.empty() || ranges.size() > 32) return false;
+    std::string error;
+    if (text.find('\r') != text.npos || !canEditLosslessly(text, error)) return false;
+    const auto before=[](TextPosition a, TextPosition b) {return a.line<b.line || (a.line==b.line && a.column<b.column);};
+    for (std::size_t i=0; i<ranges.size(); ++i) {
+        const auto& r=ranges[i];
+        if (r.start.line>=m_lines.size() || r.end.line>=m_lines.size() ||
+            r.start.column>m_lines[r.start.line].size() || r.end.column>m_lines[r.end.line].size() ||
+            before(r.end,r.start) || (i && before(ranges[i-1].start,r.end))) return false;
+    }
+    const auto pieces=splitLines(decodeUtf8(text));
+    // Prepare the entire amendment before touching the live document. A failed
+    // allocation must not leave only some linked occurrences updated.
+    auto updated=m_lines;
+    for (const auto& r:ranges) {
+        auto prefix=updated[r.start.line].substr(0,r.start.column);
+        auto suffix=updated[r.end.line].substr(r.end.column);
+        if (pieces.size()==1) {
+            prefix+=pieces.front(); prefix+=suffix;
+            updated[r.start.line]=std::move(prefix);
+            updated.erase(updated.begin()+static_cast<std::ptrdiff_t>(r.start.line+1),
+                          updated.begin()+static_cast<std::ptrdiff_t>(r.end.line+1));
+        } else {
+            std::vector<std::u32string> replacement=pieces;
+            replacement.front().insert(0,prefix); replacement.back()+=suffix;
+            updated.erase(updated.begin()+static_cast<std::ptrdiff_t>(r.start.line),
+                          updated.begin()+static_cast<std::ptrdiff_t>(r.end.line+1));
+            updated.insert(updated.begin()+static_cast<std::ptrdiff_t>(r.start.line),
+                           std::make_move_iterator(replacement.begin()),std::make_move_iterator(replacement.end()));
+        }
+    }
+    m_lines.swap(updated); m_selectionActive=false; clampCursor(); resetPreferredColumn(); markEdited(); return true;
+}
+
 void Document::pasteUtf8(std::string_view text) {
     std::u32string pasted = decodeUtf8(text);
     if (pasted.empty()) {

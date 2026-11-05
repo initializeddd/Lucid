@@ -1,12 +1,14 @@
 #include "app/Application.hpp"
 #include "ai/ModelDownload.hpp"
 #include "platform/macos/VulkanEnvironment.hpp"
+#include <array>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include <utility>
 #include <sqlite3.h>
 
 #if defined(__APPLE__)
@@ -836,9 +838,18 @@ struct ApplicationInteractionTest {
             while (app.m_serialScanFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             if (!app.m_serialShowing || app.m_serialScanFuture.valid() || app.m_serialFuture.valid()) return 651;
             app.m_serialScan.devices = {{"Test port", std::filesystem::path("/not-a-device")}}; app.refreshSuggestions();
-            auto findChoice = [&](int value) { auto it = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), value); if (it == app.m_moduleChoices.end()) return false; app.m_selectedSuggestion = static_cast<int>(it - app.m_moduleChoices.begin()); app.applyModuleCommand(); return true; };
+            auto findChoice = [&](int value) { for (std::size_t page=0;page<8;++page) {app.m_modulePage=page;app.refreshSuggestions();auto it = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), value); if (it != app.m_moduleChoices.end()) {app.m_selectedSuggestion = static_cast<int>(it - app.m_moduleChoices.begin()); app.applyModuleCommand(); return true;}} return false; };
             if (!findChoice(0) || app.m_serialStage != 1 || app.m_serialFuture.valid()) return 652;
             app.refreshSuggestions(); if (std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), -111) == app.m_moduleChoices.end() || std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), -230) == app.m_moduleChoices.end() || app.m_serialFuture.valid()) return 653;
+            // The other baud choices must remain visible across menu pages and
+            // launch only after selection. A nonexistent path avoids hardware.
+            for (const auto& [action, expected] : std::array<std::pair<int, unsigned>, 7>{{{-740,19200}, {-741,38400}, {-742,57600}, {-743,9600}, {-744,19200}, {-745,38400}, {-746,57600}}}) {
+                app.m_serialStage=1; app.m_serialResult={};
+                if (!findChoice(action) || !app.m_serialFuture.valid() || app.m_serialBaud!=expected) return 1140;
+                const auto serialDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+                while (app.m_serialFuture.valid() && std::chrono::steady_clock::now()<serialDeadline) {app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+                if(app.m_serialFuture.valid()) return 1141;
+            }
             app.m_serialMonitor=std::make_shared<modules::SerialMonitorBuffer>(4); app.m_serialMonitor->append(std::string_view("abc\0def",7)); app.m_serialStage=11; app.refreshSuggestions();
             bool binaryNotice=false, droppedNotice=false; for(std::size_t page=0;page<5;++page) {app.m_modulePage=page;app.refreshSuggestions();for(const auto& item:app.m_suggestions){binaryNotice |= item.path=="Binary serial output";droppedNotice |= item.path=="Earlier bytes overwritten";}} if(!binaryNotice || !droppedNotice) return 855;
             app.m_modulePage=0; app.refreshSuggestions();

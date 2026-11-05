@@ -52,6 +52,7 @@ SqlClassification classifySql(std::string_view sql) {
         ++i;
     }
     if (!seen) return {SqlStatementKind::Empty, "No statement"};
+    if (first == "WITH") return {SqlStatementKind::CommonTableExpression, "WITH statement; execution must verify its actual behavior"};
     if (first == "SELECT" || first == "VALUES") return {SqlStatementKind::Query, "Query-shaped statement; side effects are not ruled out"};
     if (first == "INSERT" || first == "UPDATE" || first == "DELETE" || first == "REPLACE") return {SqlStatementKind::DataChange, "Data-changing statement"};
     if (first == "CREATE" || first == "ALTER" || first == "DROP" || first == "VACUUM" || first == "REINDEX") return {SqlStatementKind::SchemaChange, "Schema or database maintenance statement"};

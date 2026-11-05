@@ -7,14 +7,15 @@
 #include <vector>
 namespace lucid::workspace { class Project; }
 namespace lucid::modules {
-enum class SqlStatementKind { Empty, Query, DataChange, SchemaChange, Transaction, Unknown };
+enum class SqlStatementKind { Empty, Query, DataChange, SchemaChange, Transaction, CommonTableExpression, Unknown };
 struct SqlClassification {
     SqlStatementKind kind = SqlStatementKind::Unknown;
     std::string reason;
 };
 // Lexical classification of one SQL statement, not validation or permission
 // to execute. Query can call functions with side effects; syntax, dialect,
-// privileges, and actual read-only behavior cannot be inferred here.
+// privileges, and actual read-only behavior cannot be inferred here. A WITH
+// statement is identified separately because it can read or change data.
 [[nodiscard]] SqlClassification classifySql(std::string_view sql);
 
 enum class SqlValueType { Null, Integer, Float, Text, Blob };

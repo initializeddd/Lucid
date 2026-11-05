@@ -13,6 +13,15 @@ int main() {
  if(sqlite3_exec(db,"CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT UNIQUE); INSERT INTO t VALUES(1,'old'),(2,'two'); CREATE TABLE audit(v); INSERT INTO audit VALUES('initial'); CREATE TABLE without_ids(k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID; INSERT INTO without_ids VALUES('a','old'); CREATE TRIGGER tr AFTER DELETE ON t BEGIN INSERT INTO audit VALUES(old.v); END;",nullptr,nullptr,nullptr)!=SQLITE_OK) return 2;
  sqlite3_int64 n=0; auto* p=sqlite3_serialize(db,"main",&n,0); if(!p) return 3; std::string original(reinterpret_cast<char*>(p),static_cast<std::size_t>(n)); sqlite3_free(p); sqlite3_close(db);
  auto preview=previewSqliteChange(original,"UPDATE t SET v='new' WHERE id=1"); if(!preview.error.empty()) {std::cerr<<preview.error<<'\n';return 4;} if(preview.affected!=1 || preview.original!=original || preview.changed==original || preview.observedRows.size()!=1 || preview.observedRows[0].operation!=SqlRowOperation::Update || preview.observedRows[0].table!="t" || preview.observedRows[0].rowid!=1 || preview.observedRowsTruncated) return 5;
+ auto cte=previewSqliteChangeBound(original,"WITH ids(x) AS (SELECT ?1) UPDATE t SET v=?2 WHERE id IN (SELECT x FROM ids)",{{"?1",SqlValueType::Integer,1,0,{}},{"?2",SqlValueType::Text,0,0,"cte"}});
+ if(!cte.error.empty() || cte.affected!=1 || cte.observedRows.size()!=1 || cte.observedRows[0].rowid!=1) return 39;
+ auto cteRows=querySqliteSnapshot(cte.changed,"SELECT v FROM t WHERE id=1"); if(!cteRows.error.empty() || cteRows.rows.size()!=1 || cteRows.rows[0][0].value!="cte") return 40;
+ // A CTE context may collide with a trigger name. Fail closed rather than
+ // guessing whether the authorizer context refers to a trigger or a CTE.
+ if(previewSqliteChange(original,"WITH tr(x) AS (SELECT 1) UPDATE t SET v='blocked' WHERE id IN (SELECT x FROM tr)").error.empty()) return 42;
+ for(const auto* rejected:{"WITH x AS (SELECT 1) SELECT * FROM x", "WITH x AS (SELECT 1) UPDATE t SET v='x' RETURNING id", "WITH x AS (SELECT 1) UPDATE t SET v='x'; DROP TABLE t", "WITH x AS (SELECT 1) DELETE FROM t", "WITH x AS (SELECT load_extension('bad')) UPDATE t SET v=(SELECT * FROM x)"}) {
+    const auto result=previewSqliteChange(original,rejected); if(result.error.empty() || !result.changed.empty() || !result.observedRows.empty()) return 41;
+ }
  auto inserted=previewSqliteChange(original,"INSERT INTO t VALUES(3,'three')"); if(!inserted.error.empty() || inserted.observedRows.size()!=1 || inserted.observedRows[0].operation!=SqlRowOperation::Insert || inserted.observedRows[0].rowid!=3) return 17;
  auto deleted=previewSqliteChange(original,"DELETE FROM audit WHERE v='initial'"); if(!deleted.error.empty() || deleted.affected!=1 || deleted.observedRows.size()!=1 || deleted.observedRows[0].operation!=SqlRowOperation::Delete || deleted.observedRows[0].table!="audit") return 18;
  auto withoutIds=previewSqliteChange(original,"UPDATE without_ids SET v='new'"); if(!withoutIds.error.empty() || withoutIds.affected!=1 || !withoutIds.observedRows.empty()) return 19;

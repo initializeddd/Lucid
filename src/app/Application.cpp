@@ -3466,6 +3466,11 @@ void Application::refreshModuleSuggestions() {
                 add("Capture at 115200 baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " for 5 seconds. May reset hardware or affect other processes. Enter confirms.", -111);
                 add("Capture at 9600 baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " for 5 seconds. May reset hardware or affect other processes. Enter confirms.", -112);
                 if (std::find(m.requirements.begin(),m.requirements.end(),"serial-continuous-v1")!=m.requirements.end()) add("Monitor at 115200 baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " until stopped (24-hour limit). May reset hardware or affect other processes. Enter confirms.", -230);
+                for (const auto& [rate, action] : std::array<std::pair<unsigned, int>, 3>{{{19200, -740}, {38400, -741}, {57600, -742}}})
+                    add("Capture at " + std::to_string(rate) + " baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " for 5 seconds. May reset hardware or affect other processes. Enter confirms.", action);
+                if (std::find(m.requirements.begin(),m.requirements.end(),"serial-continuous-v1")!=m.requirements.end())
+                    for (const auto& [rate, action] : std::array<std::pair<unsigned, int>, 4>{{{9600, -743}, {19200, -744}, {38400, -745}, {57600, -746}}})
+                        add("Monitor at " + std::to_string(rate) + " baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " until stopped (24-hour limit). May reset hardware or affect other processes. Enter confirms.", action);
             } else if ((m_serialStage==10 || m_serialStage==11) && m_serialMonitor) {
                 if (m_serialFuture.valid()) add("Stop monitoring", "Stop and restore port settings", -231); else add("Monitor stopped", "Port settings are restored best-effort", -114, ui::SuggestionKind::ReadOnlyText);
                 const auto snapshot=m_serialMonitor->snapshot();
@@ -4070,7 +4075,16 @@ void Application::synchronizeSnippet(std::uint64_t previousRevision) {
     mirrored.append(old,pos,old.size()-pos);
     if(mirrored.size()>16U*1024U*1024U) {m_snippetSession.reset();return;}
     const auto selectionStart=ranges[s.active].start+(start-range.start), selectionEnd=ranges[s.active].start+(end-range.start);
-    if(mirrored!=current && !m_document.amendLastEditUtf8(mirrored,m_document.revision())) {m_snippetSession.reset();setStatus("Linked snippet navigation ended",true);return;}
+    if(mirrored!=current) {
+        std::vector<editor::TextRange> edits;
+        for(std::size_t i=s.fields.size();i>0;--i) {
+            const auto f=s.fields[i-1]; if(i-1==s.active || f.link!=range.link) continue;
+            const auto a=i-1>s.active ? f.start-range.end+newEnd : f.start;
+            const auto b=i-1>s.active ? f.end-range.end+newEnd : f.end;
+            edits.push_back({snippetPosition(current,a),snippetPosition(current,b)});
+        }
+        if(edits.empty() || !m_document.amendLastEditRangesUtf8(edits,activeValue,m_document.revision())) {m_snippetSession.reset();setStatus("Linked snippet navigation ended",true);return;}
+    }
     const auto p=snippetPosition(mirrored,selectionStart), q=snippetPosition(mirrored,selectionEnd);
     m_document.setCursor(p.line,p.column); if(selectionStart!=selectionEnd) m_document.extendSelectionTo(q.line,q.column);
     s.fields=std::move(ranges); s.finalOffset=newFinal; s.snapshot=std::move(mirrored); s.revision=m_document.revision();
@@ -5018,16 +5032,17 @@ void Application::applyModuleCommand() {
         }
         if (m_serialStage == 0 && choice >= 0 && static_cast<std::size_t>(choice) < m_serialScan.devices.size()) { m_serialSelected = static_cast<std::size_t>(choice); m_serialStage = 1; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Opening a serial port may reset hardware; choose a baud to confirm", false); return; }
         if (m_serialStage==10 && choice==-231 && m_serialFuture.valid()) {if(m_serialCancel) m_serialCancel->store(true);setCommandStatus("Stopping monitor and restoring port settings…",false);return;}
-        if (m_serialStage==1 && choice==-230 && !m_serialFuture.valid() && m_serialSelected<m_serialScan.devices.size()) {
+        if (m_serialStage==1 && (choice==-230 || (choice<=-743 && choice>=-746)) && !m_serialFuture.valid() && m_serialSelected<m_serialScan.devices.size()) {
             std::vector<modules::Module> fresh; std::string error;
             if (m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_serialModule || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[this](const auto& module){return module.id==m_serialModule && module.enabled && module.valid && module.devices && std::find(module.requirements.begin(),module.requirements.end(),"serial-continuous-v1")!=module.requirements.end() && std::any_of(module.commands.begin(),module.commands.end(),[](const auto& c){return c.action=="serial-monitor";});})) {setCommandStatus("Module changed or disabled; reopen the command",true);return;}
             auto device=m_serialScan.devices[m_serialSelected].path; m_serialCancel=std::make_shared<std::atomic_bool>(false); m_serialMonitor=std::make_shared<modules::SerialMonitorBuffer>(1024U*1024U); auto buffer=m_serialMonitor; auto cancel=m_serialCancel; m_serialStage=10; m_serialResult={};
-            m_serialFuture=std::async(std::launch::async,[device,buffer,cancel]{return modules::monitorSerial(device,115200,std::chrono::hours(24),*buffer,cancel.get());}); m_serialMonitorRefresh=std::chrono::steady_clock::now();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Monitoring serial output; stop requests restoration",false);return;
+            m_serialBaud=choice==-230 ? 115200 : choice==-743 ? 9600 : choice==-744 ? 19200 : choice==-745 ? 38400 : 57600; const auto baud=m_serialBaud;
+            m_serialFuture=std::async(std::launch::async,[device,buffer,cancel,baud]{return modules::monitorSerial(device,baud,std::chrono::hours(24),*buffer,cancel.get());}); m_serialMonitorRefresh=std::chrono::steady_clock::now();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Monitoring serial output; stop requests restoration",false);return;
         }
-        if (m_serialStage == 1 && (choice == -111 || choice == -112) && !m_serialFuture.valid()) {
+        if (m_serialStage == 1 && (choice == -111 || choice == -112 || (choice<=-740 && choice>=-742)) && !m_serialFuture.valid() && m_serialSelected<m_serialScan.devices.size()) {
             std::vector<modules::Module> fresh; std::string error;
             if (m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_serialModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_serialModule && m.enabled && m.valid && m.devices && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "serial-monitor"; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
-            const auto device = m_serialScan.devices[m_serialSelected].path; m_serialBaud = choice == -111 ? 115200 : 9600; const auto baud = m_serialBaud;
+            const auto device = m_serialScan.devices[m_serialSelected].path; m_serialBaud = choice == -111 ? 115200 : choice == -112 ? 9600 : choice == -740 ? 19200 : choice == -741 ? 38400 : 57600; const auto baud = m_serialBaud;
             m_serialCancel = std::make_shared<std::atomic_bool>(false); m_serialStage = 2; m_serialResult = {};
             m_serialFuture = std::async(std::launch::async, [device, baud, cancel = m_serialCancel] { return modules::captureSerial(device, baud, std::chrono::seconds(5), 1024U * 1024U, cancel.get()); });
             m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Capturing serial output… Escape cancels", false); return;

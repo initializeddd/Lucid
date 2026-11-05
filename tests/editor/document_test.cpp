@@ -652,6 +652,16 @@ int main() {
     linked.undo(); if (linked.toUtf8() != "a + a" || linked.dirty()) return 131;
     linked.redo(); if (linked.toUtf8() != "b + b" || !linked.dirty()) return 132;
 
+    auto rangeLinked = Document::fromUtf8("first\nα old\nlast old");
+    rangeLinked.setCursor(0,0); rangeLinked.insert(U'X');
+    const auto rangeRevision=rangeLinked.revision();
+    const std::vector<lucid::editor::TextRange> replacements={{{2,5},{2,8}},{{1,2},{1,5}}};
+    if (rangeLinked.amendLastEditRangesUtf8(replacements,"new\nvalue",rangeRevision-1) || rangeLinked.toUtf8()!="Xfirst\nα old\nlast old") return 133;
+    if (rangeLinked.amendLastEditRangesUtf8({{{1,0},{1,4}},{{1,2},{1,5}}},"x",rangeRevision) || rangeLinked.toUtf8()!="Xfirst\nα old\nlast old") return 134;
+    if (!rangeLinked.amendLastEditRangesUtf8(replacements,"new\nvalue",rangeRevision) || rangeLinked.toUtf8()!="Xfirst\nα new\nvalue\nlast new\nvalue") return 135;
+    rangeLinked.undo(); if(rangeLinked.toUtf8()!="first\nα old\nlast old" || rangeLinked.dirty()) return 136;
+    rangeLinked.redo(); if(rangeLinked.toUtf8()!="Xfirst\nα new\nvalue\nlast new\nvalue") return 137;
+
     // Compare direct validation with the editor's actual decode/encode behavior,
     // including malformed UTF-8 and all pairs of byte values.
     std::string validationError;

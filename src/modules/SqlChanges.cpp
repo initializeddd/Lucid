@@ -13,8 +13,10 @@ namespace {
 constexpr std::size_t maxDb = 64U*1024U*1024U, maxSql = 1024U*1024U;
 using Db = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using Stmt = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
-int authorize(void*, int action, const char* first, const char*, const char* schema, const char* trigger) {
-    if (trigger) return SQLITE_DENY;
+struct AuthorizationContext { bool allowCteContexts=false; std::vector<std::string> triggerNames; };
+int authorize(void* raw, int action, const char* first, const char*, const char* schema, const char* context) {
+    const auto& state=*static_cast<const AuthorizationContext*>(raw);
+    if (context && (!state.allowCteContexts || std::any_of(state.triggerNames.begin(),state.triggerNames.end(),[&](const auto& name) { return sqlite3_stricmp(name.c_str(),context)==0; }))) return SQLITE_DENY;
     switch (action) {
     case SQLITE_SELECT: case SQLITE_READ: case SQLITE_FUNCTION: case SQLITE_RECURSIVE: return SQLITE_OK;
     case SQLITE_INSERT: case SQLITE_UPDATE: case SQLITE_DELETE:
@@ -47,7 +49,8 @@ SqlChangePreview previewSqliteChangeBound(std::string_view database, std::string
     if (cancel && cancel->load()) return fail("SQL preview cancelled");
     if (database.size()<100 || database.size()>maxDb || database.substr(0,16)!=std::string_view("SQLite format 3\0",16)) return fail("Expected a SQLite snapshot of at most 64 MiB");
     if (static_cast<unsigned char>(database[18])!=1 || static_cast<unsigned char>(database[19])!=1) return fail("WAL databases require a standalone snapshot");
-    if (sql.empty() || sql.size()>maxSql || sql.find('\0')!=std::string_view::npos || classifySql(sql).kind!=SqlStatementKind::DataChange) return fail("Expected one supported data-change statement");
+    const auto kind = classifySql(sql).kind;
+    if (sql.empty() || sql.size()>maxSql || sql.find('\0')!=std::string_view::npos || (kind!=SqlStatementKind::DataChange && kind!=SqlStatementKind::CommonTableExpression)) return fail("Expected one supported data-change statement");
     if (!safeSqlParameterSyntax(sql)) return fail("Unsupported or mixed SQL parameter syntax");
     if (parameters.size()>64) return fail("Too many SQL parameters");
     std::map<std::string,const SqlParameter*> bindings; std::size_t total=0;
@@ -70,9 +73,22 @@ SqlChangePreview previewSqliteChangeBound(std::string_view database, std::string
     status=sqlite3_deserialize(db.get(),"main",bytes,static_cast<sqlite3_int64>(database.size()),static_cast<sqlite3_int64>(maxDb),SQLITE_DESERIALIZE_FREEONCLOSE);
     if (status!=SQLITE_OK) return fail("Cannot load SQLite snapshot");
     Budget budget{cancel}; sqlite3_progress_handler(db.get(),1000,progress,&budget);
+    AuthorizationContext authorization; authorization.allowCteContexts=kind==SqlStatementKind::CommonTableExpression;
+    if (authorization.allowCteContexts) {
+        sqlite3_stmt* rawNames=nullptr;
+        status=sqlite3_prepare_v2(db.get(),"SELECT name FROM main.sqlite_schema WHERE type='trigger'",-1,&rawNames,nullptr);
+        Stmt names(rawNames,sqlite3_finalize);
+        if(status!=SQLITE_OK || !names) return fail("Cannot inspect SQLite triggers");
+        while((status=sqlite3_step(names.get()))==SQLITE_ROW) {
+            const auto* name=sqlite3_column_text(names.get(),0); const auto length=sqlite3_column_bytes(names.get(),0);
+            if(!name || length<=0 || length>4096 || authorization.triggerNames.size()>=10000 || std::memchr(name,'\0',static_cast<std::size_t>(length))) return fail("Unsupported SQLite trigger metadata");
+            authorization.triggerNames.emplace_back(reinterpret_cast<const char*>(name),static_cast<std::size_t>(length));
+        }
+        if(status!=SQLITE_DONE) return fail("Cannot inspect SQLite triggers");
+    }
     sqlite3_update_hook(db.get(),observeRow,&out);
     if (sqlite3_exec(db.get(),"BEGIN",nullptr,nullptr,nullptr)!=SQLITE_OK) return fail("Cannot begin snapshot transaction");
-    if (sqlite3_set_authorizer(db.get(),authorize,nullptr)!=SQLITE_OK) return fail("Cannot restrict SQLite snapshot");
+    if (sqlite3_set_authorizer(db.get(),authorize,&authorization)!=SQLITE_OK) return fail("Cannot restrict SQLite snapshot");
     sqlite3_stmt* rawStmt=nullptr; const char* tail=nullptr; const std::string statement(sql);
     status=sqlite3_prepare_v3(db.get(),statement.c_str(),static_cast<int>(statement.size()),0,&rawStmt,&tail); Stmt stmt(rawStmt,sqlite3_finalize);
     if (status!=SQLITE_OK || !stmt) return fail(std::string("SQLite: ")+sqlite3_errmsg(db.get()));

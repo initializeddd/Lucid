@@ -688,10 +688,11 @@ ZIP entries are supported; ZIP64, more than 10,000 entries, entries over 16 MiB,
 and total expanded content over 128 MiB are rejected. No archive is extracted.
 Microcontroller Dashboard declares device access separately. It lists serial
 ports by operating-system name; this does not identify boards. Selecting a port
-presents an explicit choice to capture for five seconds at 9600 or 115200 baud.
+presents an explicit choice to capture for five seconds at 9600, 19200, 38400,
+57600 or 115200 baud.
 Opening or configuring a port can change DTR/RTS, reset hardware, or affect
 another process. Capture is bounded and cancellable, with best-effort settings
-restoration. Continuous monitoring at 115200 baud requires a separate confirmation,
+restoration. Continuous monitoring at any of those baud rates requires a separate confirmation,
 opens the port once, stops on request or after 24 hours, and retains the latest 1 MiB
 with an overwritten-byte notice. Binary output is not displayed as text. Stopping
 requests cancellation and waits for the worker to finish restoring settings. Binary data is not shown as text. Its OpenOCD profile inspector
@@ -713,16 +714,21 @@ shown as ambiguous, and discovery never flashes hardware or opens the listed pro
 Windows discovery has been cross-compiled but not tested at runtime; physical-device
 discovery needs further testing on all platforms.
 
-SQL Workbench can preview a single INSERT, UPDATE, DELETE or REPLACE on an isolated
+SQL Workbench can preview a single INSERT, UPDATE, DELETE or REPLACE, including
+one preceded by a common-table-expression `WITH` clause, on an isolated
 standalone SQLite snapshot and, after reviewing the statement and affected-row count,
 create a separate new `.db` file. It never overwrites the source. WAL databases,
-SQLite sidecars, triggers, parameters, RETURNING, schema changes, and multiple
+SQLite sidecars, triggers, RETURNING, schema changes, and multiple
 statements are rejected. The preview lists up to 200 observed table, operation and
 row ID events without cell values; row IDs can be sensitive. This is an incomplete
 list, not a row-by-row diff: SQLite may omit WITHOUT ROWID table changes,
 truncate-optimized whole-table deletions and REPLACE conflict deletions. Source bytes
 are checked again before creation, but external processes are not locked and may
 change files or paths between checks; close the database and use a standalone copy.
+The unbound preview rejects parameters; the separate bound preview accepts the
+typed bindings described below. `WITH` queries that do not change data are not
+accepted by the change-preview command. A CTE whose name matches a trigger name
+is rejected because SQLite does not distinguish the two authorizer contexts.
 
 API Request Studio can check a received response against a project-local assertion
 JSON file, without sending another request. For example:

@@ -14,7 +14,8 @@ int main() {
     if (classifySql("UPDATE t SET x=1").kind != SqlStatementKind::DataChange) return 3;
     if (classifySql("CREATE TABLE t(x)").kind != SqlStatementKind::SchemaChange) return 4;
     if (classifySql("BEGIN TRANSACTION").kind != SqlStatementKind::Transaction) return 5;
-    if (classifySql("WITH x AS (SELECT 1) DELETE FROM t").kind != SqlStatementKind::Unknown) return 6;
+    if (classifySql("WITH x AS (SELECT 1) DELETE FROM t").kind != SqlStatementKind::CommonTableExpression ||
+        classifySql("WITH x AS (SELECT 1) SELECT * FROM x").kind != SqlStatementKind::CommonTableExpression) return 6;
     if (classifySql("PRAGMA journal_mode=WAL").kind != SqlStatementKind::Unknown) return 7;
     if (classifySql("select 'unterminated").kind != SqlStatementKind::Unknown) return 8;
     if (classifySql("select 1 /* nested /* x */ ; */").kind != SqlStatementKind::Unknown) return 9;

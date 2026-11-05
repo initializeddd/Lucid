@@ -2,6 +2,30 @@
 #include <string>
 using namespace lucid::debug;
 int main() {
+    Session paused; std::string pauseError;
+    paused.start("/tmp/program", "/tmp", "/tmp/file.cpp", {}); (void)paused.takeOutbound();
+    if (!paused.receive(frame(R"({"type":"response","request_seq":1,"success":true})"), pauseError)) return 82;
+    (void)paused.takeOutbound();
+    if (!paused.receive(frame(R"({"type":"response","request_seq":2,"success":true})"), pauseError) ||
+        !paused.pause(pauseError) || paused.pause(pauseError) || paused.takeOutbound().find("\"threads\"") == std::string::npos) return 83;
+    if (!paused.receive(frame(R"({"type":"event","event":"continued"})"), pauseError) ||
+        !paused.receive(frame(R"({"type":"response","request_seq":3,"success":true,"body":{"threads":[{"id":42}]}})"), pauseError) ||
+        paused.takeOutbound().find("\"threadId\":42") == std::string::npos) return 84;
+    if (!paused.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"pause","threadId":42}})"), pauseError) ||
+        !paused.receive(frame(R"({"type":"response","request_seq":4,"success":false,"message":"late"})"), pauseError) ||
+        paused.state() != State::Stopped || paused.messageIsError()) return 85;
+    (void)paused.takeOutbound();
+    if (!paused.resume("continue", pauseError)) return 86;
+    (void)paused.takeOutbound();
+    if (!paused.pause(pauseError) || paused.takeOutbound().find("\"threadId\":42") == std::string::npos) return 87;
+    if (!paused.receive(frame(R"({"type":"response","request_seq":7,"success":false,"message":"cannot pause"})"), pauseError) ||
+        !paused.messageIsError() || !paused.pause(pauseError)) return 88;
+    (void)paused.takeOutbound();
+    paused.pauseTimedOut();
+    if (paused.pausePending() || !paused.messageIsError() || paused.message().find("15 seconds") == std::string::npos || !paused.pause(pauseError)) return 89;
+    (void)paused.takeOutbound();
+    if (!paused.receive(frame(R"({"type":"response","request_seq":8,"success":false,"message":"late failure"})"), pauseError) ||
+        !paused.pausePending() || paused.messageIsError()) return 90;
     Session threads; std::string threadError;
     threads.start("/tmp/program", "/tmp", "/tmp/file.cpp", {}); (void)threads.takeOutbound();
     if (!threads.receive(frame(R"({"type":"event","event":"stopped","body":{"reason":"breakpoint","threadId":42}})"), threadError)) return 72;

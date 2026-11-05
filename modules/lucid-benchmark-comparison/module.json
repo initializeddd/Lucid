@@ -1,0 +1,21 @@
+{
+  "name": "Benchmark Comparison",
+  "version": "0.1.0",
+  "description": "Compare benchmark reports with descriptive variability; observed changes can reflect noise.",
+  "requires": [
+    "benchmark-comparison-v1",
+    "benchmark-samples-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Compare benchmark reports",
+      "action": "benchmark-comparison"
+    }
+  ]
+}

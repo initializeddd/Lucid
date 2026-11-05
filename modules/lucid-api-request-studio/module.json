@@ -1,0 +1,32 @@
+{
+  "name": "API Request Studio",
+  "version": "0.1.0",
+  "description": "Edit and send requests, inspect responses, and evaluate local assertions.",
+  "requires": [
+    "api-request-studio-v1",
+    "api-environments-v1",
+    "api-response-save-v1",
+    "api-collection-edit-v1",
+    "api-response-assertions-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": true,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Open API request collection",
+      "action": "open-api-requests"
+    },
+    {
+      "title": "Open collection with environment",
+      "action": "open-api-environment"
+    },
+    {
+      "title": "Edit request templates",
+      "action": "edit-api-collection"
+    }
+  ]
+}

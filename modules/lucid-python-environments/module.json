@@ -1,0 +1,8 @@
+{
+  "name": "Python Environments",
+  "version": "0.1.0",
+  "description": "Manage Python environments and optionally install the Python language server after confirmation.",
+  "requires": ["python-environments-v2", "python-pylsp-install-v1"],
+  "permissions": {"project": true, "network": true, "processes": true, "settings": true},
+  "commands": [{"title": "Manage Python environments", "action": "manage-python-environments"}, {"title": "Install Python language server", "action": "install-python-pylsp"}]
+}

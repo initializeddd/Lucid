@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -37,6 +38,7 @@ public:
 
     void draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
               const ui::FrameState& state) const;
+    void prepareVisualPreview(const ui::VisualReviewPreview* preview);
 
 private:
     struct TextVertex {
@@ -109,6 +111,10 @@ private:
     VkPipelineLayout m_textPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_rectPipeline = VK_NULL_HANDLE;
     VkPipeline m_textPipeline = VK_NULL_HANDLE;
+    VkPipeline m_imagePipeline = VK_NULL_HANDLE;
+    std::array<std::unique_ptr<Texture>, 3> m_previewTextures;
+    std::array<VkDescriptorSet, 3> m_previewSets{};
+    std::uint64_t m_previewGeneration = 0;
     std::array<Buffer, kFramesInFlight> m_vertexBuffers;
 
     mutable float m_animatedHighlightTop = 0.0F;

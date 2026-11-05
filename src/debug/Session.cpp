@@ -24,7 +24,7 @@ void Session::start(std::string program, std::string cwd, std::string source, st
 }
 void Session::start(std::string program, std::string cwd, std::map<std::string, std::vector<int>> breakpoints, std::vector<std::string> arguments, std::map<std::string, std::string> environment) {
     m_decoder.reset(); m_seq = 1; m_thread = 0; m_generation = 0; m_initialized = false; m_requests.clear(); m_outbound.clear(); m_stack.clear(); m_variables.clear(); m_output.clear(); m_breakpointWarning.clear(); m_breakpointWarnings.clear(); m_breakpointRequests.clear(); m_previousValues.clear(); m_previousFrameName.clear(); m_previousFramePath.clear(); m_selectedFrame = 0; m_expanded = false;
-    m_threadListRequest = 0; m_threads.clear(); m_program = std::move(program); m_cwd = std::move(cwd); m_source = breakpoints.empty() ? std::string{} : breakpoints.begin()->first; m_breakpoints = std::move(breakpoints); m_arguments = std::move(arguments); m_environment = std::move(environment);
+    m_pauseRequested = false; m_threadListRequest = 0; m_threads.clear(); m_program = std::move(program); m_cwd = std::move(cwd); m_source = breakpoints.empty() ? std::string{} : breakpoints.begin()->first; m_breakpoints = std::move(breakpoints); m_arguments = std::move(arguments); m_environment = std::move(environment);
     m_state = State::Initializing; m_message = "Starting debugger"; m_messageIsError = false;
     request("initialize", "{\"clientID\":\"lucid\",\"adapterID\":\"lldb-dap\",\"linesStartAt1\":true,\"columnsStartAt1\":true,\"pathFormat\":\"path\",\"supportsRunInTerminalRequest\":false}");
 }
@@ -56,11 +56,11 @@ void Session::handle(std::string_view raw) {
             for (const auto& [source, lines] : allBreakpoints) (void)setBreakpoints(source, lines, ignored);
             request("configurationDone", "{}");
         } else if (event == "stopped") {
-            ++m_generation; m_threadListRequest = 0; m_state = State::Stopped; m_thread = integer(member(body, "threadId")); m_message = "Stopped: " + text(member(body, "reason")); m_messageIsError = false; m_stack.clear(); m_threads.clear(); m_variables.clear();
+            ++m_generation; m_pauseRequested = false; m_threadListRequest = 0; m_state = State::Stopped; m_thread = integer(member(body, "threadId")); m_message = "Stopped: " + text(member(body, "reason")); m_messageIsError = false; m_stack.clear(); m_threads.clear(); m_variables.clear();
             if (m_thread) request("stackTrace", "{\"threadId\":" + std::to_string(m_thread) + ",\"startFrame\":0,\"levels\":30}");
             else { request("threads", "{}"); m_threadListRequest = m_seq - 1; }
-        } else if (event == "continued") { ++m_generation; m_threadListRequest = 0; m_state = State::Running; m_message = "Running"; m_messageIsError = false; m_stack.clear(); m_threads.clear(); m_variables.clear(); }
-        else if (event == "terminated" || event == "exited") { ++m_generation; m_threadListRequest = 0; m_initialized = false; m_state = State::Ended; m_message = "Debug session ended"; m_messageIsError = false; m_stack.clear(); m_threads.clear(); m_variables.clear(); m_thread = 0; }
+        } else if (event == "continued") { if (m_state != State::Running) { ++m_generation; m_pauseRequested = false; m_threadListRequest = 0; m_state = State::Running; m_message = "Running"; m_messageIsError = false; m_stack.clear(); m_threads.clear(); m_variables.clear(); } }
+        else if (event == "terminated" || event == "exited") { ++m_generation; m_pauseRequested = false; m_threadListRequest = 0; m_initialized = false; m_state = State::Ended; m_message = "Debug session ended"; m_messageIsError = false; m_stack.clear(); m_threads.clear(); m_variables.clear(); m_thread = 0; }
         else if (event == "output") { m_output += text(member(body, "output")); if (m_output.size() > 65536) m_output.erase(0, m_output.size() - 65536); }
         return;
     }
@@ -70,14 +70,16 @@ void Session::handle(std::string_view raw) {
     const auto pendingRequest = pending->second; m_requests.erase(pending);
     const std::string& command = pendingRequest.command;
     if (m_state == State::Ended || m_state == State::Failed) return;
+    if (command == "pause" && (pendingRequest.generation != m_generation || !m_pauseRequested || m_state != State::Running)) return;
     if (command == "setBreakpoints" && !pendingRequest.source.empty() && m_breakpointRequests[pendingRequest.source] != seq) return;
     if ((command == "threads" || command == "stackTrace" || command == "scopes" || command == "variables") && pendingRequest.generation != m_generation) return;
     if (command == "threads") {
-        if (seq != m_threadListRequest || m_state != State::Stopped) return;
+        if (seq != m_threadListRequest || (m_state != State::Stopped && !(m_state == State::Running && m_pauseRequested))) return;
         m_threadListRequest = 0;
     }
     const auto* success = value->find("success"); const auto* body = value->find("body");
     if (!success || success->type != JsonType::Bool || !success->boolValue) {
+        if (command == "pause" || command == "threads") m_pauseRequested = false;
         if (command == "setBreakpoints") {
             m_breakpointWarnings[pendingRequest.source] = command + ": " + text(value->find("message"));
             m_breakpointWarning = m_breakpointWarnings.begin()->second;
@@ -133,6 +135,12 @@ void Session::handle(std::string_view raw) {
             m_thread = m_threads.front().id;
             request("stackTrace", "{\"threadId\":" + std::to_string(m_thread) + ",\"startFrame\":0,\"levels\":30}");
         }
+        if (m_pauseRequested && m_state == State::Running) {
+            if (m_threads.empty()) { m_pauseRequested = false; m_message = "No running thread available to pause"; m_messageIsError = true; return; }
+            m_thread = m_threads.front().id;
+            request("pause", "{\"threadId\":" + std::to_string(m_thread) + "}");
+            m_message = "Pause requested"; m_messageIsError = false; return;
+        }
         m_message = m_threads.empty() ? "No threads reported" : "Threads loaded"; m_messageIsError = false;
     } else if (command == "stackTrace" && m_state == State::Stopped) {
         const auto* stack = member(body, "stackFrames"); m_stack.clear();
@@ -158,6 +166,24 @@ void Session::handle(std::string_view raw) {
         }
     }
 }
+bool Session::pause(std::string& error) {
+    if (m_state != State::Running || m_pauseRequested) { error = "Debugger is not running or pause is already pending"; return false; }
+    m_pauseRequested = true; m_message = "Pause requested"; m_messageIsError = false;
+    if (m_thread) request("pause", "{\"threadId\":" + std::to_string(m_thread) + "}");
+    else { request("threads", "{}"); m_threadListRequest = m_seq - 1; }
+    error.clear(); return true;
+}
+void Session::pauseTimedOut() {
+    if (!m_pauseRequested || m_state != State::Running) return;
+    m_pauseRequested = false;
+    m_threadListRequest = 0;
+    for (auto it = m_requests.begin(); it != m_requests.end();) {
+        if (it->second.command == "pause" || it->second.command == "threads") it = m_requests.erase(it);
+        else ++it;
+    }
+    m_message = "Debugger did not pause within 15 seconds; try again";
+    m_messageIsError = true;
+}
 bool Session::resume(std::string_view command, std::string& error) {
     if (m_state != State::Stopped || !m_thread) { error = "Debugger is not stopped"; return false; }
     if (command != "continue" && command != "next" && command != "stepIn" && command != "stepOut") { error = "Unknown debug action"; return false; }
@@ -170,7 +196,7 @@ bool Session::resume(std::string_view command, std::string& error) {
 }
 bool Session::requestThreads(std::string& error) {
     if (m_state != State::Stopped) { error = "Debugger is not stopped"; return false; }
-    m_threads.clear(); m_message = "Loading threads"; m_messageIsError = false;
+    m_message = "Loading threads"; m_messageIsError = false;
     request("threads", "{}"); m_threadListRequest = m_seq - 1; error.clear(); return true;
 }
 bool Session::selectThread(std::size_t index, std::string& error) {
@@ -206,7 +232,7 @@ bool Session::setBreakpoints(std::string source, std::vector<int> lines, std::st
 }
 void Session::disconnect() { if (m_state != State::Idle && m_state != State::Ended && m_state != State::Failed) request("disconnect", "{\"terminateDebuggee\":true}"); }
 void Session::transportClosed(std::string message, bool expected) {
-    ++m_generation; m_threadListRequest = 0; m_initialized = false; m_thread = 0; m_stack.clear(); m_threads.clear(); m_variables.clear();
+    ++m_generation; m_pauseRequested = false; m_threadListRequest = 0; m_initialized = false; m_thread = 0; m_stack.clear(); m_threads.clear(); m_variables.clear();
     m_requests.clear(); m_outbound.clear();
     m_state = expected ? State::Ended : State::Failed;
     m_messageIsError = !expected;

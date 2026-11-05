@@ -1,0 +1,8 @@
+{
+  "name": "Accessibility Test Runner",
+  "version": "0.1.0",
+  "description": "Check common HTML accessibility issues and duplicate literal IDs locally.",
+  "requires": ["accessibility-audit-v1"],
+  "permissions": {"project": false, "network": false, "processes": false, "settings": false},
+  "commands": [{"title": "Audit HTML accessibility", "action": "accessibility-audit"}]
+}

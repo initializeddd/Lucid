@@ -3,6 +3,8 @@
 #include "editor/cursor/CursorStyle.hpp"
 #include "editor/syntax/Syntax.hpp"
 #include "ui/theme/Theme.hpp"
+#include "modules/DiagramPreview.hpp"
+#include "ui/VisualReviewPreview.hpp"
 
 #include <span>
 #include <string_view>
@@ -23,6 +25,11 @@ enum class PromptKind {
     ProjectReplace,
     ProjectReplaceReview,
     LanguageLocations,
+    LanguageSymbolInput,
+    LanguageStatus,
+    LanguageSignatures,
+    LanguageRenameInput,
+    LanguageRenameReview,
     Diagnostics,
     AiModelInput,
     AiKeyInput,
@@ -35,6 +42,41 @@ enum class PromptKind {
     ModuleActions,
     ModuleCommands,
     ModuleImport,
+    ModuleSnippetName,
+    ModuleCMakePath,
+    ModuleCoveragePath,
+    ModuleBenchmarkPath,
+    ModuleBinaryPath,
+    ModuleLocalizationPath,
+    ModuleLocalizationEdit,
+    ModuleDesignTokensPath,
+    ModuleLogsInput,
+    ModulePythonInterpreterPath,
+    ModulePythonCreatePath,
+    ModuleCTestInput,
+    ModuleHexPath,
+    ModuleHexOffset,
+    ModuleHexLength,
+    ModuleHexBytes,
+    ModuleHexSearch,
+    ModuleLinkerPath,
+    ModuleToolchainPath,
+    ModuleCrashPath,
+    ModuleRustPath,
+    ModuleSqlPath,
+    ModuleSqlExportPath,
+    ModuleVisualPath,
+    ModuleApiTemplateName,
+    ModuleApiEnvironmentPath,
+    ModuleApiSavePath,
+    ModuleContainerPath,
+    ModuleContainerActionPath,
+    ModuleDependencyArtifactPath,
+    ModuleShaderCompiler,
+    ModuleShaderOutput,
+    ModuleFlashExecutable,
+    ModulePullRequestUrl,
+    ModulePullRequestComment,
     ModulePreview,
     ModuleCatalog,
     DebugMenu,
@@ -50,6 +92,8 @@ enum class PromptKind {
     GitCommitInput,
     GitRemoteReview,
     GitHistory,
+    GitBranches,
+    GitBranchReview,
     TaskList,
     TaskActions,
     TaskSubtasks,
@@ -108,6 +152,8 @@ enum class SuggestionKind {
     Function,
     Task,
     ReadOnlyText,
+    MarkdownHeading,
+    MarkdownCode,
 };
 
 struct PathSuggestion {
@@ -117,6 +163,14 @@ struct PathSuggestion {
 };
 
 struct FrameState {
+    const VisualReviewPreview* visualPreview = nullptr;
+    bool webPreviewMode = false;
+    bool shaderPreviewMode = false;
+    bool diagramPreviewVisible = false;
+    double diagramZoom = 1.0, diagramPanX = 0.0, diagramPanY = 0.0;
+    std::span<const modules::DiagramPositionedNode> diagramNodes;
+    std::span<const modules::DiagramPositionedEdge> diagramEdges;
+    double diagramWidth = 0, diagramHeight = 0;
     bool commandVisible = false;
     std::string_view commandQuery;
     std::size_t commandCursor = 0;
@@ -195,6 +249,9 @@ struct FrameState {
 
     std::vector<int> compileFunctionLines;
     std::vector<int> debugBreakpointLines;
+    // Parallel to visibleLines: -1 unknown, 0 uncovered, 1 covered.
+    std::vector<int> coverageLines;
+    int coverageCursor = -1;
     int debugStoppedLine = -1;
     std::string_view debugInline;
 

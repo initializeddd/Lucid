@@ -1,0 +1,32 @@
+{
+  "name": "CMake Navigator",
+  "version": "0.1.0",
+  "description": "Browse CMake metadata and review typed cache option changes.",
+  "requires": [
+    "cmake-codemodel-v1",
+    "cmake-query-v1",
+    "cmake-cache-edit-v1",
+    "cmake-cache-values-v1",
+    "cmake-build-target-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": true,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Browse CMake targets",
+      "action": "browse-cmake"
+    },
+    {
+      "title": "Prepare CMake query",
+      "action": "prepare-cmake-query"
+    },
+    {
+      "title": "Edit CMake cache options",
+      "action": "edit-cmake-options"
+    }
+  ]
+}

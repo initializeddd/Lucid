@@ -14,7 +14,45 @@ int main() {
     std::filesystem::path decoded;
     const auto sample = std::filesystem::absolute(std::filesystem::path("lucid test#file.cpp"));
     if (!pathFromFileUri(fileUri(sample), decoded) || decoded != sample || pathFromFileUri("file:///tmp/%00bad", decoded) || pathFromFileUri("https://example.com/x", decoded)) return 14;
+    const auto unicodePath = std::filesystem::absolute(std::filesystem::path(std::u8string(u8"lucid-é-🌲.py")));
+    if (!pathFromFileUri(fileUri(unicodePath), decoded) || decoded != unicodePath || fileUri(unicodePath).find("%C3%A9") == std::string::npos) return 47;
 #if !defined(_WIN32)
+    {
+        const auto fakeDir = std::filesystem::temp_directory_path() /
+            ("lucid-lsp-capabilities-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(fakeDir);
+        const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"completionProvider":{},"signatureHelpProvider":false,"workspaceSymbolProvider":true,"documentSymbolProvider":{},"definitionProvider":true,"declarationProvider":true,"referencesProvider":false,"documentFormattingProvider":{},"documentRangeFormattingProvider":false}}})";
+        { std::ofstream script(fakeDir / "clangd"); script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/cat > '" << (fakeDir / "received").string() << "'\n"; }
+        std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
+        const char* old = std::getenv("PATH"); const bool hadPath = old != nullptr; const std::string oldPath = old ? old : "";
+        if (setenv("PATH", fakeDir.c_str(), 1) != 0) return 30;
+        Client capabilities; std::string error; std::vector<std::string> messages;
+        const bool started = capabilities.start(fakeDir, error);
+        if (hadPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
+        if (!started) return 31;
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!capabilities.ready() && std::chrono::steady_clock::now() < limit) {
+            if (!capabilities.poll(messages, error)) return 32;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::uint64_t requestId = 123;
+        if (!capabilities.ready() || !capabilities.supports("textDocument/completion") || capabilities.supports("textDocument/signatureHelp") || !capabilities.supports("workspace/symbol") || !capabilities.supports("textDocument/documentSymbol") || !capabilities.supports("textDocument/definition") || !capabilities.supports("textDocument/declaration") ||
+            !capabilities.supports("textDocument/formatting") || capabilities.supports("textDocument/references") ||
+            capabilities.supports("textDocument/rangeFormatting") || capabilities.request("textDocument/references", "{}", requestId, error) ||
+            requestId != 0 || error.find("does not support") == std::string::npos) return 33;
+        if (capabilities.request("textDocument/signatureHelp", "{}", requestId, error) || requestId != 0 || error.find("does not support") == std::string::npos) return 42;
+        if (!capabilities.request("textDocument/definition", "{}", requestId, error) || !capabilities.cancel(requestId, error)) return 35;
+        bool receivedCancel = false;
+        while (std::chrono::steady_clock::now() < limit) {
+            messages.clear(); if (!capabilities.poll(messages, error)) return 37;
+            std::ifstream recorded(fakeDir / "received"); const std::string data((std::istreambuf_iterator<char>(recorded)), {});
+            if (data.find("\"method\":\"$/cancelRequest\"") != std::string::npos && data.find("\"params\":{\"id\":" + std::to_string(requestId) + "}") != std::string::npos) { receivedCancel = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!receivedCancel) return 36;
+        capabilities.close(); std::filesystem::remove_all(fakeDir);
+        if (capabilities.supports("textDocument/completion")) return 34;
+    }
     {
         const auto fakeDir = std::filesystem::temp_directory_path() /
             ("lucid-lsp-timeout-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -43,7 +81,7 @@ int main() {
         std::filesystem::create_directories(fakeDir);
         const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8"}}})";
         { std::ofstream script(fakeDir / "clangd");
-          script << "#!/bin/sh\n/usr/bin/printf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/sleep 5\n"; }
+          script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/sleep 5\n"; }
         std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
         const char* pathValue = std::getenv("PATH"); const bool hadPath = pathValue != nullptr;
         const std::string oldPath = pathValue ? pathValue : "";
@@ -58,13 +96,36 @@ int main() {
             if (!wrongEncoding.poll(messages, error)) { rejected = true; break; }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        const bool stopped = !wrongEncoding.alive() && !wrongEncoding.ready();
         wrongEncoding.close(); std::filesystem::remove_all(fakeDir);
-        if (!rejected || error.find("unsupported position encoding") == std::string::npos) {
+        if (!rejected || !stopped || error.find("unsupported position encoding") == std::string::npos) {
             std::fprintf(stderr, "encoding test failed: rejected=%d error='%s' messages=%zu\n",
                          rejected ? 1 : 0, error.c_str(), messages.size());
             for (const auto& message : messages) std::fprintf(stderr, "  message: %s\n", message.c_str());
             return 25;
         }
+    }
+    {
+        const auto fakeDir = std::filesystem::temp_directory_path() /
+            ("lucid-python-lsp-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(fakeDir);
+        const auto interpreter = fakeDir / "chosen python";
+        const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"completionProvider":{}}}})";
+        { std::ofstream script(interpreter); script << "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" << (fakeDir / "args").string() << "'\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/cat > /dev/null\n"; }
+        std::filesystem::permissions(interpreter, std::filesystem::perms::owner_all);
+        Client python; std::string error; std::vector<std::string> messages;
+        if (python.startPython(fakeDir, "relative-python", error) || python.alive()) return 43;
+        if (!python.startPython(fakeDir, interpreter, error)) return 44;
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!python.ready() && std::chrono::steady_clock::now() < limit) {
+            if (!python.poll(messages, error)) return 45;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::ifstream args(fakeDir / "args"); const std::string actual((std::istreambuf_iterator<char>(args)), {});
+        const bool ok = python.ready() && python.supports("textDocument/completion") && actual == "-I\n-m\npylsp\n";
+        if (ok && (python.startPython(fakeDir, "relative-python", error) || python.alive() || python.ready() || python.supports("textDocument/completion"))) return 48;
+        python.close(); std::filesystem::remove_all(fakeDir);
+        if (!ok) return 46;
     }
 #endif
     if (!std::getenv("LUCID_TEST_CLANGD")) return 0;
@@ -91,14 +152,31 @@ int main() {
             if (message.find("\"id\":" + std::to_string(id)) != std::string::npos || message.find("\"id\": " + std::to_string(id)) != std::string::npos) response = true;
             if (message.find("textDocument/publishDiagnostics") != std::string::npos && message.find("missing_name") != std::string::npos) {
                 lucid::editor::JsonError parseError; const auto parsed = lucid::editor::parseJson(message, parseError);
-                const auto* params = parsed ? parsed->find("params") : nullptr;
-                const auto* version = params ? params->find("version") : nullptr;
+                const auto* diagnosticParams = parsed ? parsed->find("params") : nullptr;
+                const auto* version = diagnosticParams ? diagnosticParams->find("version") : nullptr;
                 diagnostic = version && version->type == lucid::editor::JsonType::Number && version->numberValue == static_cast<double>(client.documentVersion());
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (!response || !diagnostic) return 9;
+    if (client.supports("textDocument/declaration")) {
+        if (!client.request("textDocument/declaration", params, id, error)) return 38;
+        bool declarationReceived = false;
+        while (!declarationReceived && std::chrono::steady_clock::now() < deadline) {
+            messages.clear(); if (!client.poll(messages, error)) return 39;
+            for (const auto& message : messages) {
+                lucid::editor::JsonError jsonError; const auto value = lucid::editor::parseJson(message, jsonError);
+                const auto* responseId = value ? value->find("id") : nullptr;
+                if (responseId && responseId->type == lucid::editor::JsonType::Number && responseId->numberValue == static_cast<double>(id)) {
+                    if (value->find("error") || !value->find("result")) return 40;
+                    declarationReceived = true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!declarationReceived) return 41;
+    }
     if (!client.change("int lucidExample();\nint main() { lucidEx }\n", error)) return 10;
     const std::string completion = "{\"textDocument\":{\"uri\":\"" + uri + "\"},\"position\":{\"line\":1,\"character\":20}}";
     if (!client.request("textDocument/completion", completion, id, error)) return 11;

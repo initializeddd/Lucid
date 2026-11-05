@@ -1,0 +1,37 @@
+{
+  "name": "Microcontroller Dashboard",
+  "version": "0.1.0",
+  "description": "Inspect an OpenOCD profile, capture serial output, and flash reviewed firmware after confirmation.",
+  "requires": [
+    "microcontroller-serial-v1",
+    "openocd-flash-v1",
+    "usb-board-identification-v1",
+    "serial-continuous-v1",
+    "openocd-bin-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": true,
+    "settings": false,
+    "devices": true
+  },
+  "commands": [
+    {
+      "title": "Find serial devices",
+      "action": "serial-monitor"
+    },
+    {
+      "title": "Inspect OpenOCD profile",
+      "action": "board-profile"
+    },
+    {
+      "title": "Flash firmware with OpenOCD",
+      "action": "flash-firmware"
+    },
+    {
+      "title": "Identify USB boards",
+      "action": "identify-usb-boards"
+    }
+  ]
+}

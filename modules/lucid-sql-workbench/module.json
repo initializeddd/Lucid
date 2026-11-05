@@ -1,0 +1,45 @@
+{
+  "name": "SQL Workbench",
+  "version": "0.1.0",
+  "description": "Query, inspect, and preview changes to standalone SQLite snapshots.",
+  "requires": [
+    "sql-snapshot-v1",
+    "sql-parameters-v1",
+    "sql-columns-v1",
+    "sql-change-copy-v1",
+    "sql-change-bound-v1",
+    "sql-change-row-diff-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Run read-only SQLite query",
+      "action": "sql-query"
+    },
+    {
+      "title": "Explain SQLite query plan",
+      "action": "sql-explain"
+    },
+    {
+      "title": "Run SQLite query with bindings",
+      "action": "sql-query-bound"
+    },
+    {
+      "title": "Explain SQLite query with bindings",
+      "action": "sql-explain-bound"
+    },
+    {
+      "title": "Preview SQL change as a new copy",
+      "action": "sql-change-preview"
+    },
+    {
+      "title": "Preview SQL change with bindings",
+      "action": "sql-change-bound"
+    }
+  ]
+}

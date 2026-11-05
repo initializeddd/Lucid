@@ -286,6 +286,8 @@ struct Renderer::Impl {
             throw std::runtime_error("Swapchain image index is out of range");
         }
 
+        if (!state.commandVisible) directUiPass->prepareVisualPreview(state.visualPreview);
+        else { sceneUiPasses[currentFrame]->prepareVisualPreview(state.visualPreview); overlayUiPass->prepareVisualPreview(state.visualPreview); }
         const VkCommandBuffer commandBuffer = commandBuffers[currentFrame];
         commandPool.begin(commandBuffer);
 

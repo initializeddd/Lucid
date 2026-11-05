@@ -1,0 +1,27 @@
+{
+  "name": "Visual Regression Review",
+  "version": "0.1.0",
+  "description": "Compare captured images for pixel differences with optional masks.",
+  "requires": [
+    "visual-regression-review-v1",
+    "visual-regression-config-v1",
+    "visual-review-crop-v1",
+    "visual-config-edit-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Compare images",
+      "action": "compare-visual-images"
+    },
+    {
+      "title": "Compare with configuration",
+      "action": "compare-visual-configured"
+    }
+  ]
+}

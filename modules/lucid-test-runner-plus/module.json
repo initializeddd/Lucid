@@ -1,0 +1,8 @@
+{
+  "name": "Test Runner Plus",
+  "version": "0.1.0",
+  "description": "Discover CTest tests and explicitly run individual tests, with failure output and previous status in this session.",
+  "requires": ["ctest-runner-v2"],
+  "permissions": {"project": true, "network": false, "processes": true, "settings": true},
+  "commands": [{"title": "Browse CTest tests", "action": "run-ctest"}]
+}

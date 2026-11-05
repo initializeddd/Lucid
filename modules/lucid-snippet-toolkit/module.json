@@ -1,0 +1,48 @@
+{
+  "name": "Snippet Toolkit",
+  "version": "0.1.0",
+  "description": "Wrap selected text and insert templates with editable fields navigated using Tab and Shift+Tab.",
+  "permissions": {
+    "project": false,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Wrap selection in parentheses",
+      "insert": "({{selection}}){{cursor}}",
+      "snippet": true
+    },
+    {
+      "title": "Wrap selection in braces",
+      "insert": "{\n    {{selection}}{{cursor}}\n}",
+      "snippet": true
+    },
+    {
+      "title": "Wrap selection in double quotes",
+      "insert": "\"{{selection}}\"{{cursor}}",
+      "snippet": true
+    },
+    {
+      "title": "Insert TODO",
+      "insert": "TODO: {{placeholder:describe task}}",
+      "snippet": true
+    },
+    {
+      "title": "Insert Markdown link",
+      "insert": "[{{selection}}]({{cursor}})",
+      "snippet": true
+    },
+    {
+      "title": "Insert function template",
+      "insert": "{{placeholder:void}} {{placeholder:name}}({{placeholder:arguments}}) {\n    {{cursor}}\n}",
+      "snippet": true
+    }
+  ],
+  "requires": [
+    "snippet-v1",
+    "snippet-placeholder-v1",
+    "snippet-placeholders-v2"
+  ]
+}

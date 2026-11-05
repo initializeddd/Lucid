@@ -1,0 +1,25 @@
+{
+  "name": "Log Correlation",
+  "version": "0.1.0",
+  "description": "Merge local text, syslog and structured JSON lines by explicit timestamps.",
+  "requires": [
+    "log-correlation-v1",
+    "log-json-lines-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Correlate logs",
+      "action": "log-correlation"
+    },
+    {
+      "title": "Correlate structured JSON logs",
+      "action": "log-correlation-json"
+    }
+  ]
+}

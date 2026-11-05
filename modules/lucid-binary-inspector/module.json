@@ -1,0 +1,8 @@
+{
+  "name": "Binary Inspector",
+  "version": "0.1.0",
+  "description": "Inspect ELF, PE and thin Mach-O architecture, sections, symbols and linked libraries without executing the file.",
+  "requires": ["binary-inspector-v1"],
+  "permissions": {"project": true, "network": false, "processes": false, "settings": false},
+  "commands": [{"title": "Inspect binary", "action": "binary-inspector"}]
+}

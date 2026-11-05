@@ -4,9 +4,52 @@
 #include <algorithm>
 namespace lucid::workspace {
 namespace {
+unsigned char foldAscii(unsigned char c) { return c >= 'A' && c <= 'Z' ? static_cast<unsigned char>(c + ('a' - 'A')) : c; }
+bool sameText(std::string_view left, std::string_view right, bool caseSensitive) {
+    if (left.size() != right.size()) return false;
+    return std::equal(left.begin(), left.end(), right.begin(), [caseSensitive](unsigned char a, unsigned char b) {
+        return caseSensitive ? a == b : foldAscii(a) == foldAscii(b);
+    });
+}
 bool wordByte(unsigned char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_' || c >= 0x80;
+}
+struct PathRule { std::string_view pattern; bool exclude; bool wildcard; };
+std::vector<PathRule> pathRules(std::string_view filter) {
+    std::vector<PathRule> rules;
+    while (!filter.empty()) {
+        const auto comma = filter.find(',');
+        auto part = filter.substr(0, comma);
+        while (!part.empty() && (part.front() == ' ' || part.front() == '\t')) part.remove_prefix(1);
+        while (!part.empty() && (part.back() == ' ' || part.back() == '\t')) part.remove_suffix(1);
+        const bool exclude = !part.empty() && part.front() == '!';
+        if (exclude) part.remove_prefix(1);
+        if (!part.empty()) rules.push_back({part, exclude, part.find_first_of("*?") != std::string_view::npos});
+        if (comma == std::string_view::npos) break;
+        filter.remove_prefix(comma + 1);
+    }
+    return rules;
+}
+bool pathWildcard(std::string_view pattern, std::string_view path) {
+    std::size_t p = 0, s = 0, star = std::string_view::npos, retry = 0;
+    while (s < path.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == path[s])) { ++p; ++s; }
+        else if (p < pattern.size() && pattern[p] == '*') { star = p++; retry = s; }
+        else if (star != std::string_view::npos) { p = star + 1; s = ++retry; }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p;
+    return p == pattern.size();
+}
+bool pathAllowed(std::string_view path, const std::vector<PathRule>& rules) {
+    bool hasIncludes = false, included = false;
+    for (const auto& rule : rules) {
+        const bool matches = rule.wildcard ? pathWildcard(rule.pattern, path) : path.find(rule.pattern) != std::string_view::npos;
+        if (rule.exclude && matches) return false;
+        if (!rule.exclude) { hasIncludes = true; included = included || matches; }
+    }
+    return !hasIncludes || included;
 }
 // Keep the match in view, and never cut a UTF-8 character at either edge.
 std::string searchPreview(const std::string& content, std::size_t lineStart,
@@ -26,10 +69,23 @@ std::string searchPreview(const std::string& content, std::size_t lineStart,
 }
 } // namespace
 
+bool validProjectPathFilter(std::string_view filter) {
+    while (!filter.empty()) {
+        const auto comma = filter.find(',');
+        auto part = filter.substr(0, comma);
+        while (!part.empty() && (part.front() == ' ' || part.front() == '\t')) part.remove_prefix(1);
+        while (!part.empty() && (part.back() == ' ' || part.back() == '\t')) part.remove_suffix(1);
+        if (part == "!" || part.find_first_of("\r\n") != std::string_view::npos) return false;
+        if (comma == std::string_view::npos) break;
+        filter.remove_prefix(comma + 1);
+    }
+    return true;
+}
+
 std::string replacementPreview(const ProjectSearchFile& file, const ProjectSearchMatch& match,
-                               std::string_view query, std::string_view replacement) {
+                               std::string_view query, std::string_view replacement, bool caseSensitive) {
     const auto& text = file.original; const auto pos = match.offset;
-    if (query.empty() || pos > text.size() || query.size() > text.size() - pos || text.compare(pos, query.size(), query) != 0) return "Preview unavailable";
+    if (query.empty() || pos > text.size() || query.size() > text.size() - pos || !sameText(std::string_view(text).substr(pos, query.size()), query, caseSensitive)) return "Preview unavailable";
     const auto previous = pos == 0 ? std::string::npos : text.find_last_of("\r\n", pos - 1);
     const auto lineStart = previous == std::string::npos ? 0 : previous + 1;
     const auto after = pos + query.size();
@@ -55,29 +111,77 @@ std::string replacementPreview(const ProjectSearchFile& file, const ProjectSearc
     return result;
 }
 
-ProjectSearchResults searchProject(const Project& project, std::string_view query, std::size_t limit, const std::atomic_bool* cancel, bool wholeWord) {
+ProjectSearchResults searchProject(const Project& project, std::string_view query, std::size_t limit, const std::atomic_bool* cancel, bool wholeWord, bool caseSensitive, std::string_view pathFilter) {
     ProjectSearchResults result;
+    result.caseSensitive = caseSensitive;
+    std::size_t skippedDetailBytes = 0;
+    const auto recordSkipped = [&result, &skippedDetailBytes](const std::string& path, std::string_view reason) {
+        ++result.skipped;
+        if (result.firstSkippedPath.empty()) { result.firstSkippedPath = path; result.firstSkippedReason = reason; }
+        constexpr std::size_t maxDetails = 1000, maxBytes = 256U * 1024U;
+        if (result.skippedFiles.size() < maxDetails && path.size() + reason.size() <= maxBytes - skippedDetailBytes) {
+            skippedDetailBytes += path.size() + reason.size();
+            result.skippedFiles.push_back({path, std::string(reason)});
+        }
+    };
     std::size_t storedBytes = 0;
+    if (!validProjectPathFilter(pathFilter)) { result.indexIncomplete = true; return result; }
     if (query.empty() || query.find('\n') != std::string_view::npos || query.find('\r') != std::string_view::npos) return result;
+    const auto rules = pathRules(pathFilter);
+    const auto normalize = [caseSensitive](unsigned char c) { return caseSensitive ? c : foldAscii(c); };
+    std::vector<unsigned char> pattern; pattern.reserve(query.size());
+    for (const unsigned char c : query) pattern.push_back(normalize(c));
+    std::vector<std::size_t> prefix(pattern.size());
+    for (std::size_t i = 1, length = 0; i < pattern.size(); ++i) {
+        while (length && pattern[i] != pattern[length]) length = prefix[length - 1];
+        if (pattern[i] == pattern[length]) ++length;
+        prefix[i] = length;
+        if ((i & 4095U) == 0 && cancel && cancel->load()) { result.indexIncomplete = true; return result; }
+    }
     for (const auto& path : project.files()) {
         if (cancel && cancel->load()) { result.indexIncomplete = true; return result; }
+        if (!pathAllowed(path, rules)) continue;
         std::string content, error;
-        if (!project.readFile(path, content, error) ||
-            std::any_of(content.begin(), content.end(), [](unsigned char c) { return c == 0 || (c < 32 && c != '\t' && c != '\n' && c != '\r'); }) ||
-            !editor::Document::canEditLosslessly(content, error)) { ++result.skipped; continue; }
+        if (!project.readFile(path, content, error, cancel)) {
+            if (cancel && cancel->load()) { result.indexIncomplete = true; return result; }
+            recordSkipped(path, "could not read"); ++result.readErrors;
+            if (result.firstReadErrorPath.empty()) result.firstReadErrorPath = path;
+            continue;
+        }
+        bool binary = false;
+        for (std::size_t i = 0; i < content.size(); ++i) {
+            if ((i & 4095U) == 0 && cancel && cancel->load()) { result.indexIncomplete = true; return result; }
+            const auto c = static_cast<unsigned char>(content[i]);
+            if (c == 0 || (c < 32 && c != '\t' && c != '\n' && c != '\r')) { binary = true; break; }
+        }
+        if (binary || !editor::Document::canEditLosslessly(content, error, cancel)) {
+            if (cancel && cancel->load()) { result.indexIncomplete = true; return result; }
+            recordSkipped(path, binary ? "binary content" : "unsupported text encoding or line endings");
+            continue;
+        }
         std::size_t pos = 0, scanned = 0, lineStart = 0, line = 0, column = 0;
         std::size_t lineEnd = 0;
         const std::size_t fileIndex = result.files.size();
         bool needLineEnd = true;
         bool added = false;
-        while ((pos = content.find(query, pos)) != std::string::npos) {
+        std::size_t cursor = 0, matched = 0;
+        while (cursor < content.size()) {
+            while (cursor < content.size() && matched < pattern.size()) {
+                if ((cursor & 4095U) == 0 && cancel && cancel->load()) { result.indexIncomplete = true; return result; }
+                const auto byte = normalize(static_cast<unsigned char>(content[cursor++]));
+                while (matched && byte != pattern[matched]) matched = prefix[matched - 1];
+                if (byte == pattern[matched]) ++matched;
+            }
+            if (matched != pattern.size()) break;
+            pos = cursor - pattern.size();
             if (cancel && cancel->load()) { result.indexIncomplete = true; return result; }
             if (wholeWord && ((pos > 0 && wordByte(static_cast<unsigned char>(content[pos - 1]))) ||
                 (pos + query.size() < content.size() && wordByte(static_cast<unsigned char>(content[pos + query.size()]))))) {
-                ++pos; continue;
+                matched = prefix[matched - 1]; continue;
             }
             if (result.matches.size() >= limit) { result.truncated = true; return result; }
             while (scanned < pos) {
+                if ((scanned & 4095U) == 0 && cancel && cancel->load()) { result.indexIncomplete = true; return result; }
                 const unsigned char byte = static_cast<unsigned char>(content[scanned++]);
                 if (byte == '\r' || byte == '\n') {
                     if (byte == '\r' && scanned < pos && content[scanned] == '\n') ++scanned;
@@ -100,7 +204,7 @@ ProjectSearchResults searchProject(const Project& project, std::string_view quer
             }
             const auto snippet = searchPreview(content, lineStart, lineEnd, pos);
             result.matches.push_back({fileIndex, pos, line, column, snippet});
-            pos += query.size();
+            matched = 0;
         }
     }
     return result;
@@ -110,7 +214,7 @@ bool replaceProject(Project& project, const ProjectSearchResults& results, std::
                     std::vector<std::string>* changedPaths, const std::filesystem::path& historyRoot) {
     changed = 0; error.clear();
     if (changedPaths) changedPaths->clear();
-    if (query.empty() || results.truncated || results.indexIncomplete) { error = "Search is empty or incomplete; replacement was not applied"; return false; }
+    if (query.empty() || results.truncated || results.indexIncomplete || results.readErrors) { error = "Search is empty or incomplete; replacement was not applied"; return false; }
     // Preflight all files before modifying any, and recheck each one at replacement time.
     for (const auto& file : results.files) {
         std::string current;
@@ -127,7 +231,7 @@ bool replaceProject(Project& project, const ProjectSearchResults& results, std::
         std::size_t end = 0; bool first = true;
         for (const auto pos : positions) {
             if (pos > original.size() || query.size() > original.size() - pos ||
-                original.compare(pos, query.size(), query) != 0 || (!first && pos < end)) {
+                !sameText(std::string_view(original).substr(pos, query.size()), query, results.caseSensitive) || (!first && pos < end)) {
                 error = "Invalid reviewed search result"; return false;
             }
             end = pos + query.size(); first = false;
@@ -174,7 +278,7 @@ bool replaceProject(Project& project, const ProjectSearchResults& results, std::
             return false;
         }
     }
-    if (!historyRoot.empty() && query != replacement) {
+    if (!historyRoot.empty()) {
         for (const auto& file : results.files) {
             recovery::Snapshot backup; backup.project = project.root().generic_string(); backup.file = file.path;
             backup.contents = file.original;

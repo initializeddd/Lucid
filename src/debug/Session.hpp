@@ -18,6 +18,9 @@ public:
     [[nodiscard]] bool receive(std::string_view bytes, std::string& error);
     [[nodiscard]] std::string takeOutbound();
     [[nodiscard]] bool resume(std::string_view command, std::string& error);
+    [[nodiscard]] bool pause(std::string& error);
+    [[nodiscard]] bool pausePending() const noexcept { return m_pauseRequested; }
+    void pauseTimedOut();
     void disconnect();
     void transportClosed(std::string message, bool expected);
     [[nodiscard]] bool setBreakpoints(std::vector<int> lines, std::string& error);
@@ -47,6 +50,7 @@ private:
     int m_threadListRequest = 0;
     std::uint64_t m_generation = 0;
     bool m_initialized = false, m_messageIsError = false;
+    bool m_pauseRequested = false;
     std::string m_program, m_cwd, m_source, m_outbound, m_message, m_output, m_breakpointWarning;
     std::vector<std::string> m_arguments;
     std::map<std::string, std::string> m_environment;

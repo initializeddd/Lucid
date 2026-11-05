@@ -118,6 +118,7 @@ private:
         }
 
         skipWhitespace();
+        value.byteOffset = m_index;
         const char value_char = peek();
         if (value_char == '{') {
             return parseObject(value, depth + 1);

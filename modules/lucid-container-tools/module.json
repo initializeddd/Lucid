@@ -1,0 +1,26 @@
+{
+  "name": "Container Tools",
+  "version": "0.1.0",
+  "description": "Inspect containers and review configured Compose actions before running them.",
+  "requires": [
+    "container-inspection-v1",
+    "container-lifecycle-v1",
+    "container-project-actions-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": true,
+    "processes": true,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Inspect containers",
+      "action": "inspect-containers"
+    },
+    {
+      "title": "Configured project actions",
+      "action": "configured-container-actions"
+    }
+  ]
+}

@@ -58,6 +58,10 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
         return input::Key::Delete;
     case GLFW_KEY_LEFT:
         return input::Key::Left;
+    case GLFW_KEY_F2:
+        return input::Key::F2;
+    case GLFW_KEY_F4:
+        return input::Key::F4;
     case GLFW_KEY_RIGHT:
         return input::Key::Right;
     case GLFW_KEY_UP:
@@ -104,6 +108,8 @@ void centerOnPrimaryMonitor(GLFWwindow* window) {
         return input::Key::O;
     case GLFW_KEY_P:
         return input::Key::P;
+    case GLFW_KEY_I:
+        return input::Key::I;
     case GLFW_KEY_R:
         return input::Key::R;
     case GLFW_KEY_T:

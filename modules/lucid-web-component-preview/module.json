@@ -1,0 +1,8 @@
+{
+  "name": "Web Component Preview",
+  "version": "0.1.0",
+  "description": "Render a trusted project asset snapshot on macOS. JavaScript runs; network isolation is not guaranteed.",
+  "requires": ["web-component-preview-macos-v1"],
+  "permissions": {"project": true, "network": true, "processes": false, "settings": false},
+  "commands": [{"title": "Render web preview", "action": "web-preview"}]
+}

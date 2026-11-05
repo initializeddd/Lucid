@@ -101,8 +101,11 @@ jobs:
           stage="${RUNNER_TEMP}/${name}"
           mkdir -p "${stage}/lib" dist
           cp build/bin/lucid "${stage}/"
+          cp build/bin/lucid-shader-preview-helper "${stage}/"
           cp -r build/bin/assets "${stage}/assets"
           cp LICENSE "${stage}/LICENSE"
+          mkdir -p "${stage}/licenses"
+          cp third_party/sha2/LICENSE "${stage}/licenses/sha2-BSD-3-Clause.txt"
           cp packaging/linux/dev.lucid.editor.desktop packaging/linux/dev.lucid.editor.png "${stage}/"
           printf '%s\n' \
             "Lucid (Beta)" \
@@ -139,8 +142,15 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'lucid-msi-payload'
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item $exe.FullName $stage
+          Copy-Item "$($exe.DirectoryName)\lucid-shader-preview-helper.exe" $stage
           Copy-Item "$($exe.DirectoryName)\assets" $stage -Recurse
-          Compress-Archive -Path "$stage\Lucid.exe", "$stage\assets" `
+          New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
+          Copy-Item third_party/sha2/LICENSE "$stage\licenses\sha2-BSD-3-Clause.txt"
+          if (Test-Path "$($exe.DirectoryName)\WebView2Loader.dll") {
+            Copy-Item "$($exe.DirectoryName)\WebView2Loader.dll" $stage
+            Copy-Item "$($exe.DirectoryName)\WebView2.LICENSE.txt" $stage
+          }
+          Compress-Archive -Path "$stage\*" `
             -DestinationPath "dist\Lucid-$env:RELEASE_TAG-Windows.zip"
           $wix = (Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset*\bin\heat.exe" | Select-Object -First 1).DirectoryName
           if (-not $wix) { throw "WiX 3 was not found" }

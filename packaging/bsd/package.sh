@@ -10,7 +10,10 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/lucid-package.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 mkdir -p dist
 cp build-bsd/bin/lucid "$stage/lucid"
+cp build-bsd/bin/lucid-shader-preview-helper "$stage/lucid-shader-preview-helper"
 cp -R build-bsd/bin/assets "$stage/assets"
 cp LICENSE packaging/linux/dev.lucid.editor.desktop packaging/linux/dev.lucid.editor.png "$stage/"
+mkdir -p "$stage/licenses"
+cp third_party/sha2/LICENSE "$stage/licenses/sha2-BSD-3-Clause.txt"
 printf '%s\n' 'Lucid requires the native GLFW, Vulkan loader, OpenSSL or LibreSSL libraries, and a compatible Vulkan driver.' 'Run ./lucid from this directory.' > "$stage/README.txt"
 tar -czf "dist/Lucid-$tag-$platform.tar.gz" -C "$stage" .

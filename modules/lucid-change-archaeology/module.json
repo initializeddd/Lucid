@@ -1,0 +1,8 @@
+{
+  "name": "Change Archaeology",
+  "version": "0.1.0",
+  "description": "Explore file history or trace selected function lines through local Git history.",
+  "requires": ["git-file-history-v1", "git-range-history-v1"],
+  "permissions": {"project": true, "network": false, "processes": true, "settings": false},
+  "commands": [{"title": "Explore file history", "action": "git-file-history"}, {"title": "Trace selected function or lines", "action": "git-range-history"}]
+}

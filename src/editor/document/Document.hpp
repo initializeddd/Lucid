@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -19,7 +21,7 @@ public:
     static Document fromUtf8(std::string_view text);
 
     [[nodiscard]] std::string toUtf8() const;
-    [[nodiscard]] static bool canEditLosslessly(std::string_view text, std::string& error);
+    [[nodiscard]] static bool canEditLosslessly(std::string_view text, std::string& error, const std::atomic_bool* cancel = nullptr);
     [[nodiscard]] bool serializeForFile(std::string_view original, std::string& output, std::string& error) const;
 
     [[nodiscard]] const std::vector<std::u32string>& lines() const noexcept { return m_lines; }
@@ -61,7 +63,8 @@ public:
     void joinLines();
     void insertLineBelow();
     void insertLineAbove();
-    void toggleLineComment();
+    void toggleLineComment(std::u32string_view prefix = U"//");
+    [[nodiscard]] bool toggleBlockComment(std::u32string_view open, std::u32string_view close);
     void indentLines(std::size_t spaces = 4);
     void outdentLines(std::size_t spaces = 4);
     void moveLineUp();
@@ -99,6 +102,8 @@ private:
         std::size_t anchorColumn = 0;
         bool selectionActive = false;
     };
+    struct AutoPair { std::size_t line; std::size_t column; std::uint64_t revision; };
+    std::optional<AutoPair> m_autoPair;
 
     void beginExtend();
     void deleteWithMovement(bool forward, bool word);

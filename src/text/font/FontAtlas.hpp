@@ -10,6 +10,7 @@
 namespace lucid::text {
 
 void setExecutablePath(std::string_view argv0);
+[[nodiscard]] std::filesystem::path applicationExecutablePath();
 [[nodiscard]] std::filesystem::path assetPath(std::string_view relative);
 
 struct Glyph {

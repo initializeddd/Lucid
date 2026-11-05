@@ -1,0 +1,22 @@
+{
+  "name": "Pull-Request Companion",
+  "version": "0.1.0",
+  "description": "Review GitHub pull requests, comment on changes, and submit a reviewed decision after confirmation.",
+  "requires": [
+    "pull-request-companion-v1",
+    "pull-request-comment-v1",
+    "pull-request-review-v1"
+  ],
+  "permissions": {
+    "project": false,
+    "network": true,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Review GitHub pull request",
+      "action": "fetch-pull-request"
+    }
+  ]
+}

@@ -116,3 +116,24 @@ jobs:
       - name: Test (Windows)
         if: ${{ !cancelled() && runner.os == 'Windows' && steps.build_windows.outcome == 'success' }}
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Test module packaging (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          python3 tests/packaging/module_publish_test.py
+          python3 tests/packaging/module_public_test.py
+          python3 tests/packaging/module_registry_compatibility_test.py
+          python3 tools/modules/publish.py > /dev/null
+
+      - name: Test module packaging (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python tests/packaging/module_publish_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/packaging/module_public_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/packaging/module_registry_compatibility_test.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/modules/publish.py | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

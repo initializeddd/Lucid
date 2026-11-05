@@ -1,4 +1,5 @@
 #include "workspace/git/GitReview.hpp"
+#include "modules/SecretScan.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -17,6 +18,28 @@ int main() {
     if (cmd("init -q") || cmd("config user.email test@example.com") || cmd("config user.name Alice") || cmd("config commit.gpgsign false") || cmd("config core.hooksPath /dev/null")) return 1;
     { std::ofstream f(root / "nested/a file.txt"); f << "one\ntwo\n--old\n"; }
     if (cmd("add .") || cmd("commit -qm initial")) return 2;
+    if (cmd("branch branch-test")) return 45;
+    GitBranches branches; std::string branchError, branchOutput;
+    if (!gitBranches(root, branches, branchError)) return 46;
+    const auto selected = std::find_if(branches.branches.begin(), branches.branches.end(), [](const auto& branch) { return branch.name == "branch-test"; });
+    if (selected == branches.branches.end() || selected->current) return 47;
+    const auto target = *selected;
+    { std::ofstream file(root / "untracked-change"); file << "uncommitted"; }
+    if (gitSwitchBranch(root, branches, target, branchOutput, branchError) || branchError.find("repository changes") == std::string::npos) return 48;
+    // A project can be a subdirectory of a repository: changes outside that
+    // project must still prevent a checkout of the whole working tree.
+    if (gitSwitchBranch(root / "nested", branches, target, branchOutput, branchError) || branchError.find("repository changes") == std::string::npos) return 57;
+    std::filesystem::remove(root / "untracked-change");
+    { std::ofstream file(root / "new-commit"); file << "new"; }
+    if (cmd("add new-commit") || cmd("commit -qm second")) return 49;
+    if (gitSwitchBranch(root, branches, target, branchOutput, branchError) || branchError.find("changed") == std::string::npos) return 50;
+    if (!gitBranches(root, branches, branchError) || cmd("branch -f branch-test HEAD")) return 54;
+    if (gitSwitchBranch(root, branches, target, branchOutput, branchError) || branchError.find("changed") == std::string::npos) return 55;
+    if (cmd("branch -f branch-test HEAD^")) return 56;
+    if (!gitBranches(root, branches, branchError) || !gitSwitchBranch(root, branches, target, branchOutput, branchError)) return 51;
+    GitBranches switched;
+    if (!gitBranches(root, switched, branchError) || std::none_of(switched.branches.begin(), switched.branches.end(), [](const auto& branch) { return branch.name == "branch-test" && branch.current; })) return 52;
+    if (cmd("switch -q -")) return 53;
     { std::ofstream f(root / "nested/a file.txt"); f << "one\nchanged\n++added\n"; }
     { std::ofstream f(root / "nested/untracked.txt"); f << "new\n"; }
     std::vector<GitChange> changes; std::string error;
@@ -42,6 +65,22 @@ int main() {
         std::none_of(review.lines.begin(), review.lines.end(), [](const auto& line) { return line.text.find("line navigation unavailable") != std::string::npos; })) return 44;
     GitCommitPreview preview;
     if (!gitCommitPreview(root / "nested", preview, error) || preview.paths.size() != 1 || preview.paths[0] != "a file.txt") return 16;
+    std::string stagedBlob; bool blobPresent = false;
+    if (!gitReadReviewedBlob(root / "nested", preview, "a file.txt", stagedBlob, blobPresent, error) || !blobPresent || stagedBlob != "one\nchanged\n++added\n") { std::fprintf(stderr, "staged read: %s, present=%d, bytes=%zu\n", error.c_str(), blobPresent, stagedBlob.size()); return 58; }
+    if (gitReadReviewedBlob(root / "nested", preview, "../outside.txt", stagedBlob, blobPresent, error)) return 59;
+    { std::ofstream file(root / "nested/a file.txt"); file << "ghp_" << std::string(36, 'A') << "\n"; }
+    if (cmd("add 'nested/a file.txt'") || !gitCommitPreview(root / "nested", preview, error)) return 60;
+    { std::ofstream file(root / "nested/a file.txt"); file << "safe working tree\n"; }
+    const auto stagedScan = lucid::modules::scanStagedSecrets(root / "nested", preview);
+    if (stagedScan.incomplete || stagedScan.findings.size() != 1 || stagedScan.findings[0].kind != "GitHub token") return 61;
+    if (cmd("add 'nested/a file.txt'")) return 62;
+    if (!lucid::modules::scanStagedSecrets(root / "nested", preview).incomplete) return 63;
+    GitCommitPreview cleanPreview;
+    if (!gitCommitPreview(root / "nested", cleanPreview, error)) return 65;
+    const auto cleanScan = lucid::modules::scanStagedSecrets(root / "nested", cleanPreview);
+    if (cleanScan.incomplete || !cleanScan.findings.empty()) return 66;
+    { std::ofstream file(root / "nested/a file.txt"); file << "one\nchanged\n++added\n"; }
+    if (cmd("add 'nested/a file.txt'") || !gitCommitPreview(root / "nested", preview, error)) return 64;
     { std::ofstream f(root / "nested/a file.txt"); f << "one\nnewer\n"; }
     if (!gitStage(root / "nested", modified, error)) return 17;
     std::string commitOutput;
@@ -103,6 +142,34 @@ int main() {
         return 35;
     }
     if (emptyCommand("log -1 --format=%s | grep -q 'Initial commit'")) return 35;
+    std::vector<GitFileHistoryEntry> fileHistory;
+    if (!gitFileHistory(emptyRoot, "first.txt", fileHistory, error) || fileHistory.size() != 1 ||
+        fileHistory[0].subject != "Initial commit" || fileHistory[0].author != "Alice") return 67;
+    if (!gitHistoricalFileDiff(emptyRoot, "first.txt", fileHistory[0].hash, review, error) ||
+        std::none_of(review.lines.begin(), review.lines.end(), [](const auto& line) { return line.text == "+first" && line.line == 0; })) return 68;
+    if (gitFileHistory(emptyRoot, "../first.txt", fileHistory, error) ||
+        gitHistoricalFileDiff(emptyRoot, "first.txt", "HEAD", review, error)) return 69;
+    std::vector<GitRangeHistoryEntry> rangeHistory;
+    if (!gitRangeHistory(emptyRoot, "first.txt", "first", 1, 1, rangeHistory, error) || rangeHistory.size() != 1 ||
+        rangeHistory[0].subject != "Initial commit" || std::none_of(rangeHistory[0].review.lines.begin(), rangeHistory[0].review.lines.end(), [](const auto& line) { return line.text == "+first" && line.line == 0; })) return 77;
+    if (gitRangeHistory(emptyRoot, "first.txt", "changed", 1, 1, rangeHistory, error) || !rangeHistory.empty() || error.find("commit") == std::string::npos ||
+        gitRangeHistory(emptyRoot, "../first.txt", "first", 1, 1, rangeHistory, error) ||
+        gitRangeHistory(emptyRoot, "first.txt", "first", 0, 1, rangeHistory, error)) return 78;
+    if (emptyCommand("mv first.txt renamed.txt") || emptyCommand("commit -qm Rename")) return 70;
+    if (!gitFileHistory(emptyRoot, "renamed.txt", fileHistory, error) || fileHistory.size() != 2 ||
+        fileHistory[0].path != "renamed.txt" || fileHistory[0].previousPath != "first.txt" ||
+        fileHistory[1].path != "first.txt" || fileHistory[1].subject != "Initial commit") return 71;
+    if (!gitHistoricalFileDiff(emptyRoot, fileHistory[1].path, fileHistory[1].hash, review, error) ||
+        std::none_of(review.lines.begin(), review.lines.end(), [](const auto& line) { return line.text == "+first"; })) return 72;
+    if (!gitHistoricalFileDiff(emptyRoot, fileHistory[0].path, fileHistory[0].hash, review, error, fileHistory[0].previousPath) ||
+        std::none_of(review.lines.begin(), review.lines.end(), [](const auto& line) { return line.text == "rename from first.txt"; })) return 73;
+    std::filesystem::create_directories(emptyRoot / "sub");
+    if (emptyCommand("mv renamed.txt sub/inside.txt") || emptyCommand("commit -qm boundary")) return 74;
+    bool stoppedAtBoundary = false;
+    if (!gitFileHistory(emptyRoot / "sub", "inside.txt", fileHistory, error, &stoppedAtBoundary) || !stoppedAtBoundary || fileHistory.size() != 1 ||
+        fileHistory[0].path != "inside.txt" || !fileHistory[0].previousPath.empty()) return 75;
+    if (gitHistoricalFileDiff(emptyRoot / "sub", "inside.txt", fileHistory[0].hash, review, error, "../renamed.txt")) return 76;
+    if (gitRangeHistory(emptyRoot / "sub", "inside.txt", "first", 1, 1, rangeHistory, error) || error.find("repository root") == std::string::npos) return 79;
     std::filesystem::remove_all(root); return 0;
 #endif
 }

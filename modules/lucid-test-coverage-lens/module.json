@@ -1,0 +1,25 @@
+{
+  "name": "Test Coverage Lens",
+  "version": "0.1.0",
+  "description": "Import project-local LCOV or Cobertura line coverage reports; reports may be stale.",
+  "requires": [
+    "coverage-lcov-v1",
+    "coverage-cobertura-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Import LCOV report",
+      "action": "coverage-lcov"
+    },
+    {
+      "title": "Import Cobertura XML report",
+      "action": "coverage-cobertura"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Dependency Risk Review",
+  "version": "0.1.0",
+  "description": "Review npm, Go and Cargo dependency risks and local artifact checksums.",
+  "requires": [
+    "dependency-risk-review-v1",
+    "dependency-risk-go-v1",
+    "dependency-risk-cargo-v1",
+    "dependency-provenance-v1",
+    "dependency-artifact-verify-v1",
+    "dependency-artifact-sha2-v2",
+    "dependency-artifact-go-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": true,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Review dependency risks",
+      "action": "review-dependency-risk"
+    }
+  ]
+}

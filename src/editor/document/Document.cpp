@@ -180,19 +180,29 @@ std::string Document::toUtf8() const {
     return result;
 }
 
-bool Document::canEditLosslessly(std::string_view text, std::string& error) {
-    std::string normalized;
-    normalized.reserve(text.size());
+bool Document::canEditLosslessly(std::string_view text, std::string& error, const std::atomic_bool* cancel) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) { error = "Text validation cancelled"; return false; }
     int ending = 0;
-    for (std::size_t i = 0; i < text.size(); ++i) {
+    std::size_t nextCancelCheck = 0;
+    for (std::size_t i = 0; i < text.size();) {
+        if (cancel && i >= nextCancelCheck) {
+            if (cancel->load(std::memory_order_relaxed)) { error = "Text validation cancelled"; return false; }
+            nextCancelCheck = i + 4096;
+        }
         if (text[i] == '\r' || text[i] == '\n') {
             int current = text[i] == '\n' ? 1 : 3;
             if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') { current = 2; ++i; }
             if (ending != 0 && ending != current) { error = "Mixed line endings cannot yet be edited safely"; return false; }
-            ending = current; normalized.push_back('\n');
-        } else normalized.push_back(text[i]);
+            ending = current; ++i;
+        } else {
+            const auto start = i;
+            const auto codepoint = decodeUtf8(text, i);
+            if (codepoint == kReplacementCharacter && i == start + 1 && static_cast<unsigned char>(text[start]) >= 0x80U) {
+                error = "File is not valid UTF-8 and cannot be edited safely"; return false;
+            }
+        }
     }
-    if (Document::fromUtf8(text).toUtf8() != normalized) { error = "File is not valid UTF-8 and cannot be edited safely"; return false; }
+    if (cancel && cancel->load(std::memory_order_relaxed)) { error = "Text validation cancelled"; return false; }
     error.clear(); return true;
 }
 
@@ -556,6 +566,7 @@ bool Document::insertJsonQuote() {
     ++m_cursorColumn;
     resetPreferredColumn();
     markEdited();
+    m_autoPair = AutoPair{m_cursorLine, m_cursorColumn, m_revision};
     return true;
 }
 
@@ -666,7 +677,49 @@ void Document::insertLineAbove() {
     markEdited();
 }
 
-void Document::toggleLineComment() {
+bool Document::toggleBlockComment(std::u32string_view open, std::u32string_view close) {
+    if (open.empty() || close.empty()) return false;
+    const bool selected = hasSelection();
+    const bool reversed = selected && (m_cursorLine < m_selectionAnchorLine ||
+        (m_cursorLine == m_selectionAnchorLine && m_cursorColumn < m_selectionAnchorColumn));
+    TextPosition start = selected ? selectionStart() : TextPosition{m_cursorLine, 0};
+    TextPosition end = selected ? selectionEnd() : TextPosition{m_cursorLine, m_lines[m_cursorLine].size()};
+    const bool wrapped = m_lines[start.line].compare(start.column, open.size(), open) == 0 &&
+        end.column >= close.size() && m_lines[end.line].compare(end.column - close.size(), close.size(), close) == 0 &&
+        (start.line != end.line || end.column >= start.column + open.size() + close.size());
+    if (!wrapped && open == U"<!--" && end.column > 0 && m_lines[end.line][end.column - 1] == U'-') return false;
+    // Even when the selection starts and ends with delimiters, it may contain
+    // several separate comments. Removing only the outermost markers in that
+    // case would turn intervening source into a comment (or executable code).
+    for (std::size_t i = start.line; i <= end.line; ++i) {
+        const auto begin = i == start.line ? start.column + (wrapped ? open.size() : 0) : 0;
+        const auto limit = i == end.line ? end.column - (wrapped ? close.size() : 0) : m_lines[i].size();
+        const auto part = std::u32string_view(m_lines[i]).substr(begin, limit - begin);
+        if (part.find(open) != std::u32string_view::npos || part.find(close) != std::u32string_view::npos ||
+            (!wrapped && open == U"<!--" && part.find(U"--") != std::u32string_view::npos)) return false;
+    }
+    beforeEdit();
+    if (wrapped) {
+        m_lines[end.line].erase(end.column - close.size(), close.size());
+        m_lines[start.line].erase(start.column, open.size());
+        end.column -= close.size();
+        if (start.line == end.line) end.column -= open.size();
+    } else {
+        m_lines[end.line].insert(end.column, close);
+        m_lines[start.line].insert(start.column, open);
+        end.column += close.size();
+        if (start.line == end.line) end.column += open.size();
+    }
+    m_selectionAnchorLine = reversed ? end.line : start.line;
+    m_selectionAnchorColumn = reversed ? end.column : start.column;
+    m_cursorLine = reversed ? start.line : end.line;
+    m_cursorColumn = reversed ? start.column : end.column;
+    m_selectionActive = start.line != end.line || start.column != end.column;
+    resetPreferredColumn(); markEdited(); return true;
+}
+
+void Document::toggleLineComment(std::u32string_view prefix) {
+    if (prefix.empty()) return;
     const auto [first, last] = selectedLineRange();
     bool anyText = false;
     bool allCommented = true;
@@ -678,7 +731,7 @@ void Document::toggleLineComment() {
             continue;
         }
         anyText = true;
-        if (line.substr(start, 2) != U"//") {
+        if (line.compare(start, prefix.size(), prefix) != 0) {
             allCommented = false;
         }
     }
@@ -731,12 +784,13 @@ void Document::toggleLineComment() {
         }
 
         if (comment) {
-            line.insert(start, U"// ");
-            adjustInsert(lineIndex, start, 3);
+            line.insert(start, prefix);
+            line.insert(start + prefix.size(), 1, U' ');
+            adjustInsert(lineIndex, start, prefix.size() + 1);
             continue;
         }
 
-        std::size_t count = 2;
+        std::size_t count = prefix.size();
         if (start + count < line.size() && line[start + count] == U' ') {
             ++count;
         }
@@ -863,6 +917,14 @@ std::pair<std::size_t, std::size_t> Document::selectedLineRange() const {
 
 void Document::backspace(std::size_t indentWidth) {
     if (!hasSelection() && m_cursorLine == 0 && m_cursorColumn == 0) return;
+    if (!hasSelection() && m_autoPair && m_autoPair->revision == m_revision &&
+        m_autoPair->line == m_cursorLine && m_autoPair->column == m_cursorColumn &&
+        m_cursorColumn > 0 && m_cursorColumn < m_lines[m_cursorLine].size() &&
+        m_lines[m_cursorLine][m_cursorColumn - 1] == U'"' && m_lines[m_cursorLine][m_cursorColumn] == U'"') {
+        beforeEdit();
+        m_lines[m_cursorLine].erase(m_cursorColumn - 1, 2); --m_cursorColumn;
+        m_autoPair.reset(); markEdited(); return;
+    }
     beforeEdit();
     if (eraseSelection()) {
         return;

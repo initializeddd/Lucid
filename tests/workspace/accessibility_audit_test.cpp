@@ -1,0 +1,47 @@
+#include "modules/AccessibilityAudit.hpp"
+int main() {
+    using lucid::modules::auditHtml;
+    auto r=auditHtml("<html>\n<img src='x'>\n<label for='a'>Name</label><input id='a'><input id='b'>\n<script>\"<img>\"</script>\n</html>");
+    if (r.incomplete || r.findings.size()!=3 || r.findings[0].rule!="html-lang" || r.findings[1].line!=2 || r.findings[2].rule!="form-label") return 1;
+    r=auditHtml("<html lang='en'><img alt=''><label><input></label><input aria-label='Name'><input type='hidden'></html>"); if (!r.findings.empty()) return 2;
+    r=auditHtml("<img src='x'",100); if (!r.incomplete || !r.findings.empty()) return 3;
+    r=auditHtml("<img><img>",100,1); if (!r.incomplete || r.findings.size()!=1) return 4;
+    r=auditHtml("<img><img>",100,100,1); if (!r.incomplete || r.findings.size()!=1) return 5;
+    r=auditHtml("<html lang='en'>\n<div id='name'></div>\n  <span id='name'></span><i id='Name'></i>\n<script>\"<b id='name'>\"</script></html>");
+    if (r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="duplicate-id" || r.findings[0].line!=3 || r.findings[0].column!=3) return 6;
+    r=auditHtml("<i id='&amp;'></i><b id='&amp;'></b><div id='{{dynamic}}'></div><div id='{{dynamic}}'></div>");
+    if (!r.incomplete || !r.findings.empty()) return 7;
+    r=auditHtml("<i id='x'></i><b id='x'></b><span id='x'></span>", 1000, 100, 1);
+    if (!r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="duplicate-id") return 8;
+    r=auditHtml("<button aria-labelledby='later missing' aria-controls='panel'></button>\n<div id='later'></div><div id='panel'></div>");
+    if (r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="aria-missing-reference" || r.findings[0].line!=1) return 9;
+    r=auditHtml("<div aria-describedby='a b' aria-controls='c'></div><p id='a'></p><p id='b'></p><p id='c'></p>");
+    if (r.incomplete || !r.findings.empty()) return 10;
+    r=auditHtml("<label aria-describedby='missing'>Test</label><p id='&amp;'></p>");
+    if (!r.findings.empty()) return 11;
+    r=auditHtml("<div aria-controls='missing'></div><p id='{{id}}'></p>");
+    if (!r.incomplete || !r.findings.empty()) return 12;
+    r=auditHtml("<div aria-controls='missing'></div><p id='target'>", 36);
+    if (!r.incomplete || !r.findings.empty()) return 13;
+    r=auditHtml("<label aria-describedby='MISSING'>Name</label><div id='missing'></div>");
+    if (r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="aria-missing-reference") return 14;
+    r=auditHtml("<div>\n  <button aria-hidden='TRUE'>Go</button>\n<a href='x' aria-hidden='true'>Link</a>\n<div tabindex=' +0 ' aria-hidden='true'></div></div>");
+    if (r.incomplete || r.findings.size()!=3 || r.findings[0].rule!="aria-hidden-focus" || r.findings[0].line!=2 || r.findings[0].column!=3 || r.findings[2].line!=4) return 15;
+    r=auditHtml("<button aria-hidden='true' disabled></button><a aria-hidden='true'></a><div aria-hidden='true' tabindex='-1'></div><button aria-hidden='true' hidden></button><button aria-hidden='true' inert></button><button aria-hidden='true' style='display:none'></button><input aria-hidden='true' type='hidden'>");
+    if (r.incomplete || !r.findings.empty()) return 16;
+    r=auditHtml("<div aria-hidden='true' tabindex='{{tab}}'></div><button aria-hidden='true'");
+    if (!r.incomplete || !r.findings.empty()) return 17;
+    r=auditHtml("<button aria-hidden='false'></button><div aria-hidden='true' tabindex='invalid'></div><button aria-hidden='true' tabindex='-1'></button>");
+    if (r.incomplete || !r.findings.empty()) return 18;
+    r=auditHtml("<html lang='en'>\n <meta name='viewport' content='width=device-width, user-scalable=no'>\n<meta name='VIEWPORT' content='maximum-scale=1.5'></html>");
+    if (r.incomplete || r.findings.size()!=2 || r.findings[0].rule!="viewport-zoom" || r.findings[0].line!=2 || r.findings[0].column!=2 || r.findings[1].line!=3) return 19;
+    r=auditHtml("<meta name='viewport' content='width=device-width,maximum-scale=2,user-scalable=yes'><meta name='description' content='user-scalable=no'><meta name='viewport' content='maximum-scale=0'>");
+    if (r.incomplete || !r.findings.empty()) return 20;
+    r=auditHtml("<meta name='viewport' content='user-scalable=no,user-scalable=yes'><meta name='viewport' content='maximum-scale=1,maximum-scale=3'><meta name='viewport' content='maximum-scale=1oops'>");
+    if (r.incomplete || !r.findings.empty()) return 21;
+    r=auditHtml("<meta name='viewport' content='maximum-scale={{scale}}'><meta name='viewport' content='user-scalable=n&#111;'>");
+    if (!r.incomplete || !r.findings.empty()) return 22;
+    r=auditHtml("<meta name='viewport' content='initial-scale=1; MAXIMUM-SCALE=.75'>");
+    if (r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="viewport-zoom") return 23;
+    return 0;
+}

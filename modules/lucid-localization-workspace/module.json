@@ -1,0 +1,21 @@
+{
+  "name": "Localization Workspace",
+  "version": "0.1.0",
+  "description": "Compare localization JSON and review translation edits.",
+  "requires": [
+    "localization-workspace-v1",
+    "localization-edit-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Compare localization files",
+      "action": "compare-localization"
+    }
+  ]
+}

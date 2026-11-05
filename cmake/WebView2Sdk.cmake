@@ -1,0 +1,28 @@
+include_guard(GLOBAL)
+# Validates only the pinned Microsoft WebView2 1.0.2903.40 SDK files prepared by
+# tools/webview2/fetch_sdk.py. This never downloads or installs the runtime.
+function(lucid_validate_webview2_sdk directory arch)
+    if(NOT arch STREQUAL "x64" AND NOT arch STREQUAL "x86" AND NOT arch STREQUAL "arm64")
+        message(FATAL_ERROR "Unsupported WebView2 SDK architecture: ${arch}")
+    endif()
+    foreach(name IN ITEMS WebView2.h WebView2Loader.dll LICENSE.txt)
+        if(NOT EXISTS "${directory}/${name}" OR IS_DIRECTORY "${directory}/${name}")
+            message(FATAL_ERROR "WebView2 SDK missing ${name}; run tools/webview2/fetch_sdk.py")
+        endif()
+    endforeach()
+    file(SHA256 "${directory}/WebView2.h" header_hash)
+    file(SHA256 "${directory}/LICENSE.txt" license_hash)
+    file(SHA256 "${directory}/WebView2Loader.dll" loader_hash)
+    if(arch STREQUAL "x64")
+        set(expected_loader "462b36fd1be6ca9f7563466a89e57c41ef4a4def3e0a84fa885d203aea4a3aaf")
+    elseif(arch STREQUAL "x86")
+        set(expected_loader "6f59ad578fde1f65c44b6935dab0901f014b5268e056b930fb34c0919f1bf4b9")
+    else()
+        set(expected_loader "cb561ae4537e39bba5dd8af1f648f189d9562b1003fd110a9e889ace527fb4e8")
+    endif()
+    if(NOT header_hash STREQUAL "8d298691104964129bd6bd8fc3119608607d794135752dc02217f72f7bddedb1" OR
+       NOT license_hash STREQUAL "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55" OR
+       NOT loader_hash STREQUAL expected_loader)
+        message(FATAL_ERROR "WebView2 SDK files do not match the pinned SDK and architecture")
+    endif()
+endfunction()

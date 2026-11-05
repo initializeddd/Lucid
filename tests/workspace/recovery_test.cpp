@@ -18,6 +18,13 @@ int main() {
     if (write(path, invalid, error) || error.empty() || !read(path, restored, error) || !(restored == original)) return 11;
     original.contents.assign(lucid::workspace::Project::maxFileSize + 1, 'x');
     if (!write(path, original, error) || !read(path, restored, error) || restored.contents != original.contents) return 9;
+    original.baseline.assign(5U * 1024U * 1024U, '\t'); original.contents = original.baseline;
+    original.contents.back() = '\n';
+    if (!write(path, original, error) || std::filesystem::file_size(path) <= lucid::workspace::Project::maxFileSize ||
+        std::filesystem::file_size(path) > 22U * 1024U * 1024U || !read(path, restored, error) || !(restored == original)) return 12;
+    original.contents.back() = '\r';
+    if (!write(path, original, error) || !read(path, restored, error) || !(restored == original)) return 13;
+    original.baseline = "hello\n";
     original.contents = "second";
     if (!write(path, original, error) || !read(path, restored, error) || !(restored == original)) return 2;
     { std::ofstream f(path, std::ios::trunc); f << "{bad"; }

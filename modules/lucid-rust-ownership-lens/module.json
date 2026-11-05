@@ -1,0 +1,25 @@
+{
+  "name": "Rust Ownership Lens",
+  "version": "0.1.0",
+  "description": "Review Rust compiler ownership and borrowing diagnostics and source spans.",
+  "requires": [
+    "rust-ownership-lens-v1",
+    "rust-diagnostic-run-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": true,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Review Rust ownership diagnostics",
+      "action": "review-rust-ownership"
+    },
+    {
+      "title": "Run Cargo ownership check",
+      "action": "run-rust-ownership"
+    }
+  ]
+}

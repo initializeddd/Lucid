@@ -1,0 +1,8 @@
+{
+  "name": "Hex Editor",
+  "version": "0.1.0",
+  "description": "Inspect, select and edit project binary bytes with search, undo and guarded explicit save.",
+  "requires": ["hex-editor-v1"],
+  "permissions": {"project": true, "network": false, "processes": false, "settings": false},
+  "commands": [{"title": "Open hex editor", "action": "hex-editor"}]
+}

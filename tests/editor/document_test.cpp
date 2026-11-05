@@ -1,4 +1,21 @@
 #include "editor/document/Document.hpp"
+#include <cstdint>
+
+namespace {
+bool originalValidation(std::string_view text) {
+    std::string normalized;
+    int ending = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r' || text[i] == '\n') {
+            int current = text[i] == '\n' ? 1 : 3;
+            if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') { current = 2; ++i; }
+            if (ending && ending != current) return false;
+            ending = current; normalized.push_back('\n');
+        } else normalized.push_back(text[i]);
+    }
+    return lucid::editor::Document::fromUtf8(text).toUtf8() == normalized;
+}
+}
 
 int main() {
     using lucid::editor::Document;
@@ -354,6 +371,51 @@ int main() {
     if (commentSelection.toUtf8() != "// one\n// two") {
         return 46;
     }
+    Document pythonComment = Document::fromUtf8("  print(1)\n\n  # existing");
+    pythonComment.selectAll();
+    pythonComment.toggleLineComment(U"#");
+    if (pythonComment.toUtf8() != "  # print(1)\n\n  # # existing") return 190;
+    pythonComment.undo();
+    if (pythonComment.toUtf8() != "  print(1)\n\n  # existing") return 191;
+    pythonComment.toggleLineComment(U"#");
+    pythonComment.toggleLineComment(U"#");
+    if (pythonComment.toUtf8() != "  print(1)\n\n  # existing") return 192;
+    Document blockComment = Document::fromUtf8("one\ntwo");
+    blockComment.selectAll();
+    if (!blockComment.toggleBlockComment(U"/*", U"*/") || blockComment.toUtf8() != "/*one\ntwo*/" || blockComment.selectionUtf8() != "/*one\ntwo*/") return 193;
+    if (!blockComment.toggleBlockComment(U"/*", U"*/") || blockComment.toUtf8() != "one\ntwo") return 194;
+    blockComment.undo();
+    if (blockComment.toUtf8() != "/*one\ntwo*/") return 195;
+    Document unsafeBlock = Document::fromUtf8("x */ y");
+    if (unsafeBlock.toggleBlockComment(U"/*", U"*/") || unsafeBlock.toUtf8() != "x */ y" || unsafeBlock.dirty()) return 196;
+    Document htmlBlock = Document::fromUtf8("a -- b");
+    if (htmlBlock.toggleBlockComment(U"<!--", U"-->") || htmlBlock.dirty()) return 197;
+    Document separateComments = Document::fromUtf8("/* first */ code /* second */");
+    separateComments.selectAll();
+    if (separateComments.toggleBlockComment(U"/*", U"*/") || separateComments.dirty() ||
+        separateComments.toUtf8() != "/* first */ code /* second */") return 198;
+    Document reverseBlock = Document::fromUtf8("one\ntwo");
+    reverseBlock.setCursor(1, 3); reverseBlock.extendSelectionTo(0, 0);
+    if (!reverseBlock.toggleBlockComment(U"/*", U"*/") || reverseBlock.cursorLine() != 0 ||
+        reverseBlock.cursorColumn() != 0 || reverseBlock.selectionUtf8() != "/*one\ntwo*/") return 199;
+    if (!reverseBlock.toggleBlockComment(U"/*", U"*/") || reverseBlock.selectionUtf8() != "one\ntwo") return 200;
+    reverseBlock.undo(); reverseBlock.undo();
+    if (reverseBlock.toUtf8() != "one\ntwo" || reverseBlock.cursorLine() != 0 || reverseBlock.cursorColumn() != 0) return 201;
+    Document autoQuotes = Document::fromUtf8("");
+    if (!autoQuotes.insertJsonQuote() || autoQuotes.toUtf8() != "\"\"") return 202;
+    autoQuotes.backspace();
+    if (!autoQuotes.toUtf8().empty() || autoQuotes.cursorColumn() != 0) return 203;
+    autoQuotes.undo();
+    if (autoQuotes.toUtf8() != "\"\"" || autoQuotes.cursorColumn() != 1) return 204;
+    autoQuotes.backspace();
+    if (autoQuotes.toUtf8() != "\"") return 205;
+    Document manualQuotes = Document::fromUtf8("\"\"");
+    manualQuotes.setCursor(0, 1); manualQuotes.backspace();
+    if (manualQuotes.toUtf8() != "\"") return 206;
+    Document changedQuotes = Document::fromUtf8("");
+    if (!changedQuotes.insertJsonQuote()) return 207;
+    changedQuotes.insert(U'x'); changedQuotes.backspace(); changedQuotes.backspace();
+    if (changedQuotes.toUtf8() != "\"") return 208;
 
     Document indented = Document::fromUtf8("one\ntwo");
     indented.selectAll();
@@ -577,6 +639,23 @@ int main() {
     if (undoCount < 1 || undoCount >= 20) return 123;
     const auto beforeRedo = largeHistory.toUtf8(); largeHistory.redo();
     if (largeHistory.toUtf8() == beforeRedo) return 124;
+
+    // Compare direct validation with the editor's actual decode/encode behavior,
+    // including malformed UTF-8 and all pairs of byte values.
+    std::string validationError;
+    for (unsigned first = 0; first < 256; ++first) for (unsigned second = 0; second < 256; ++second) {
+        const std::string sample{static_cast<char>(first), static_cast<char>(second)};
+        if (Document::canEditLosslessly(sample, validationError) != originalValidation(sample)) return 125;
+    }
+    std::uint32_t randomState = 0x91d3a5c7U;
+    for (int sampleIndex = 0; sampleIndex < 10000; ++sampleIndex) {
+        std::string sample;
+        for (int i = 0; i < 32; ++i) {
+            randomState = randomState * 1664525U + 1013904223U;
+            sample.push_back(static_cast<char>(randomState >> 24));
+        }
+        if (Document::canEditLosslessly(sample, validationError) != originalValidation(sample)) return 126;
+    }
 
     return 0;
 }

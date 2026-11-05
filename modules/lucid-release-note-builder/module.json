@@ -1,0 +1,8 @@
+{
+  "name": "Release-Note Builder",
+  "version": "0.1.0",
+  "description": "Create an editable release-note draft from selected commits and tasks.",
+  "requires": ["release-note-builder-v1"],
+  "permissions": {"project": true, "network": false, "processes": true, "settings": false},
+  "commands": [{"title": "Build release-note draft", "action": "release-note-builder"}]
+}

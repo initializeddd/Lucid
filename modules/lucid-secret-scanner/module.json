@@ -1,0 +1,20 @@
+{
+  "name": "Secret Scanner",
+  "version": "0.1.0",
+  "description": "Scan saved project text for selected credential patterns without sending content over the network. Requires Lucid with project scan actions.",
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Scan saved project files",
+      "action": "scan-secrets"
+    }
+  ],
+  "requires": [
+    "project-secret-scan-v1"
+  ]
+}

@@ -3,6 +3,7 @@
 #include "ui/UiState.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -34,6 +35,7 @@ public:
     [[nodiscard]] bool visible() const noexcept { return m_visible; }
     [[nodiscard]] bool isOpen() const noexcept { return m_open; }
     [[nodiscard]] PromptKind kind() const noexcept { return m_kind; }
+    [[nodiscard]] std::uint64_t generation() const noexcept { return m_generation; }
     [[nodiscard]] std::string_view query() const noexcept { return m_query; }
     [[nodiscard]] std::size_t cursor() const noexcept { return m_cursor; }
     [[nodiscard]] std::size_t selectionStart() const noexcept { return m_cursor < m_anchor ? m_cursor : m_anchor; }
@@ -56,6 +58,7 @@ private:
     Phase m_phase = Phase::Hidden;
     bool m_visible = false;
     bool m_open = false;
+    std::uint64_t m_generation = 0;
     PromptKind m_kind = PromptKind::File;
     float m_value = 0.0F;
     float m_velocity = 0.0F;

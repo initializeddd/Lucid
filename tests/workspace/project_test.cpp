@@ -64,6 +64,23 @@ int main() {
         content != "int main() {}\n") {
         return 7;
     }
+    const std::u8string unicodeName = u8"földér/雪-é.txt";
+    const std::string unicodePath(unicodeName.begin(), unicodeName.end());
+    if (!project.writeFile(unicodePath, "unicode path\n", error) ||
+        !project.readFile(unicodePath, content, error) || content != "unicode path\n" ||
+        !fs::exists(base / "demo" / fs::path(unicodeName))) return 45;
+    project.refresh();
+    if (std::find(project.files().begin(), project.files().end(), unicodePath) == project.files().end()) return 46;
+    const std::u8string unicodeProjectName = u8"项目-é";
+    bool unicodeCreated = false;
+    const auto unicodeProject = Project::openOrCreate(base / fs::path(unicodeProjectName), unicodeCreated, error, false);
+    if (!error.empty() || !unicodeCreated || unicodeProject.name() != std::string(unicodeProjectName.begin(), unicodeProjectName.end())) return 49;
+    const std::string nulPath("src/main.cpp\0suffix", 19);
+    if (!project.resolve(nulPath, error).empty() || error.empty()) return 47;
+#if defined(_WIN32)
+    // Windows drive-relative paths can otherwise change how path joining works.
+    if (!project.resolve("C:outside.txt", error).empty() || error.empty()) return 48;
+#endif
     const auto executable = base / "demo/src/main.cpp";
 #if !defined(_WIN32)
     fs::permissions(executable, fs::perms::owner_exec, fs::perm_options::add, filesystemError);
@@ -76,6 +93,12 @@ int main() {
     const std::string expected = content;
     if (!project.writeFile("src/main.cpp", "updated again\n", error, &expected) ||
         !project.readFile("src/main.cpp", content, error) || content != "updated again\n") return 24;
+    std::atomic_bool cancelSave{true};
+    const std::string current = content;
+    if (project.writeFile("src/main.cpp", "cancelled\n", error, &current, false, &cancelSave) ||
+        error != "Save cancelled" || !project.readFile("src/main.cpp", content, error) || content != current) return 33;
+    if (project.writeFile("cancelled/new.txt", "cancelled", error, nullptr, true, &cancelSave) ||
+        fs::exists(base / "demo/cancelled")) return 34;
     if (!project.createFile("src/main.cpp", error) ||
         !project.readFile("src/main.cpp", content, error) || content != "updated again\n") return 25;
     if (project.createFile("src/main.cpp", error, false) || error.empty() ||

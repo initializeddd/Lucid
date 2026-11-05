@@ -43,6 +43,7 @@ int characterGroup(unsigned char c) {
 
 void SearchBar::open(PromptKind kind) {
     if (!m_open || kind != m_kind) {
+        ++m_generation;
         m_query.clear();
         m_cursor = m_anchor = 0;
     }
@@ -59,6 +60,7 @@ void SearchBar::open(PromptKind kind) {
 }
 
 void SearchBar::close() {
+    if (m_open) ++m_generation;
     if (m_phase == Phase::Hidden) {
         return;
     }

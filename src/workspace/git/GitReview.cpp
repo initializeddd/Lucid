@@ -246,6 +246,33 @@ bool gitCommitPreview(const std::filesystem::path& root, GitCommitPreview& previ
     std::string ignored; if (!git(root, {"rev-parse", "--verify", "HEAD"}, preview.head, ignored)) preview.head.clear();
     error.clear(); return true;
 }
+bool gitReadReviewedBlob(const std::filesystem::path& root, const GitCommitPreview& preview,
+                         std::string_view path, std::string& contents, bool& present, std::string& error) {
+    contents.clear(); present = false;
+    auto tree = preview.indexTree;
+    while (!tree.empty() && (tree.back() == '\n' || tree.back() == '\r')) tree.pop_back();
+    if (!safePath(path) || std::find(preview.paths.begin(), preview.paths.end(), path) == preview.paths.end() ||
+        (tree.size() != 40 && tree.size() != 64) || !std::all_of(tree.begin(), tree.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) {
+        error = "Invalid reviewed Git path or tree"; return false;
+    }
+    std::string prefix, record;
+    if (!git(root, {"rev-parse", "--show-prefix"}, prefix, error)) return false;
+    while (!prefix.empty() && (prefix.back() == '\n' || prefix.back() == '\r')) prefix.pop_back();
+    const std::string fullPath = prefix + std::string(path);
+    if (!git(root, {"ls-tree", "--full-tree", "-z", tree, "--", fullPath}, record, error)) return false;
+    if (record.empty()) { error.clear(); return true; }
+    const auto tab = record.find('\t'), nul = record.find('\0');
+    if (tab == std::string::npos || nul != record.size() - 1 || tab >= nul || record.substr(tab + 1, nul - tab - 1) != fullPath) {
+        error = "Unexpected staged tree entry"; return false;
+    }
+    const auto metadata = record.substr(0, tab);
+    if (!(metadata.starts_with("100644 blob ") || metadata.starts_with("100755 blob "))) { error = "Staged entry is not a regular file"; return false; }
+    const auto hash = metadata.substr(12);
+    if ((hash.size() != 40 && hash.size() != 64) || !std::all_of(hash.begin(), hash.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) { error = "Invalid staged blob ID"; return false; }
+    if (!git(root, {"cat-file", "blob", hash}, contents, error)) { contents.clear(); return false; }
+    present = true; return true;
+}
+
 bool gitCommit(const std::filesystem::path& root, const GitCommitPreview& preview, std::string_view message, std::string& output, std::string& error) {
     if (message.empty() || message.size() > 256 || message.find_first_not_of(" \t\r\n") == std::string_view::npos || message.find('\0') != std::string_view::npos) { error = "Enter a commit message of up to 256 bytes"; return false; }
     GitCommitPreview fresh; if (!gitCommitPreview(root, fresh, error)) return false;
@@ -263,6 +290,39 @@ bool gitBlame(const std::filesystem::path& root, std::string_view path, int line
     author = name.empty() ? "Unknown author" : name; if (!summary.empty()) author += " — " + summary; return true;
 }
 
+bool gitBranches(const std::filesystem::path& root, GitBranches& result, std::string& error) {
+    GitBranches value; std::string raw;
+    if (!git(root, {"rev-parse", "--verify", "HEAD"}, value.head, error)) return false;
+    while (!value.head.empty() && (value.head.back() == '\n' || value.head.back() == '\r')) value.head.pop_back();
+    if (!git(root, {"for-each-ref", "--format=%(refname:strip=2)%00%(objectname)%00%(HEAD)", "refs/heads/"}, raw, error)) return false;
+    std::istringstream lines(raw); std::string row;
+    while (std::getline(lines, row)) {
+        const auto first = row.find('\0'), second = first == std::string::npos ? first : row.find('\0', first + 1);
+        if (first == std::string::npos || second == std::string::npos || first == 0 || second == first + 1) { error = "Invalid Git branch output"; return false; }
+        value.branches.push_back({row.substr(0, first), row.substr(first + 1, second - first - 1), row.substr(second + 1) == "*"});
+        if (value.branches.size() > 10000) { error = "Too many branches to review"; return false; }
+    }
+    result = std::move(value); error.clear(); return true;
+}
+bool gitSwitchBranch(const std::filesystem::path& root, const GitBranches& expected,
+                     const GitBranch& target, std::string& output, std::string& error) {
+    output.clear(); error.clear();
+    const auto matches = [&target](const GitBranch& value) { return value.name == target.name && value.commit == target.commit; };
+    if (target.name.empty() || target.name.find('\0') != std::string::npos ||
+        std::none_of(expected.branches.begin(), expected.branches.end(), matches)) { error = "Branch was not reviewed"; return false; }
+    GitBranches current; if (!gitBranches(root, current, error)) return false;
+    const auto active = [](const GitBranches& list) {
+        const auto found = std::find_if(list.branches.begin(), list.branches.end(), [](const GitBranch& branch) { return branch.current; });
+        return found == list.branches.end() ? std::string{} : found->name;
+    };
+    if (current.head != expected.head || active(current) != active(expected) ||
+        std::none_of(current.branches.begin(), current.branches.end(), matches)) { error = "Branch or HEAD changed; review branches again"; return false; }
+    std::string status;
+    if (!git(root, {"status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=none"}, status, error)) return false;
+    if (!status.empty()) { error = "Commit, stash, or remove all repository changes before switching branches"; return false; }
+    return git(root, {"switch", "--no-guess", "--", target.name}, output, error, true, false);
+}
+
 bool gitHistory(const std::filesystem::path& root, std::vector<GitHistoryEntry>& entries, std::string& error) {
     std::string output; entries.clear();
     if (!git(root, {"log", "-n", "50", "--format=%h%x09%an%x09%as%x09%s"}, output, error)) return false;
@@ -272,6 +332,93 @@ bool gitHistory(const std::filesystem::path& root, std::vector<GitHistoryEntry>&
         if (third == std::string::npos) continue;
         entries.push_back({row.substr(0, first), row.substr(first + 1, second - first - 1), row.substr(second + 1, third - second - 1), row.substr(third + 1)});
     }
+    return true;
+}
+
+bool gitFileHistory(const std::filesystem::path& root, std::string_view path, std::vector<GitFileHistoryEntry>& entries, std::string& error, bool* stoppedAtBoundary) {
+    entries.clear();
+    if (stoppedAtBoundary) *stoppedAtBoundary = false;
+    if (!safePath(path)) { error = "Invalid project path"; return false; }
+    std::string output, prefix;
+    if (!git(root, {"rev-parse", "--show-prefix"}, prefix, error)) return false;
+    while (!prefix.empty() && (prefix.back() == '\n' || prefix.back() == '\r')) prefix.pop_back();
+    if (!git(root, {"log", "--follow", "--name-status", "--no-show-signature", "-z", "-n", "100", "--format=%H%x00%an%x00%as%x00%s", "--", std::string(path)}, output, error)) return false;
+    std::size_t pos = 0;
+    auto field = [&](std::string& value) {
+        const auto end = output.find('\0', pos); if (end == std::string::npos) return false;
+        value = output.substr(pos, end - pos); pos = end + 1; return true;
+    };
+    auto relative = [&](std::string_view name) -> std::string {
+        if (!prefix.empty()) { if (!name.starts_with(prefix)) return {}; name.remove_prefix(prefix.size()); }
+        return safePath(name) ? std::string(name) : std::string{};
+    };
+    while (pos < output.size()) {
+        GitFileHistoryEntry entry; std::string status, first, second;
+        if (!field(entry.hash) || !field(entry.author) || !field(entry.date) || !field(entry.subject) ||
+            !field(status) || !status.starts_with('\n') || status.size() < 2 || !field(first)) {
+            entries.clear(); error = "Incomplete Git history output"; return false;
+        }
+        const bool renamed = status[1] == 'R';
+        if (renamed && !field(second)) { entries.clear(); error = "Incomplete Git rename output"; return false; }
+        entry.path = relative(renamed ? second : first);
+        if (entry.path.empty()) { if (stoppedAtBoundary) *stoppedAtBoundary = true; error.clear(); break; }
+        if (renamed) entry.previousPath = relative(first);
+        const bool crossedBoundary = renamed && entry.previousPath.empty();
+        entries.push_back(std::move(entry));
+        if (crossedBoundary) { if (stoppedAtBoundary) *stoppedAtBoundary = true; break; }
+    }
+    return true;
+}
+
+bool gitRangeHistory(const std::filesystem::path& root, std::string_view path,
+                     std::string_view expectedSource, std::size_t first, std::size_t last,
+                     std::vector<GitRangeHistoryEntry>& entries, std::string& error) {
+    entries.clear(); error.clear();
+    if (!safePath(path) || path.find_first_of("\r\n") != std::string_view::npos || !first || last < first || last > 10000000 || expectedSource.size() > 2U * 1024U * 1024U || expectedSource.find('\0') != std::string_view::npos) { error = "Invalid source path, text or selected range"; return false; }
+    std::string prefix, head, committed;
+    if (!git(root, {"rev-parse", "--show-prefix"}, prefix, error)) return false;
+    while (!prefix.empty() && (prefix.back() == '\n' || prefix.back() == '\r')) prefix.pop_back();
+    if (!prefix.empty()) { error = "Range history currently requires the project to be the repository root"; return false; }
+    if (!git(root, {"rev-parse", "--verify", "HEAD"}, head, error)) return false;
+    while (!head.empty() && (head.back() == '\n' || head.back() == '\r')) head.pop_back();
+    if ((head.size() != 40 && head.size() != 64) || !std::all_of(head.begin(), head.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) { error = "Invalid Git HEAD"; return false; }
+    if (!git(root, {"show", "--no-textconv", head + ":" + std::string(path)}, committed, error)) return false;
+    if (committed != expectedSource) { error = "Save and commit this exact file before tracing selected lines"; return false; }
+    std::string output;
+    const auto range = std::to_string(first) + "," + std::to_string(last) + ":" + std::string(path);
+    if (!git(root, {"log", "-n", "100", "--no-color", "--no-ext-diff", "--no-textconv", "--no-show-signature", "--format=%x1e%H%x00%an%x00%as%x00%s%x00", "-L", range, head}, output, error)) return false;
+    std::vector<GitRangeHistoryEntry> result;
+    std::size_t pos = 0;
+    while (pos < output.size()) {
+        if (output[pos++] != '\x1e') { error = "Unexpected Git range history output"; return false; }
+        GitRangeHistoryEntry entry;
+        const auto field = [&](std::string& value) { const auto end = output.find('\0', pos); if (end == std::string::npos) return false; value = output.substr(pos, end - pos); pos = end + 1; return true; };
+        if (!field(entry.hash) || !field(entry.author) || !field(entry.date) || !field(entry.subject) ||
+            (entry.hash.size() != 40 && entry.hash.size() != 64) || !std::all_of(entry.hash.begin(), entry.hash.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) { error = "Invalid Git range history metadata"; return false; }
+        const auto next = output.find("\n\x1e", pos);
+        const auto end = next == std::string::npos ? output.size() : next + 1;
+        auto patch = std::string_view(output).substr(pos, end - pos);
+        if (patch.find('\0') != std::string_view::npos) { error = "Invalid Git range history patch"; return false; }
+        appendDiff(patch, entry.review.lines);
+        for (auto& line : entry.review.lines) line.line = 0;
+        result.push_back(std::move(entry)); pos = end;
+    }
+    entries = std::move(result); return true;
+}
+
+bool gitHistoricalFileDiff(const std::filesystem::path& root, std::string_view path, std::string_view commit, GitReview& review, std::string& error, std::string_view previousPath) {
+    review.lines.clear();
+    const bool validHash = (commit.size() == 40 || commit.size() == 64) && std::all_of(commit.begin(), commit.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+    if (!safePath(path) || (!previousPath.empty() && !safePath(previousPath)) || !validHash) { error = "Invalid project path or commit ID"; return false; }
+    std::string output;
+    std::vector<std::string> args{"show", "--format=", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--no-show-signature", "-U3", std::string(commit), "--", std::string(path)};
+    if (!previousPath.empty()) args.emplace_back(previousPath);
+    if (!git(root, std::move(args), output, error)) return false;
+    appendDiff(output, review.lines);
+    // Historical line numbers must never be presented as locations in the current buffer.
+    for (auto& line : review.lines) line.line = 0;
     return true;
 }
 

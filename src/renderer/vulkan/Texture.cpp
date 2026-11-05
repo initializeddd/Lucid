@@ -91,10 +91,9 @@ void withOneTimeCommands(const Device& device, Function&& function) {
 } // namespace
 
 Texture::Texture(const Device& device, std::uint32_t width, std::uint32_t height,
-                 const std::uint8_t* pixels, VkDeviceSize size)
+                 const std::uint8_t* pixels, VkDeviceSize size, bool rgba)
     : m_device(device.handle()) {
-    if (width == 0 || height == 0 || pixels == nullptr ||
-        size < static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height)) {
+    if (pixels == nullptr || !validTextureByteSize(width, height, size, rgba)) {
         throw std::runtime_error("Invalid texture data");
     }
 
@@ -105,7 +104,7 @@ Texture::Texture(const Device& device, std::uint32_t width, std::uint32_t height
         imageInfo.extent = {width, height, 1};
         imageInfo.mipLevels = 1;
         imageInfo.arrayLayers = 1;
-        imageInfo.format = VK_FORMAT_R8_UNORM;
+        imageInfo.format = rgba ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8_UNORM;
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -157,7 +156,7 @@ Texture::Texture(const Device& device, std::uint32_t width, std::uint32_t height
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewInfo.image = m_image;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = VK_FORMAT_R8_UNORM;
+        viewInfo.format = rgba ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8_UNORM;
         viewInfo.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
         viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;

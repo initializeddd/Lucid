@@ -27,6 +27,49 @@ add_executable(lucid_overlay_tests
 target_link_libraries(lucid_overlay_tests PRIVATE lucid_core)
 lucid_set_warnings(lucid_overlay_tests)
 
+add_executable(lucid_visual_review_preview_tests ui/visual_review_preview_test.cpp)
+target_link_libraries(lucid_visual_review_preview_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_visual_review_preview_tests)
+add_test(NAME ui.visual_review_preview COMMAND lucid_visual_review_preview_tests)
+
+add_executable(lucid_windows_web_preview_router_tests platform/windows_web_preview_router_test.cpp)
+target_link_libraries(lucid_windows_web_preview_router_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_windows_web_preview_router_tests)
+add_test(NAME platform.windows_web_preview_router COMMAND lucid_windows_web_preview_router_tests)
+foreach(web_preview_test IN ITEMS windows_web_preview windows_web_preview_session windows_web_preview_host glfw_web_preview_bridge web_preview_capture_gate webview2_loader_policy web_preview_context_gate guarded_glfw_web_preview web_preview_presentation web_preview_module_fingerprint)
+    add_executable(lucid_${web_preview_test}_tests "platform/${web_preview_test}_test.cpp")
+    target_link_libraries(lucid_${web_preview_test}_tests PRIVATE lucid_core)
+    lucid_set_warnings(lucid_${web_preview_test}_tests)
+    add_test(NAME platform.${web_preview_test} COMMAND lucid_${web_preview_test}_tests)
+endforeach()
+
+# Real WebView2 capture needs an interactive Windows desktop, installed runtime,
+# explicit environment opt-in and a trusted loader; never run it in headless CI.
+if(WIN32 AND LUCID_ENABLE_WEBVIEW2)
+    foreach(web_preview_smoke IN ITEMS windows_web_preview windows_web_preview_session windows_web_preview_host glfw_web_preview_bridge)
+        add_executable(lucid_${web_preview_smoke}_smoke_test EXCLUDE_FROM_ALL "platform/${web_preview_smoke}_smoke_test.cpp")
+        target_link_libraries(lucid_${web_preview_smoke}_smoke_test PRIVATE lucid_core)
+        lucid_set_warnings(lucid_${web_preview_smoke}_smoke_test)
+        if(web_preview_smoke STREQUAL "windows_web_preview_host" OR web_preview_smoke STREQUAL "glfw_web_preview_bridge")
+            add_custom_command(TARGET lucid_${web_preview_smoke}_smoke_test POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${LUCID_WEBVIEW2_SDK_DIR}/WebView2Loader.dll" "$<TARGET_FILE_DIR:lucid_${web_preview_smoke}_smoke_test>/WebView2Loader.dll"
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${LUCID_WEBVIEW2_SDK_DIR}/LICENSE.txt" "$<TARGET_FILE_DIR:lucid_${web_preview_smoke}_smoke_test>/WebView2.LICENSE.txt")
+        endif()
+    endforeach()
+    add_executable(lucid_windows_web_preview_security_smoke_test EXCLUDE_FROM_ALL platform/windows_web_preview_security_smoke_test.cpp)
+    target_link_libraries(lucid_windows_web_preview_security_smoke_test PRIVATE lucid_core ws2_32 windowscodecs)
+    lucid_set_warnings(lucid_windows_web_preview_security_smoke_test)
+endif()
+
+# WebKit requires a graphical macOS session. Build and run this opt-in target
+# explicitly rather than making a headless CI run depend on WindowServer.
+if(APPLE)
+    add_executable(lucid_mac_web_preview_test EXCLUDE_FROM_ALL platform/mac_web_preview_test.mm)
+    target_compile_options(lucid_mac_web_preview_test PRIVATE -fobjc-arc)
+    target_link_libraries(lucid_mac_web_preview_test PRIVATE lucid_core)
+    lucid_set_warnings(lucid_mac_web_preview_test)
+endif()
+
 add_executable(lucid_editor_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/editor/document_test.cpp")
 
@@ -152,9 +195,60 @@ lucid_set_warnings(lucid_shared_document_tests)
 add_test(NAME workspace.shared_document COMMAND lucid_shared_document_tests)
 
 add_executable(lucid_modules_tests workspace/modules_test.cpp)
+add_executable(lucid_cmake_model_tests workspace/cmake_model_test.cpp)
+target_link_libraries(lucid_cmake_model_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_cmake_model_tests)
+add_test(NAME workspace.cmake_model COMMAND lucid_cmake_model_tests)
+add_executable(lucid_coverage_summary_tests workspace/coverage_summary_test.cpp)
+target_link_libraries(lucid_coverage_summary_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_coverage_summary_tests)
+add_test(NAME workspace.coverage_summary COMMAND lucid_coverage_summary_tests)
+add_executable(lucid_cobertura_security_tests workspace/cobertura_security_test.cpp)
+target_link_libraries(lucid_cobertura_security_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_cobertura_security_tests)
+add_test(NAME workspace.cobertura_security COMMAND lucid_cobertura_security_tests)
 target_link_libraries(lucid_modules_tests PRIVATE lucid_core)
 lucid_set_warnings(lucid_modules_tests)
 add_test(NAME workspace.modules COMMAND lucid_modules_tests)
+add_executable(lucid_shipped_module_manifests_tests workspace/shipped_module_manifests_test.cpp)
+target_link_libraries(lucid_shipped_module_manifests_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_shipped_module_manifests_tests)
+add_test(NAME workspace.shipped_module_manifests COMMAND lucid_shipped_module_manifests_tests "${PROJECT_SOURCE_DIR}/modules")
+add_executable(lucid_shipped_catalog_contract_tests workspace/shipped_catalog_contract_test.cpp)
+target_link_libraries(lucid_shipped_catalog_contract_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_shipped_catalog_contract_tests)
+add_executable(lucid_registry_security_tests workspace/registry_security_test.cpp)
+target_link_libraries(lucid_registry_security_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_registry_security_tests)
+add_test(NAME workspace.registry_security COMMAND lucid_registry_security_tests)
+foreach(module_test IN ITEMS shader_preview_interface shader_preview_helper spirv_inspection shader_includes github_review_submit api_response_export pe_symbols secret_scan cmake_cache_edit cmake_cache_values cmake_build binary_inspector python_environments benchmark_comparison log_correlation localization_workspace localization_edit design_tokens design_token_aliases release_notes test_runner_plus dependency_risk dependency_artifact dependency_go_zip shader_diagnostics api_requests api_assertions api_collection_edit sql_workbench sql_changes sql_row_diff sql_schema module_process python_preference python_runtime ctest_runner ctest_history serial_devices serial_monitor hex_buffer hex_file visual_comparison visual_crop visual_config_edit linker_map container_inspection container_actions board_identification usb_descriptors svd_registers crash_dump unix_crash_report crash_symbols breakpad_symbols pull_request_data pull_request_patch github_pull_requests rust_ownership rust_diagnostic_run diagram_preview board_profiles toolchain_profiles toolchain_targets target_configure markdown_outline external_links web_preview_config accessibility_audit)
+    add_executable(lucid_${module_test}_tests workspace/${module_test}_test.cpp)
+    target_link_libraries(lucid_${module_test}_tests PRIVATE lucid_core)
+    lucid_set_warnings(lucid_${module_test}_tests)
+    if(module_test STREQUAL "ctest_runner")
+        add_test(NAME workspace.${module_test} COMMAND lucid_${module_test}_tests "${CMAKE_CTEST_COMMAND}")
+    else()
+        add_test(NAME workspace.${module_test} COMMAND lucid_${module_test}_tests)
+    endif()
+endforeach()
+find_program(LUCID_TEST_PYTHON NAMES python3 python)
+if(LUCID_TEST_PYTHON)
+    add_test(NAME packaging.sha2_notice COMMAND "${LUCID_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/sha2_notice_test.py")
+    add_test(NAME packaging.webview2_sdk COMMAND "${LUCID_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/webview2_sdk_test.py" "${CMAKE_COMMAND}")
+    add_test(NAME packaging.webview2_smoke_contract COMMAND "${LUCID_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/webview2_smoke_contract_test.py")
+    add_test(NAME workspace.shipped_catalog_contract COMMAND "${LUCID_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/catalog_contract_test.py"
+        "$<TARGET_FILE:lucid_shipped_catalog_contract_tests>" "${PROJECT_SOURCE_DIR}")
+    add_test(NAME workspace.shipped_module_manifest_negative COMMAND "${LUCID_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/shipped_module_contract_test.py"
+        "$<TARGET_FILE:lucid_shipped_module_manifests_tests>" "${PROJECT_SOURCE_DIR}/modules")
+    add_test(NAME workspace.api_transport_loopback COMMAND "${LUCID_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/workspace/api_transport_server_test.py"
+        "$<TARGET_FILE:lucid_api_requests_tests>")
+endif()
 add_executable(lucid_module_live_test EXCLUDE_FROM_ALL workspace/module_live_test.cpp)
 target_link_libraries(lucid_module_live_test PRIVATE lucid_core)
 lucid_set_warnings(lucid_module_live_test)
@@ -246,6 +340,10 @@ lucid_set_warnings(lucid_lsp_edits_tests)
 add_test(NAME editor.lsp_edits COMMAND lucid_lsp_edits_tests)
 
 add_executable(lucid_mesh_tests renderer/mesh_test.cpp)
+add_executable(lucid_texture_size_tests renderer/texture_size_test.cpp)
+target_link_libraries(lucid_texture_size_tests PRIVATE lucid_core)
+lucid_set_warnings(lucid_texture_size_tests)
+add_test(NAME renderer.texture_size COMMAND lucid_texture_size_tests)
 target_link_libraries(lucid_mesh_tests PRIVATE lucid_core)
 lucid_set_warnings(lucid_mesh_tests)
 add_test(NAME renderer.mesh COMMAND lucid_mesh_tests "${PROJECT_SOURCE_DIR}/assets/backgrounds/city-transit" "${PROJECT_SOURCE_DIR}/assets/backgrounds/lunar-horizon" "${PROJECT_SOURCE_DIR}/assets/backgrounds/mountain-parallax" "${PROJECT_SOURCE_DIR}/assets/backgrounds/ocean-lighthouse" "${PROJECT_SOURCE_DIR}/assets/backgrounds/orbital-station" "${PROJECT_SOURCE_DIR}/assets/backgrounds/forest-fireflies")

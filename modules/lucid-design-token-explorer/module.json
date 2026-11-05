@@ -1,0 +1,21 @@
+{
+  "name": "Design-Token Explorer",
+  "version": "0.1.0",
+  "description": "Explore JSON and CSS tokens and resolve whole-value JSON aliases locally.",
+  "requires": [
+    "design-token-explorer-v1",
+    "design-token-aliases-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Explore design tokens",
+      "action": "design-token-explorer"
+    }
+  ]
+}

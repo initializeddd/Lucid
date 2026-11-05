@@ -1,0 +1,8 @@
+{
+  "name": "Shader Workbench",
+  "version": "0.1.0",
+  "description": "Inspect GLSL includes, compile saved shaders, and explicitly save SPIR-V artifacts.",
+  "requires": ["shader-compile-v1", "shader-artifact-v1", "shader-includes-v1", "shader-spirv-inspection-v1", "shader-render-preview-v1"],
+  "permissions": {"project": true, "network": false, "processes": true, "settings": false},
+  "commands": [{"title": "Compile GLSL shader", "action": "compile-shader"}]
+}

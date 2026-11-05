@@ -19,6 +19,11 @@ std::string quote(std::string_view value) {
     static constexpr char hex[] = "0123456789abcdef"; std::string out = "\"";
     for (unsigned char c : value) {
         if (c == '"' || c == '\\') { out += '\\'; out += static_cast<char>(c); }
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if (c == '\b') out += "\\b";
+        else if (c == '\f') out += "\\f";
         else if (c < 32) { out += "\\u00"; out += hex[c >> 4]; out += hex[c & 15]; }
         else out += static_cast<char>(c);
     }

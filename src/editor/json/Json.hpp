@@ -21,6 +21,7 @@ enum class JsonType {
 
 struct JsonValue {
     JsonType type = JsonType::Null;
+    std::size_t byteOffset = 0; // Start of this value in the original JSON text.
     bool boolValue = false;
     double numberValue = 0.0;
     std::string stringValue;

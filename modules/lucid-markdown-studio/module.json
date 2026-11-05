@@ -1,0 +1,35 @@
+{
+  "name": "Markdown Studio",
+  "version": "0.2.0",
+  "description": "Preview Markdown, navigate headings and check local or individually approved external links.",
+  "requires": [
+    "markdown-outline-v1",
+    "markdown-preview-v1",
+    "markdown-local-links-v1",
+    "markdown-external-links-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": true,
+    "processes": false,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Navigate Markdown headings",
+      "action": "markdown-outline"
+    },
+    {
+      "title": "Preview Markdown",
+      "action": "markdown-preview"
+    },
+    {
+      "title": "Check local links",
+      "action": "markdown-local-links"
+    },
+    {
+      "title": "Check an external link",
+      "action": "markdown-external-links"
+    }
+  ]
+}

@@ -123,6 +123,8 @@ std::filesystem::path g_launchPath;
 
 } // namespace
 
+std::filesystem::path applicationExecutablePath() { return executablePath(); }
+
 std::filesystem::path assetPath(std::string_view relative) {
     const auto executable = executablePath();
     std::vector<std::filesystem::path> roots;

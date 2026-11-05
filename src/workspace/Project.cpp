@@ -8,8 +8,11 @@
 #include <utility>
 #include <cerrno>
 #include <cstring>
+#include <exception>
 #if defined(_WIN32)
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -29,6 +32,11 @@
 
 namespace lucid::workspace {
 namespace {
+
+[[nodiscard]] std::string utf8Path(const std::filesystem::path& path) {
+    const auto value = path.generic_u8string();
+    return {value.begin(), value.end()};
+}
 
 #if !defined(_WIN32)
 bool installNewFile(const std::filesystem::path& temporary, const std::filesystem::path& destination) {
@@ -109,7 +117,8 @@ bool copyExtendedAttributes(int source, int target) {
 
 [[nodiscard]] std::string pathError(const std::string& prefix,
                                     const std::filesystem::path& path) {
-    return prefix + ": " + path.string();
+    try { return prefix + ": " + utf8Path(path); }
+    catch (const std::exception&) { return prefix + ": [path cannot be represented as UTF-8]"; }
 }
 
 } // namespace
@@ -163,11 +172,13 @@ Project Project::openOrCreate(const std::filesystem::path& path, bool& created,
 }
 
 std::string Project::name() const {
-    const std::string filename = m_root.filename().string();
-    return filename.empty() ? m_root.string() : filename;
+    try {
+        const std::string filename = utf8Path(m_root.filename());
+        return filename.empty() ? utf8Path(m_root) : filename;
+    } catch (const std::exception&) { return "[Unsupported project name]"; }
 }
 
-void Project::refresh(bool* complete, const std::atomic_bool* cancel) {
+void Project::refresh(bool* complete, const std::atomic_bool* cancel, bool includeGenerated) {
     m_files.clear();
     m_directories.clear();
     if (complete) *complete = false;
@@ -184,23 +195,30 @@ void Project::refresh(bool* complete, const std::atomic_bool* cancel) {
     while (!error && iterator != end) {
         if (cancel && cancel->load()) return;
         const std::filesystem::directory_entry& entry = *iterator;
-        const std::string filename = entry.path().filename().string();
+        std::string filename, relative;
+        try {
+            filename = utf8Path(entry.path().filename());
+            relative = utf8Path(entry.path().lexically_relative(m_root));
+        } catch (const std::exception&) {
+            if (complete) { error = std::make_error_code(std::errc::illegal_byte_sequence); break; }
+            std::error_code ignored;
+            if (entry.is_directory(ignored) && !ignored) iterator.disable_recursion_pending();
+            iterator.increment(error);
+            continue;
+        }
 
         std::error_code entryError;
         if (entry.is_directory(entryError) && !entryError) {
-            if (isSkippedDirectory(filename)) {
+            const bool internal = filename == ".git" || filename == ".hg" || filename == ".svn" || filename == ".lucid";
+            if (internal || (!includeGenerated && isSkippedDirectory(filename))) {
                 iterator.disable_recursion_pending();
             } else {
-                const std::string relative =
-                    entry.path().lexically_relative(m_root).generic_string();
                 if (!relative.empty()) {
                     m_directories.push_back(relative);
                 }
             }
         } else if (!entryError && entry.is_regular_file(entryError) && !entryError &&
                    filename != ".DS_Store") {
-            const std::string relative =
-                entry.path().lexically_relative(m_root).generic_string();
             if (!relative.empty()) {
                 m_files.push_back(relative);
             }
@@ -228,9 +246,12 @@ std::filesystem::path Project::resolve(std::string_view relative, std::string& e
         error = "Path is empty";
         return {};
     }
+    if (relative.find('\0') != std::string_view::npos) { error = "Path contains a null byte"; return {}; }
 
-    const std::filesystem::path requested{std::string(relative)};
-    if (requested.is_absolute()) {
+    std::filesystem::path requested;
+    try { requested = std::filesystem::path(std::u8string(relative.begin(), relative.end())); }
+    catch (const std::exception&) { error = "Path is not valid UTF-8"; return {}; }
+    if (requested.is_absolute() || requested.has_root_name() || requested.has_root_directory()) {
         error = "Path must be relative to the project";
         return {};
     }
@@ -293,9 +314,15 @@ bool Project::isDirectory(std::string_view relative) const {
 }
 
 bool Project::readFile(std::string_view relative, std::string& content,
-                       std::string& error) const {
+                       std::string& error, const std::atomic_bool* cancel) const {
+    return readFileBounded(relative, content, error, maxFileSize, cancel);
+}
+
+bool Project::readFileBounded(std::string_view relative, std::string& content,
+                              std::string& error, std::size_t limit, const std::atomic_bool* cancel) const {
     content.clear();
     error.clear();
+    if (cancel && cancel->load()) { error = "File read cancelled"; return false; }
 
     const std::filesystem::path path = resolve(relative, error);
     if (!error.empty()) {
@@ -313,7 +340,7 @@ bool Project::readFile(std::string_view relative, std::string& content,
         error = filesystemError.message();
         return false;
     }
-    if (size > maxFileSize) {
+    if (size > limit) {
         error = "File is too large to open";
         return false;
     }
@@ -326,13 +353,15 @@ bool Project::readFile(std::string_view relative, std::string& content,
 
     std::array<char, 64U * 1024U> buffer{};
     while (file) {
+        if (cancel && cancel->load()) { error = "File read cancelled"; content.clear(); return false; }
         file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const auto count = static_cast<std::size_t>(file.gcount());
-        if (count > maxFileSize - content.size()) {
+        if (count > limit - content.size()) {
             error = "File is too large to open"; content.clear(); return false;
         }
         content.append(buffer.data(), count);
     }
+    if (cancel && cancel->load()) { error = "File read cancelled"; content.clear(); return false; }
     if (file.bad() || !file.eof()) {
         error = pathError("Could not read file", path); content.clear(); return false;
     }
@@ -341,8 +370,9 @@ bool Project::readFile(std::string_view relative, std::string& content,
 }
 
 bool Project::writeFile(std::string_view relative, std::string_view content,
-                        std::string& error, const std::string* expected, bool createOnly) {
+                        std::string& error, const std::string* expected, bool createOnly, const std::atomic_bool* cancel) {
     error.clear();
+    if (cancel && cancel->load()) { error = "Save cancelled"; return false; }
 
     const std::filesystem::path path = resolve(relative, error);
     if (!error.empty()) {
@@ -383,6 +413,7 @@ bool Project::writeFile(std::string_view relative, std::string_view content,
     bool ok = file != INVALID_HANDLE_VALUE;
     std::size_t offset = 0;
     while (ok && offset < content.size()) {
+        if (cancel && cancel->load()) { error = "Save cancelled"; ok = false; break; }
         DWORD written = 0;
         const DWORD count = static_cast<DWORD>(std::min<std::size_t>(content.size() - offset, 1024U * 1024U));
         ok = WriteFile(file, content.data() + offset, count, &written, nullptr) && written != 0;
@@ -391,6 +422,7 @@ bool Project::writeFile(std::string_view relative, std::string_view content,
     if (ok) ok = FlushFileBuffers(file) != 0;
     if (file != INVALID_HANDLE_VALUE && !CloseHandle(file)) ok = false;
     if (ok) ok = unchanged();
+    if (ok && cancel && cancel->load()) { error = "Save cancelled"; ok = false; }
     if (ok) ok = hadOriginal ? ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) != 0
                              : MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) != 0;
     if (!ok) { std::filesystem::remove(temporary, filesystemError); if (error.empty()) error = pathError("Could not safely save file", path); return false; }
@@ -415,6 +447,7 @@ bool Project::writeFile(std::string_view relative, std::string_view content,
     } else if (errno != ENOENT) ok = false;
     std::size_t offset = 0;
     while (ok && offset < content.size()) {
+        if (cancel && cancel->load()) { error = "Save cancelled"; ok = false; break; }
         const auto written = ::write(fd, content.data() + offset, content.size() - offset);
         if (written < 0 && errno == EINTR) continue;
         if (written <= 0) { ok = false; break; }
@@ -441,7 +474,17 @@ bool Project::writeFile(std::string_view relative, std::string_view content,
             (!hasOriginal && (found == 0 || errno != ENOENT))) {
             error = "File identity changed during save; the existing file was preserved"; ok = false;
         }
+        if (ok && hasOriginal && expected) {
+            bool changed = current.st_size != existing.st_size || current.st_mtime != existing.st_mtime || current.st_ctime != existing.st_ctime;
+#if defined(__APPLE__)
+            changed = changed || current.st_mtimespec.tv_nsec != existing.st_mtimespec.tv_nsec || current.st_ctimespec.tv_nsec != existing.st_ctimespec.tv_nsec;
+#elif defined(__linux__)
+            changed = changed || current.st_mtim.tv_nsec != existing.st_mtim.tv_nsec || current.st_ctim.tv_nsec != existing.st_ctim.tv_nsec;
+#endif
+            if (changed) { error = "File changed during save; the existing file was preserved"; ok = false; }
+        }
     }
+    if (ok && cancel && cancel->load()) { error = "Save cancelled"; ok = false; }
     if (ok && !hasOriginal) {
         // Install without replacing a file created after the initial check.
         ok = installNewFile(temporary, path);

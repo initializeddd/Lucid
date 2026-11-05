@@ -6,6 +6,10 @@
 #include "ai/ModelDownload.hpp"
 
 #include "core/Version.hpp"
+#include "modules/BreakpadSymbols.hpp"
+#include "modules/ModuleFingerprint.hpp"
+#include "modules/ShaderPreviewInterface.hpp"
+#include "text/font/FontAtlas.hpp"
 #include "editor/compile/CompileScript.hpp"
 #include "editor/completion/Completion.hpp"
 #include "editor/lsp/TextEdits.hpp"
@@ -15,6 +19,7 @@
 #include "logging/Log.hpp"
 #include "text/Utf8.hpp"
 #include "text/Wrap.hpp"
+#include <picosha2.h>
 #include "ui/Overlay.hpp"
 #include "ui/Welcome.hpp"
 #include "ui/theme/Theme.hpp"
@@ -24,6 +29,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -38,7 +44,79 @@
 
 namespace lucid {
 namespace {
+bool isHttpMarkdownLink(std::string_view link) {
+    if (link.size() < 7) return false;
+    std::string prefix(link.substr(0, std::min<std::size_t>(8, link.size())));
+    std::transform(prefix.begin(), prefix.end(), prefix.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return prefix.starts_with("http://") || prefix.starts_with("https://");
+}
+bool parseHexBytes(std::string_view input, std::string& output) {
+    output.clear(); int high = -1;
+    for (unsigned char c : input) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        int value = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (value < 0) return false;
+        if (high < 0) high = value; else { if (output.size() >= 4096) return false; output.push_back(static_cast<char>(high * 16 + value)); high = -1; }
+    }
+    return high < 0 && !output.empty();
+}
+bool parseHexOffset(std::string_view input, std::size_t& offset) {
+    int base = 10; if (input.starts_with("0x") || input.starts_with("0X")) { input.remove_prefix(2); base = 16; }
+    if (input.empty()) return false;
+    const auto result = std::from_chars(input.data(), input.data() + input.size(), offset, base);
+    return result.ec == std::errc{} && result.ptr == input.data() + input.size();
+}
+std::size_t snippetByteOffset(std::string_view source, editor::TextPosition position) {
+    std::size_t offset = 0;
+    for (std::size_t line = 0; line < position.line; ++line) {
+        const auto end = source.find('\n', offset); if (end == std::string_view::npos) return source.size(); offset = end + 1;
+    }
+    for (std::size_t column = 0; column < position.column && offset < source.size() && source[offset] != '\n'; ++column) (void)text::nextUtf8(source, offset);
+    return offset;
+}
+editor::TextPosition snippetPosition(std::string_view text, std::size_t offset) {
+    const auto prefix = editor::Document::fromUtf8(text.substr(0, std::min(offset, text.size())));
+    const auto line = prefix.lineCount() - 1;
+    return {line, prefix.line(line).size()};
+}
 using SettingsChoice = std::pair<const char*, ui::SettingsControl>;
+std::u32string_view lineCommentPrefix(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    static constexpr std::array hash = {".py", ".pyw", ".sh", ".bash", ".zsh", ".rb", ".pl", ".pm", ".yaml", ".yml", ".toml", ".cmake", ".ps1", ".r", ".conf"};
+    static constexpr std::array slash = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hxx", ".m", ".mm", ".java", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".swift", ".cs", ".kt", ".kts", ".scala", ".dart", ".zig", ".jsonc"};
+    if (std::find(hash.begin(), hash.end(), extension) != hash.end() || std::filesystem::path(path).filename() == "CMakeLists.txt") return U"#";
+    if (std::find(slash.begin(), slash.end(), extension) != slash.end()) return U"//";
+    if (extension == ".lua" || extension == ".sql" || extension == ".hs") return U"--";
+    return {};
+}
+std::pair<std::u32string_view, std::u32string_view> blockCommentDelimiters(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    static constexpr std::array slash = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hxx", ".m", ".mm", ".java", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".swift", ".cs", ".kt", ".kts", ".scala", ".dart", ".css", ".scss", ".sql", ".jsonc"};
+    if (std::find(slash.begin(), slash.end(), extension) != slash.end()) return {U"/*", U"*/"};
+    if (extension == ".html" || extension == ".htm" || extension == ".xml" || extension == ".svg") return {U"<!--", U"-->"};
+    return {};
+}
+std::string debugExplanationContext(const debug::Session& session) {
+    std::string result;
+    const auto append = [&result](std::string_view value, std::size_t limit) {
+        if (result.size() >= limit) return;
+        auto count = std::min(value.size(), limit - result.size());
+        while (count > 0 && count < value.size() && (static_cast<unsigned char>(value[count]) & 0xc0U) == 0x80U) --count;
+        result.append(value.substr(0, count));
+    };
+    append("Reason: ", 600); append(session.message(), 600);
+    for (const auto& frame : session.stack()) { append("\n" + frame.name + " " + frame.path + ":" + std::to_string(frame.line), 600); if (result.size() >= 600) break; }
+    for (const auto& variable : session.variables()) { append("\n" + variable.name + " = " + variable.value, 1200); if (result.size() >= 1200) break; }
+    return result;
+}
+std::string projectSearchOptions(bool wholeWord, bool caseSensitive, std::string_view pathFilter, bool includeGenerated) {
+    return std::string(wholeWord ? "Whole words on" : "Whole words off") +
+        (caseSensitive ? "; Case sensitive" : "; ASCII case insensitive") +
+        (includeGenerated ? "; Generated included" : "; Generated excluded") +
+        "; Shift+Ctrl/Command+W: words, +C: case, +G: path, +I: generated" + (pathFilter.empty() ? "" : "; Path: " + std::string(pathFilter));
+}
 constexpr std::array<const char*, 10> backgroundNames = {"City transit", "Lunar horizon", "Mountain parallax", "", "Ocean lighthouse", "", "Orbital station", "Forest fireflies", "", ""};
 // Keep the persisted IDs of the remaining scenes stable.
 constexpr std::array<int, 6> backgroundChoices = {0, 1, 2, 4, 6, 7};
@@ -66,12 +144,12 @@ const std::vector<SettingsChoice>& settingsChoices(int page) {
 [[nodiscard]] bool isAdaptivePagedPrompt(ui::PromptKind kind) {
     using K = ui::PromptKind;
     return isTaskPrompt(kind) || kind == K::RecoveryList || kind == K::RecoveryDetail ||
-        kind == K::SessionRestore || kind == K::LanguageLocations || kind == K::Diagnostics ||
-        kind == K::ProjectSearchResults || kind == K::ProjectReplaceReview ||
+        kind == K::SessionRestore || kind == K::LanguageLocations || kind == K::LanguageStatus || kind == K::LanguageSignatures || kind == K::Diagnostics ||
+        kind == K::ProjectSearchResults || kind == K::ProjectReplaceReview || kind == K::LanguageRenameReview ||
         kind == K::ModuleList || kind == K::ModuleActions || kind == K::ModuleCommands || kind == K::ModulePreview || kind == K::ModuleCatalog ||
         kind == K::DebugMenu || kind == K::DebugStack || kind == K::DebugThreads || kind == K::DebugVariables || kind == K::DebugOutput ||
         kind == K::GitChanges || kind == K::GitFile || kind == K::GitDiff || kind == K::GitCommitReview ||
-        kind == K::GitRemoteReview || kind == K::GitHistory;
+        kind == K::GitRemoteReview || kind == K::GitHistory || kind == K::GitBranches || kind == K::GitBranchReview;
 }
 
 [[nodiscard]] bool sessionProjectAvailable(const workspace::session::State& state) {
@@ -85,9 +163,9 @@ const std::vector<SettingsChoice>& settingsChoices(int page) {
     using K = ui::PromptKind;
     switch (kind) {
     case K::Project: case K::File: case K::Function: case K::Ai:
-    case K::ProjectSearch: case K::ProjectReplace: case K::AiModelInput:
+    case K::ProjectSearch: case K::ProjectReplace: case K::LanguageRenameInput: case K::LanguageSymbolInput: case K::AiModelInput:
     case K::Find: case K::Replace: case K::OpenFiles: case K::DebugInput:
-    case K::GitCommitInput: case K::TaskList: case K::TaskInput: case K::ModuleImport: case K::ModuleCatalog:
+    case K::GitCommitInput: case K::TaskList: case K::TaskInput: case K::ModuleImport: case K::ModuleSnippetName: case K::ModuleCMakePath: case K::ModuleCoveragePath: case K::ModuleBenchmarkPath: case K::ModuleBinaryPath: case K::ModuleLocalizationEdit: case K::ModuleLocalizationPath: case K::ModuleDesignTokensPath: case K::ModuleLogsInput: case K::ModulePythonInterpreterPath: case K::ModulePythonCreatePath: case K::ModuleCTestInput: case K::ModuleHexPath: case K::ModuleHexOffset: case K::ModuleHexLength: case K::ModuleHexBytes: case K::ModuleHexSearch: case K::ModuleLinkerPath: case K::ModuleToolchainPath: case K::ModuleCrashPath: case K::ModuleRustPath: case K::ModuleSqlPath: case K::ModuleSqlExportPath: case K::ModuleVisualPath: case K::ModuleApiTemplateName: case K::ModuleApiEnvironmentPath: case K::ModuleApiSavePath: case K::ModuleDependencyArtifactPath: case K::ModuleContainerActionPath: case K::ModuleContainerPath: case K::ModuleFlashExecutable: case K::ModuleShaderCompiler: case K::ModuleShaderOutput: case K::ModulePullRequestUrl: case K::ModulePullRequestComment: case K::ModuleCatalog:
         return true;
     default:
         return false;
@@ -409,7 +487,25 @@ Application::Application(ApplicationConfig config)
 }
 
 Application::~Application() {
+    if(m_rustRunCancel)m_rustRunCancel->store(true);
+    if(m_cmakeBuildCancel) m_cmakeBuildCancel->store(true);
+    if (m_serialCancel) m_serialCancel->store(true);
+    if (m_serialFuture.valid()) m_serialFuture.wait();
     if (m_projectSearchCancel) m_projectSearchCancel->store(true);
+    if (m_shaderPreviewCancel) m_shaderPreviewCancel->store(true);
+    if (m_spirvCancel) m_spirvCancel->store(true);
+    if (m_shaderIncludesCancel) m_shaderIncludesCancel->store(true);
+    if (m_pythonProvisionCancel) m_pythonProvisionCancel->store(true);
+    if (m_flashCancel) m_flashCancel->store(true);
+    if (m_toolchainCancel) m_toolchainCancel->store(true);
+    if (m_toolchainSaveCancel) m_toolchainSaveCancel->store(true);
+    if (m_targetConfigureCancel) m_targetConfigureCancel->store(true);
+    if (m_apiSaveCancel) m_apiSaveCancel->store(true);
+    if (m_diagramPreviewCancel) m_diagramPreviewCancel->store(true);
+    if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); if (m_sqlCsvCancel) m_sqlCsvCancel->store(true);
+    if (m_dependencyArtifactCancel) m_dependencyArtifactCancel->store(true);
+    if (m_sqlSchemaCancel) m_sqlSchemaCancel->store(true);
+    if (m_sqlColumnsCancel) m_sqlColumnsCancel->store(true);
     if (m_debugAdapter.alive()) {
         stopDebugger();
         const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -428,6 +524,9 @@ void Application::run() {
         m_window.pollEvents();
 
         if (m_window.shouldClose()) {
+            if (m_hexFuture.valid()) { m_window.cancelClose(); setStatus("Wait for the binary file operation to finish", true); continue; }
+            if (m_hexFile && m_hexFile->buffer().bytes() != m_hexBaseline && !platform::confirmDestructiveAction("Discard binary edits?", "The open binary has unsaved changes.", "Discard")) { m_window.cancelClose(); continue; }
+            if (m_gitBranchFuture.valid()) { m_window.cancelClose(); setStatus("Wait for branch switching to finish", true); continue; }
             if (!saveDocument()) {
                 m_window.cancelClose();
                 checkpointRecovery();
@@ -439,6 +538,7 @@ void Application::run() {
                 setStatus("Could not save task context; Lucid remains open.", true);
                 continue;
             }
+            if (!checkpointInactiveEdits()) { m_window.cancelClose(); continue; }
             std::string sessionError;
             if (!saveSession(sessionError)) { checkpointRecovery(); log::error("Could not save session: " + sessionError); }
             else if (!m_recoveryFile.empty()) { std::error_code ec; std::filesystem::remove(m_recoveryFile, ec); }
@@ -479,11 +579,43 @@ void Application::run() {
 }
 
 void Application::handleKey(const input::KeyEvent& event) {
+    if (m_visualVisible) {
+        if (event.action == input::KeyAction::Press || event.action == input::KeyAction::Repeat) {
+            if (event.key==input::Key::Escape) { if(m_visualCropCancel) m_visualCropCancel->store(true); m_visualVisible=false; m_visualCropMode=false; m_visualCropPreview={}; m_webViewActive=false; m_shaderPreviewViewActive=false; setStatus("Preview closed",false); }
+            else if (m_visualCropMode && event.key==input::Key::Zero) { if(m_visualCropCancel) m_visualCropCancel->store(true); m_visualCropMode=false; m_visualCropPreview={}; setStatus("Overview · crop view closed",false); }
+            else if (m_visualCropMode && m_visualReview && !m_visualCropFuture.valid()) {
+                const auto& image=m_visualReview->baselineImage(); auto x=m_visualCropX,y=m_visualCropY;
+                const auto width=std::min<std::size_t>(512,image.width), height=std::min<std::size_t>(512,image.height);
+                if(event.key==input::Key::Left) x=x>256?x-256:0; else if(event.key==input::Key::Right) x=std::min(image.width-width,x+256); else if(event.key==input::Key::Up) y=y>256?y-256:0; else if(event.key==input::Key::Down) y=std::min(image.height-height,y+256); else return;
+                if(x!=m_visualCropX || y!=m_visualCropY) requestVisualCrop(x,y);
+            }
+        }
+        return;
+    }
+    if (m_diagramPreviewVisible) {
+        if (event.action == input::KeyAction::Press || event.action == input::KeyAction::Repeat) {
+            if (event.key == input::Key::Escape) { m_diagramPreviewVisible=false; m_diagramDragging=false; m_diagramPreview={}; setStatus("Diagram preview closed",false); }
+            else if (event.key == input::Key::Left) m_diagramPanX=std::max(-0.95,m_diagramPanX-0.08);
+            else if (event.key == input::Key::Right) m_diagramPanX=std::min(0.95,m_diagramPanX+0.08);
+            else if (event.key == input::Key::Up) m_diagramPanY=std::max(-0.95,m_diagramPanY-0.08);
+            else if (event.key == input::Key::Down) m_diagramPanY=std::min(0.95,m_diagramPanY+0.08);
+        }
+        return;
+    }
+    if (m_gitBranchFuture.valid()) { setStatus("Wait for branch switching to finish", false); return; }
 #if defined(__APPLE__)
     const bool commandDown = event.super;
 #else
     const bool commandDown = event.control;
 #endif
+
+    if (event.action == input::KeyAction::Press && event.alt && event.shift && !commandDown && event.key == input::Key::A && m_hasDocument && !m_searchBar.isOpen()) {
+        const auto [open, close] = blockCommentDelimiters(m_filePath);
+        if (open.empty()) setStatus("Block comments are not supported for this file type", true);
+        else if (!m_document.toggleBlockComment(open, close)) setStatus("Selection contains comment delimiters; cannot safely wrap it", true);
+        else m_followCursor = true;
+        return;
+    }
 
     if (m_pendingSession && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::SessionRestore) {
         handleCommandKey(event, commandDown);
@@ -560,10 +692,31 @@ void Application::handleKey(const input::KeyEvent& event) {
 
     if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::AiKeyInput && commandDown && event.key != input::Key::V) return;
     if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ProjectSearch && commandDown && event.shift &&
+        event.key == input::Key::I && event.action == input::KeyAction::Press) {
+        if (m_projectSearchFuture.valid() || m_projectSearchEditingFilter) { setCommandStatus("Finish the current search or path filter before changing options", false); return; }
+        m_projectSearchIncludeGenerated = !m_projectSearchIncludeGenerated;
+        setCommandStatus(projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false);
+        return;
+    }
+    if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ProjectSearch && commandDown && event.shift &&
+        event.key == input::Key::G && event.action == input::KeyAction::Press) {
+        if (m_projectSearchFuture.valid() || m_projectSearchEditingFilter) return;
+        m_projectSearchFilterQuery = m_searchBar.query(); m_projectSearchEditingFilter = true;
+        m_searchBar.setQuery(m_projectSearchPathFilter);
+        setCommandStatus("Comma-separated paths; * and ? match, ! excludes; Enter applies", false); return;
+    }
+    if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ProjectSearch && commandDown && event.shift &&
+        event.key == input::Key::C && event.action == input::KeyAction::Press) {
+        if (m_projectSearchFuture.valid()) { setCommandStatus("Search is running; cancel it before changing options", false); return; }
+        m_projectSearchCaseSensitive = !m_projectSearchCaseSensitive;
+        setCommandStatus(projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false);
+        return;
+    }
+    if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ProjectSearch && commandDown && event.shift &&
         event.key == input::Key::W && event.action == input::KeyAction::Press) {
         if (m_projectSearchFuture.valid()) { setCommandStatus("Search is running; cancel it before changing options", false); return; }
         m_projectSearchWholeWord = !m_projectSearchWholeWord;
-        setCommandStatus(m_projectSearchWholeWord ? "Whole words on; Ctrl/Command+Shift+W toggles" : "Whole words off; Ctrl/Command+Shift+W toggles", false);
+        setCommandStatus(projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false);
         return;
     }
     if (m_searchBar.isOpen() && acceptsPromptText(m_searchBar.kind()) && commandDown &&
@@ -595,6 +748,9 @@ void Application::handleKey(const input::KeyEvent& event) {
             return;
         case input::Key::G:
             if (event.shift) openGitReview();
+            return;
+        case input::Key::I:
+            if (event.shift && !event.alt && !m_searchBar.isOpen()) openLanguageStatus();
             return;
         case input::Key::T:
             if (event.shift) openTasks();
@@ -696,7 +852,9 @@ void Application::handleKey(const input::KeyEvent& event) {
             return;
         case input::Key::Slash:
             if (m_hasDocument && !m_searchBar.isOpen()) {
-                m_document.toggleLineComment();
+                const auto prefix = lineCommentPrefix(m_filePath);
+                if (prefix.empty()) { setStatus("Line comments are not supported for this file type", true); return; }
+                m_document.toggleLineComment(prefix);
                 m_followCursor = true;
             }
             return;
@@ -799,9 +957,17 @@ void Application::handleKey(const input::KeyEvent& event) {
 
 void Application::handleCommandKey(const input::KeyEvent& event, bool commandDown) {
     if (event.action == input::KeyAction::Press && event.key == input::Key::Escape) {
+        if (m_searchBar.kind() == ui::PromptKind::ProjectSearch && m_projectSearchEditingFilter) {
+            m_projectSearchEditingFilter = false; m_searchBar.setQuery(m_projectSearchFilterQuery);
+            setCommandStatus(projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false); return;
+        }
         if (m_searchBar.kind() == ui::PromptKind::Ai && m_aiCancel) m_aiCancel->store(true);
         if (m_searchBar.kind() == ui::PromptKind::ProjectSearch && m_projectSearchCancel) m_projectSearchCancel->store(true);
         const auto kind = m_searchBar.kind();
+        if (kind == ui::PromptKind::LanguageRenameReview && m_languageRenameReviewFile) {
+            m_languageRenameReviewFile.reset(); m_languageRenamePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1;
+            clearCommandFeedback(); setCommandStatus("Select a file to inspect its changes", false); refreshSuggestions(); return;
+        }
         if (kind == ui::PromptKind::SessionRestore) {
             m_pendingSession.reset(); m_rememberSessionChoice = false;
             m_searchBar.close(); return;
@@ -814,9 +980,10 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
             m_projectSearchPage = 0; m_searchBar.open(ui::PromptKind::ProjectSearchResults); clearCommandFeedback(); refreshSuggestions(); return;
         }
         if (kind == ui::PromptKind::ProjectSearchResults) {
+            if (m_projectSearchShowingSkipped) { m_projectSearchShowingSkipped = false; m_projectSearchPage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             m_searchBar.open(ui::PromptKind::ProjectSearch); m_searchBar.setQuery(m_projectSearchQuery);
             m_projectSearchHistoryPosition = m_projectSearchHistory.size(); m_projectSearchDraft = m_projectSearchQuery;
-            clearCommandFeedback(); return;
+            clearCommandFeedback(); setCommandStatus(projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false); return;
         }
         if (kind == ui::PromptKind::AiSettings) {
             if (m_aiDownloadingModel && m_aiCancel) m_aiCancel->store(true);
@@ -841,11 +1008,77 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
         }
         if (kind == ui::PromptKind::DebugStack || kind == ui::PromptKind::DebugThreads || kind == ui::PromptKind::DebugVariables || kind == ui::PromptKind::DebugOutput || kind == ui::PromptKind::DebugInput) { m_debugAwaitArguments = false; m_debugAwaitWorkingDirectory = false; m_debugAwaitEnvironment = false; m_debugPage = 0; m_searchBar.open(ui::PromptKind::DebugMenu); clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::RecoveryDetail) { m_recoveryPage = 0; m_searchBar.open(ui::PromptKind::RecoveryList); refreshSuggestions(); return; }
-        if (kind == ui::PromptKind::ModuleCommands) { m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleActions); refreshSuggestions(); return; }
-        if (kind == ui::PromptKind::ModuleImport || kind == ui::PromptKind::ModulePreview || kind == ui::PromptKind::ModuleCatalog) { ++m_moduleFetchGeneration; m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleCommands) {
+            if (m_diagramPreviewFuture.valid() && m_searchBar.generation()==m_diagramPreviewPromptGeneration) { if (m_diagramPreviewCancel) m_diagramPreviewCancel->store(true); setCommandStatus("Cancelling diagram preview…",false); return; }
+            if (m_pullRequestShowing) { const bool posting = m_pullCommentFuture.valid(); if (m_pullRequestCancel) m_pullRequestCancel->store(true); m_pullCommentConfirm = false; m_pullReviewMode = 0; m_pullCommentBody.clear(); if (m_pullPatchSelected) { m_pullPatchSelected.reset(); m_pullPatchHunks.clear(); m_pullPatchError.clear(); } else { m_pullRequestShowing = false; m_pullRequestData = {}; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); if (posting) setCommandStatus(m_pullReviewPosting ? "Review may have been submitted; refresh before retrying" : "Comment may have posted; refresh before retrying", true); return; }
+            if (m_usbBoardShowing) { m_usbBoardShowing=false; m_usbBoardMappings={}; m_usbBoardScan={}; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+            if (m_serialShowing) {
+                if (m_serialStage==10 && m_serialFuture.valid()) { if(m_serialCancel) m_serialCancel->store(true); setCommandStatus("Stopping monitor and restoring port settings…",false); return; }
+                if (m_flashFuture.valid()) { if (m_flashCancel) m_flashCancel->store(true); setCommandStatus("Cancelling flash; hardware may be partially written", true); return; }
+                if (m_flashCancel) m_flashCancel->store(true);
+                if (m_serialCancel) m_serialCancel->store(true);
+                m_serialShowing = false; m_serialResult = {}; m_flashSnapshot = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+            }
+            if (m_webShowing) {
+#if defined(__APPLE__)
+                if (m_webRenderer) m_webRenderer->cancel();
+#elif defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+                if (m_windowsWebPresentation) { m_windowsWebPresentation->cancel(); }
+                m_webPresentationActive = false;
+#endif
+                m_webShowing = false; m_webReady = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+            }
+            if (m_shaderShowing) { if (m_shaderPreviewStage) { if (m_shaderPreviewCancel) m_shaderPreviewCancel->store(true); m_shaderPreviewStage = 0; m_shaderPreviewBytes.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; } if (m_spirvCancel) m_spirvCancel->store(true); if (m_shaderIncludesCancel) m_shaderIncludesCancel->store(true); if (m_spirvShowing) m_spirvShowing = false; else if (m_shaderIncludesShowing) m_shaderIncludesShowing = false; else { if (m_shaderCancel) m_shaderCancel->store(true); m_shaderShowing = false; m_shaderResult = {}; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_containerShowing) { if (m_containerCancel) m_containerCancel->store(true); m_containerShowing = false; m_containerListing = {}; m_containerOutput.clear(); m_containerActionReview = {}; m_containerActionConfigSnapshot.clear(); m_containerProjectActions.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_dependencyShowing && m_dependencyArtifactStage) { if (m_dependencyArtifactCancel) m_dependencyArtifactCancel->store(true); m_dependencyArtifactStage = 0; m_dependencyArtifactResult = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_dependencyShowing && m_dependencyProvenanceShowing) { if (m_dependencyProvenanceSelected) m_dependencyProvenanceSelected.reset(); else m_dependencyProvenanceShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_dependencyShowing) { if (m_dependencyArtifactCancel) m_dependencyArtifactCancel->store(true); m_dependencyArtifactStage = 0; if (m_dependencyCancel) m_dependencyCancel->store(true); m_dependencyShowing = false; m_dependencyReport = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_apiShowing && m_apiEditMode) { if (m_apiEditConfirm) m_apiEditConfirm = false; else if (m_apiEditSelected) m_apiEditSelected.reset(); else { m_apiShowing = false; m_apiEditMode = false; m_apiEditNames.clear(); m_apiEditBaseline.clear(); } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_apiShowing) { if (m_apiSaveFuture.valid()) { if (m_apiSaveCancel) m_apiSaveCancel->store(true); setCommandStatus("Cancelling save; a file may already have been created",true); return; } if (m_apiAssertionCancel) m_apiAssertionCancel->store(true); if (m_apiCancel) m_apiCancel->store(true); m_apiShowing = false; m_apiAssertionStage=0; m_apiAssertions={}; m_apiSaveStage=0; m_apiChoosingEnvironment = false; m_apiEnvironments.clear(); m_apiSelected.reset(); m_apiRequests.clear(); m_apiResponse = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_visualShowing) { if (m_visualConfigCancel) m_visualConfigCancel->store(true); if (m_visualCropCancel) m_visualCropCancel->store(true); if (m_visualCancel) m_visualCancel->store(true); m_visualShowing = false; m_visualConfigStage=0; m_visualConfigDraft={}; m_visualConfigOriginal.clear(); m_visualConfigReview.reset(); m_visualCropMode=false; m_visualCropPreview={}; m_visualConfirm = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_sqlShowing) { if (m_sqlChangeSaveFuture.valid()) { if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); setCommandStatus("Cancelling database copy; it may already have been created",true); return; } if (m_sqlColumnsCancel) m_sqlColumnsCancel->store(true); if (m_sqlSchemaCancel) m_sqlSchemaCancel->store(true); m_sqlSchemaShowing = false; m_sqlSchemaSelected.reset(); m_sqlSnapshot.reset(); if (m_sqlCancel) m_sqlCancel->store(true); if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); if (m_sqlCsvCancel) m_sqlCsvCancel->store(true); m_sqlCsvStage = 0; m_sqlCsv = {}; m_sqlChange = {}; m_sqlRowShowing=false; m_sqlRowDiff={}; m_sqlChangeBindingsSnapshot.reset(); m_sqlChangeBindingsPath.clear(); m_sqlChangeStage = 0; m_sqlChangeMode = false; m_sqlShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_releaseNotesShowing) { if (m_releaseNotesPreview) { m_releaseNotesPreview=false; m_releaseNotesDraft={}; } else m_releaseNotesShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_accessibilityShowing) { m_accessibilityShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_rustOwnershipShowing) { if(m_rustRunFuture.valid()){if(m_rustRunCancel)m_rustRunCancel->store(true);setCommandStatus("Cancellation requested; build scripts may have changed files",true);return;} if(m_rustRunStage && m_rustRunStage!=4){m_rustRunStage=0;} else if (m_rustOwnershipSelected) m_rustOwnershipSelected.reset(); else { if (m_rustOwnershipCancel) m_rustOwnershipCancel->store(true); m_rustOwnershipDiagnostics.clear(); m_rustOwnershipSpans.clear(); m_rustOwnershipShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_crashShowing) { if (m_crashCancel) m_crashCancel->store(true); m_crashDump = {}; m_crashShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_svdShowing) { if (m_svdSelected) m_svdSelected.reset(); else { if (m_svdCancel) m_svdCancel->store(true); m_svdShowing=false; } m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+            if (m_linkerShowing) { if (m_linkerCancel) m_linkerCancel->store(true); m_linkerShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_toolchainShowing) { if(m_targetConfigureFuture.valid()){if(m_targetConfigureCancel)m_targetConfigureCancel->store(true);setCommandStatus("Cancellation requested; build files may already be changed",true);return;} if(m_targetConfigureStage){m_targetConfigureStage=0;} else if (m_toolchainSaveFuture.valid()) {if(m_toolchainSaveCancel) m_toolchainSaveCancel->store(true);setCommandStatus("Cancelling target save; it may already have completed",true);return;} else if (m_toolchainEditMode) {m_toolchainEditMode=0;m_toolchainDraft={};} else if (m_toolchainSelected) m_toolchainSelected.reset(); else { if (m_toolchainCancel) m_toolchainCancel->store(true); m_toolchainShowing=false; m_toolchainProfiles.clear(); } m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+            if (m_hexShowing) { if (m_hexFuture.valid()) { setCommandStatus("Wait for the binary file operation to finish", false); return; } if (m_hexFile && m_hexFile->buffer().bytes() != m_hexBaseline && !platform::confirmDestructiveAction("Discard binary edits?", "The open binary has unsaved changes.", "Discard")) return; m_hexFile.reset(); m_hexBaseline.clear(); m_hexShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_ctestShowing) { if (m_ctestRunFuture.valid() || m_ctestDiscoveryFuture.valid()) { if (m_ctestCancel) m_ctestCancel->store(true); setCommandStatus("Cancellation requested; completed results remain recorded", false); return; } if (m_ctestRerunSelected) m_ctestRerunSelected.reset(); else if (m_ctestRerunShowing) m_ctestRerunShowing = false; else if (m_ctestSelected) m_ctestSelected.reset(); else m_ctestShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_pythonShowing) {
+                if (m_pythonProvisionFuture.valid()) { if (m_pythonProvisionCancel) m_pythonProvisionCancel->store(true); setCommandStatus("Cancelling installation; environment changes may remain", false); return; }
+                if (m_pythonProvisionBootstrap) m_pythonProvisionBootstrap.reset(); else if (m_pythonSelected) m_pythonSelected.reset(); else m_pythonShowing = false;
+                m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+            }
+            if (m_logShowing) { if (m_logSelected) m_logSelected.reset(); else { if (m_logCancel) m_logCancel->store(true); m_logShowing = false; m_logSnapshots.clear(); } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_designTokenShowing) { if (m_designTokenSelected) m_designTokenSelected.reset(); else { if (m_designTokenCancel) m_designTokenCancel->store(true); m_designTokenShowing = false; m_designTokenSnapshot.clear(); m_designTokenAliases.clear(); m_designTokenAliasEnabled=false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_localizationShowing && m_localizationEditPreview) { m_localizationEditPreview = false; m_localizationEditPlan = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_localizationShowing) { if (m_localizationSelected) m_localizationSelected.reset(); else { if (m_localizationCancel) m_localizationCancel->store(true); m_localizationShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_binaryShowing) { if (m_binaryCategory) m_binaryCategory.reset(); else { if (m_binaryCancel) m_binaryCancel->store(true); m_binaryShowing = false; m_binarySnapshot.reset(); } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_benchmarkShowing) { if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_moduleHistoryShowing) { if (m_moduleHistoryDiffShowing) m_moduleHistoryDiffShowing = false; else m_moduleHistoryShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_coverageShowing) { if (m_coverageCancel) m_coverageCancel->store(true); m_coverageChoosingBaseline = false; m_coverageShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_markdownLinksShowing) { if (m_markdownExternalCancel) m_markdownExternalCancel->store(true); if (m_markdownExternalSelected) m_markdownExternalSelected.reset(); else { if (m_markdownLinksCancel) m_markdownLinksCancel->store(true); m_markdownLinksShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_markdownPreviewShowing) { m_markdownPreviewShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_moduleMarkdownShowing) { m_moduleMarkdownShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_moduleCMakeShowing) { if(m_cmakeBuildFuture.valid()){if(m_cmakeBuildCancel)m_cmakeBuildCancel->store(true);setCommandStatus("Build cancellation requested; files may have changed",true);return;} if(m_cmakeBuildPrepareFuture.valid()){setCommandStatus("Wait for build review to finish",false);return;} if(m_cmakeBuildStage){m_cmakeBuildStage=0;} else if (m_cmakeCachePrepareFuture.valid() || m_cmakeCacheSaveFuture.valid()) { setCommandStatus("Wait for the cache operation to finish",false); return; } else if (m_cmakeValueSelected) {m_cmakeValueSelected.reset();m_cmakeCacheUpdate={};} else if (m_cmakeValueMode) {m_cmakeValueMode=false;} else if (m_moduleCMakeOption) { m_moduleCMakeOption.reset(); m_cmakeCacheUpdate = {}; } else if (m_moduleCMakeOptions) m_moduleCMakeOptions = false; else if (m_moduleCMakeTarget) m_moduleCMakeTarget.reset(); else m_moduleCMakeShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_moduleScanShowingResults) { if (m_moduleScanCancel) m_moduleScanCancel->store(true); m_moduleScanShowingResults = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleActions); refreshSuggestions(); return;
+        }
+        if (kind == ui::PromptKind::ModuleFlashExecutable) { m_serialShowing = false; m_flashSnapshot = {}; m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleDependencyArtifactPath) { m_searchBar.open(ui::PromptKind::ModuleCommands); m_dependencyGeneration = m_searchBar.generation(); m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleLocalizationEdit) { m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleApiTemplateName) { m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleApiSavePath) { if (m_apiAssertionStage==1) m_apiAssertionStage=0; m_apiSaveStage=0; m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion=-1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleSqlExportPath) { if (m_sqlChangeMode) m_sqlChangeStage = 1; m_sqlCsvStage = 0; m_sqlCsv = {}; m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleVisualPath && m_visualConfigStage==2) { m_visualConfigStage=1; m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion=-1; refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleCMakePath || kind == ui::PromptKind::ModuleCoveragePath || kind == ui::PromptKind::ModuleBenchmarkPath || kind == ui::PromptKind::ModuleBinaryPath || kind == ui::PromptKind::ModuleLocalizationPath || kind == ui::PromptKind::ModuleDesignTokensPath || kind == ui::PromptKind::ModuleLogsInput || kind == ui::PromptKind::ModulePythonInterpreterPath || kind == ui::PromptKind::ModulePythonCreatePath || kind == ui::PromptKind::ModuleCTestInput || kind == ui::PromptKind::ModuleHexPath || kind == ui::PromptKind::ModuleHexOffset || kind == ui::PromptKind::ModuleHexLength || kind == ui::PromptKind::ModuleHexBytes || kind == ui::PromptKind::ModuleHexSearch || kind == ui::PromptKind::ModuleLinkerPath || kind == ui::PromptKind::ModuleToolchainPath || kind == ui::PromptKind::ModuleCrashPath || kind == ui::PromptKind::ModuleRustPath || kind == ui::PromptKind::ModuleSqlPath || kind == ui::PromptKind::ModuleVisualPath || kind == ui::PromptKind::ModuleApiEnvironmentPath || kind == ui::PromptKind::ModuleContainerActionPath || kind == ui::PromptKind::ModuleContainerPath || kind == ui::PromptKind::ModuleShaderCompiler || kind == ui::PromptKind::ModuleShaderOutput || kind == ui::PromptKind::ModulePullRequestUrl || kind == ui::PromptKind::ModulePullRequestComment) { m_visualBaseline.clear(); if (kind == ui::PromptKind::ModuleCMakePath) {m_cmakeValueInput=false;if(m_cmakeBuildStage==1)m_cmakeBuildStage=0;} if (kind == ui::PromptKind::ModuleRustPath && m_rustRunStage==1) m_rustRunStage=0; if (kind == ui::PromptKind::ModuleCrashPath) m_crashMapInput = false; if (kind == ui::PromptKind::ModuleToolchainPath && (m_toolchainEditMode==1 || m_toolchainEditMode==2)) m_toolchainEditMode=0; if(kind==ui::PromptKind::ModuleToolchainPath && (m_targetConfigureStage==1 || m_targetConfigureStage==2)) m_targetConfigureStage=0; m_searchBar.open(ui::PromptKind::ModuleCommands); if (kind == ui::PromptKind::ModuleCoveragePath) m_coverageChoosingBaseline = false; if (kind == ui::PromptKind::ModulePullRequestComment) { m_pullReviewMode = 0; m_pullRequestGeneration = m_searchBar.generation(); } m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleImport || kind == ui::PromptKind::ModuleSnippetName || kind == ui::PromptKind::ModulePreview || kind == ui::PromptKind::ModuleCatalog) { m_personalSnippetDraft.clear(); ++m_moduleFetchGeneration; m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::ModuleActions) { m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::GitDiff) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitFile); clearCommandFeedback(); refreshSuggestions(); return; }
-        if (kind == ui::PromptKind::GitFile || kind == ui::PromptKind::GitCommitReview || kind == ui::PromptKind::GitRemoteReview || kind == ui::PromptKind::GitHistory) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitChanges); clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::GitBranchReview) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitBranches); clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::GitFile || kind == ui::PromptKind::GitCommitReview || kind == ui::PromptKind::GitRemoteReview || kind == ui::PromptKind::GitHistory || kind == ui::PromptKind::GitBranches) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitChanges); clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::GitCommitInput) { m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitCommitReview); clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::TaskSubtasks || kind == ui::PromptKind::TaskHistory) {
             showTaskView(ui::PromptKind::TaskActions);
@@ -968,7 +1201,7 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
     }
 
     if (event.action == input::KeyAction::Press && event.key == input::Key::Tab) {
-        if (m_searchBar.kind() == ui::PromptKind::AiSettings || m_searchBar.kind() == ui::PromptKind::SettingsMenu || m_searchBar.kind() == ui::PromptKind::SessionRestore || m_searchBar.kind() == ui::PromptKind::ProjectSearchResults || m_searchBar.kind() == ui::PromptKind::ProjectReplaceReview || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory || m_searchBar.kind() == ui::PromptKind::LanguageLocations || m_searchBar.kind() == ui::PromptKind::Diagnostics) { moveSuggestion(event.shift ? -1 : 1); return; }
+        if (m_searchBar.kind() == ui::PromptKind::AiSettings || m_searchBar.kind() == ui::PromptKind::SettingsMenu || m_searchBar.kind() == ui::PromptKind::SessionRestore || m_searchBar.kind() == ui::PromptKind::ProjectSearchResults || m_searchBar.kind() == ui::PromptKind::ProjectReplaceReview || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory || m_searchBar.kind() == ui::PromptKind::GitBranches || m_searchBar.kind() == ui::PromptKind::GitBranchReview || m_searchBar.kind() == ui::PromptKind::LanguageLocations || m_searchBar.kind() == ui::PromptKind::LanguageStatus || m_searchBar.kind() == ui::PromptKind::LanguageSignatures || m_searchBar.kind() == ui::PromptKind::LanguageRenameReview || m_searchBar.kind() == ui::PromptKind::Diagnostics) { moveSuggestion(event.shift ? -1 : 1); return; }
         if (isTaskPrompt(m_searchBar.kind()) || m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugInput || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugThreads || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput || m_searchBar.kind() == ui::PromptKind::RecoveryList || m_searchBar.kind() == ui::PromptKind::RecoveryDetail || m_searchBar.kind() == ui::PromptKind::ModuleList || m_searchBar.kind() == ui::PromptKind::ModuleActions || m_searchBar.kind() == ui::PromptKind::ModuleCommands || m_searchBar.kind() == ui::PromptKind::ModulePreview || m_searchBar.kind() == ui::PromptKind::ModuleCatalog || m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput) {
             if (m_searchBar.kind() != ui::PromptKind::TaskInput && m_searchBar.kind() != ui::PromptKind::GitCommitInput && m_searchBar.kind() != ui::PromptKind::DebugInput) moveSuggestion(event.shift ? -1 : 1);
             return;
@@ -1048,6 +1281,13 @@ void Application::handleEditorKey(const input::KeyEvent& event, bool commandDown
     }
 
     m_followCursor = true;
+    if (m_snippetSession && event.action == input::KeyAction::Press && !commandDown && !event.alt) {
+        if (event.key == input::Key::Escape) { m_snippetSession.reset(); m_document.clearSelection(); setStatus("Snippet navigation ended", false); return; }
+        if (event.key == input::Key::Tab && navigateSnippet(event.shift)) return;
+    }
+
+    if (event.key == input::Key::F2 && event.action == input::KeyAction::Press && !commandDown && !event.alt && !event.shift) { requestLanguageRename(); return; }
+    if (event.key == input::Key::F4 && event.action == input::KeyAction::Press && !commandDown && !event.alt && !event.shift) { openLanguageSymbols(true); return; }
 
     if (event.key == input::Key::F8 && event.action == input::KeyAction::Press && commandDown && !event.alt && !event.shift) {
         openDiagnosticList(); return;
@@ -1058,9 +1298,14 @@ void Application::handleEditorKey(const input::KeyEvent& event, bool commandDown
     if (event.key == input::Key::F12 && event.action == input::KeyAction::Press && !commandDown && !event.alt) {
         requestLanguageNavigation(event.shift); return;
     }
+    if (event.key == input::Key::F12 && event.action == input::KeyAction::Press && commandDown && !event.alt && !event.shift) {
+        requestLanguageNavigation(false, true); return;
+    }
     if (event.key == input::Key::F && event.action == input::KeyAction::Press && event.alt && event.shift && !commandDown) {
         requestLanguageFormatting(); return;
     }
+    if (event.key == input::Key::S && event.action == input::KeyAction::Press && event.alt && event.shift && !commandDown) { requestLanguageSignatures(); return; }
+    if (event.key == input::Key::O && event.action == input::KeyAction::Press && event.alt && event.shift && !commandDown) { openLanguageSymbols(); return; }
 
     if (event.alt && !commandDown && event.key == input::Key::Up) {
         m_document.moveLineUp();
@@ -1161,6 +1406,9 @@ void Application::handleEditorKey(const input::KeyEvent& event, bool commandDown
 }
 
 void Application::handleChar(char32_t codepoint) {
+    if (m_diagramPreviewVisible) { if (codepoint==U'+' || codepoint==U'=') m_diagramZoom=std::min(8.0,m_diagramZoom*1.2); else if (codepoint==U'-') m_diagramZoom=std::max(1.0,m_diagramZoom/1.2); else if (codepoint==U'0') { m_diagramZoom=1.0; m_diagramPanX=0; m_diagramPanY=0; } return; }
+    if (m_visualVisible) return;
+    if (m_gitBranchFuture.valid()) return;
     if (m_settingsPanelVisible) {
         return;
     }
@@ -1182,7 +1430,7 @@ void Application::handleChar(char32_t codepoint) {
             if (codepoint >= 33 && codepoint <= 126 && m_aiSecret.size() < 1024) { m_aiSecret.push_back(static_cast<char>(codepoint)); m_searchBar.setQuery(std::string(m_aiSecret.size(), '*')); }
             return;
         }
-        if (m_searchBar.isOpen() && (m_searchBar.kind() == ui::PromptKind::AiSettings || m_searchBar.kind() == ui::PromptKind::SettingsMenu || m_searchBar.kind() == ui::PromptKind::SessionRestore || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory || m_searchBar.kind() == ui::PromptKind::LanguageLocations || m_searchBar.kind() == ui::PromptKind::Diagnostics)) return;
+        if (m_searchBar.isOpen() && (m_searchBar.kind() == ui::PromptKind::AiSettings || m_searchBar.kind() == ui::PromptKind::SettingsMenu || m_searchBar.kind() == ui::PromptKind::SessionRestore || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory || m_searchBar.kind() == ui::PromptKind::GitBranches || m_searchBar.kind() == ui::PromptKind::GitBranchReview || m_searchBar.kind() == ui::PromptKind::LanguageLocations || m_searchBar.kind() == ui::PromptKind::Diagnostics)) return;
         if (m_searchBar.isOpen() && (m_searchBar.kind() == ui::PromptKind::ProjectSearchResults || m_searchBar.kind() == ui::PromptKind::ProjectReplaceReview || (m_searchBar.kind() == ui::PromptKind::ProjectSearch && m_projectSearchFuture.valid()))) return;
         if (acceptsPromptText(m_searchBar.kind()) && !(m_searchBar.kind() == ui::PromptKind::Ai && m_aiReady)) {
             const std::string before(m_searchBar.query());
@@ -1328,6 +1576,9 @@ void Application::selectAllText() {
 }
 
 void Application::handleMouseButton(const input::MouseButtonEvent& event) {
+    if (m_diagramPreviewVisible) { if (event.button==input::MouseButton::Left || event.button==input::MouseButton::Middle) { if (event.action==input::KeyAction::Press && std::isfinite(event.x) && std::isfinite(event.y)) { m_diagramDragging=true; m_diagramDragX=event.x; m_diagramDragY=event.y; } else if (event.action==input::KeyAction::Release) m_diagramDragging=false; } return; }
+    if (m_visualVisible) return;
+    if (m_gitBranchFuture.valid()) return;
     if (event.action == input::KeyAction::Press) m_completionOpen = false;
     if (event.button == input::MouseButton::Left &&
         event.action == input::KeyAction::Release) {
@@ -1477,6 +1728,8 @@ void Application::handleMouseButton(const input::MouseButtonEvent& event) {
 }
 
 void Application::handleMouseMove(const input::MouseMoveEvent& event) {
+    if (m_diagramPreviewVisible) { if (m_diagramDragging && std::isfinite(event.x) && std::isfinite(event.y)) { int width=0,height=0; m_window.windowSize(width,height); if (width>0 && height>0) { m_diagramPanX=std::clamp(m_diagramPanX+(event.x-m_diagramDragX)/width,-0.95,0.95); m_diagramPanY=std::clamp(m_diagramPanY+(event.y-m_diagramDragY)/height,-0.95,0.95); } m_diagramDragX=event.x; m_diagramDragY=event.y; } return; }
+    if (m_visualVisible) return;
     if (m_commandSelecting && m_searchBar.isOpen()) {
         (void)placeCommandCaretAt(event.x, event.y, true, true);
         return;
@@ -1552,6 +1805,8 @@ void Application::handleMouseMove(const input::MouseMoveEvent& event) {
 }
 
 void Application::handleScroll(const input::ScrollEvent& event) {
+    if (m_diagramPreviewVisible) { if (std::isfinite(event.yOffset)) m_diagramZoom=std::clamp(m_diagramZoom*std::pow(1.15,std::clamp(event.yOffset,-4.0,4.0)),1.0,8.0); return; }
+    if (m_visualVisible) return;
     if (!std::isfinite(event.yOffset) || event.yOffset == 0.0 || m_settingsPanelVisible) {
         return;
     }
@@ -2029,8 +2284,10 @@ bool Application::saveActiveTaskContext() {
 }
 
 bool Application::activateTask(std::string_view id) {
+    if (m_gitBranchFuture.valid()) { setCommandStatus("Wait for branch switching to finish", true); return false; }
     if (m_debugAdapter.alive()) { setCommandStatus("Stop the debugger before switching tasks", true); return false; }
     if (!saveDocument()) return false;
+    if (!checkpointInactiveEdits()) return false;
     auto board = m_taskBoard;
     const std::string targetId(id);
     if (!m_activeTaskId.empty()) {
@@ -2072,9 +2329,39 @@ bool Application::activateTask(std::string_view id) {
     return true;
 }
 
+bool Application::checkpointInactiveEdits() {
+    const bool dirty = std::any_of(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [](const OpenDocument& file) { return file.document.dirty(); });
+    if (!dirty) return true;
+    if (!m_hasDocument || !m_hasProject || m_settingsRoot.empty()) {
+        setStatus("Cannot protect inactive unsaved edits; keep the project open", true); return false;
+    }
+    return checkpointRecovery();
+}
+
 bool Application::checkpointRecovery() {
     if (!m_hasProject || !m_hasDocument || m_settingsRoot.empty()) return false;
     if (m_recoveryFile.empty()) m_recoveryFile = std::filesystem::path(m_settingsRoot).parent_path() / "Recovery" / (workspace::newTaskId() + ".json");
+    std::string firstInactiveError;
+    for (const auto& file : m_inactiveDocuments) {
+        if (!file.document.dirty()) continue;
+        workspace::recovery::Snapshot inactive;
+        inactive.project = m_project.root().generic_string(); inactive.file = file.path; inactive.baseline = file.diskContents;
+        std::string inactiveError;
+        if (!file.document.serializeForFile(file.diskContents, inactive.contents, inactiveError)) {
+            if (firstInactiveError.empty()) firstInactiveError = "Recovery could not protect " + file.path + ": " + inactiveError;
+            continue;
+        }
+        inactive.line = file.document.cursorLine(); inactive.column = file.document.cursorColumn(); inactive.firstLine = file.firstLine;
+        const auto key = inactive.project + '\0' + file.path;
+        auto& destination = m_inactiveRecoveryFiles[key];
+        const auto recoveryRoot = std::filesystem::path(m_settingsRoot).parent_path() / "Recovery";
+        if (destination.empty() || destination.parent_path() != recoveryRoot) destination = recoveryRoot / (workspace::newTaskId() + ".json");
+        workspace::recovery::Snapshot existing;
+        if ((!workspace::recovery::read(destination, existing, inactiveError) || existing != inactive) &&
+            !workspace::recovery::write(destination, inactive, inactiveError)) {
+            if (firstInactiveError.empty()) firstInactiveError = "Recovery could not protect " + file.path + ": " + inactiveError;
+        }
+    }
     workspace::recovery::Snapshot snapshot;
     snapshot.project = m_project.root().generic_string(); snapshot.file = m_filePath;
     snapshot.baseline = m_diskContents;
@@ -2090,7 +2377,10 @@ bool Application::checkpointRecovery() {
     // removed or edited outside Lucid since the previous checkpoint.
     if (m_cachedRecoverySnapshot && m_cachedRecoveryPath == m_recoveryFile && *m_cachedRecoverySnapshot == snapshot) {
         workspace::recovery::Snapshot onDisk;
-        if (workspace::recovery::read(m_recoveryFile, onDisk, error) && onDisk == snapshot) return true;
+        if (workspace::recovery::read(m_recoveryFile, onDisk, error) && onDisk == snapshot) {
+            if (!firstInactiveError.empty()) { setStatus(firstInactiveError, true); return false; }
+            return true;
+        }
     }
     if (!workspace::recovery::write(m_recoveryFile, snapshot, error)) {
         m_cachedRecoverySnapshot.reset();
@@ -2101,6 +2391,7 @@ bool Application::checkpointRecovery() {
         m_cachedRecoveryPath = m_recoveryFile;
         m_cachedRecoverySnapshot = std::move(snapshot);
     } else m_cachedRecoverySnapshot.reset();
+    if (!firstInactiveError.empty()) { setStatus(firstInactiveError, true); return false; }
     return true;
 }
 
@@ -2173,7 +2464,8 @@ void Application::restoreSession(const workspace::session::State& state) {
 void Application::openRecovery(bool includeHistory) {
     if (!m_hasProject || m_settingsRoot.empty() || m_settingsPanelVisible || m_compileTerminalFocused) { setStatus("Open a project to review recovery snapshots", true); return; }
     const bool currentDirty = m_hasDocument && m_document.dirty();
-    const bool currentSaved = !currentDirty || checkpointRecovery();
+    const bool inactiveDirty = std::any_of(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [](const OpenDocument& file) { return file.document.dirty(); });
+    const bool currentSaved = !(currentDirty || inactiveDirty) || checkpointRecovery();
     const std::string recoveryError = currentSaved ? std::string{} : m_statusText;
     const auto root = std::filesystem::path(m_settingsRoot).parent_path() / "Recovery";
     m_recoveryFiles.clear(); std::error_code ec;
@@ -2198,14 +2490,28 @@ void Application::openRecovery(bool includeHistory) {
         workspace::recovery::Snapshot snapshot; std::string error;
         if (!workspace::recovery::read(path, snapshot, error) || snapshot.project != m_project.root().generic_string()) continue;
         readable.push_back(path);
+        std::string disk, diskError;
+        const auto diskState = !m_project.readFile(snapshot.file, disk, diskError) ? "Disk file unavailable" :
+            disk == snapshot.contents ? "Matches disk" : disk == snapshot.baseline ? "Disk unchanged since snapshot" : "Disk changed since snapshot";
         m_recoverySummaries.push_back({snapshot.file, snapshot.contents == snapshot.baseline,
-            path.parent_path().parent_path().filename() == "History", snapshot.openFiles.size() + 1});
+            path.parent_path().parent_path().filename() == "History", snapshot.openFiles.size() + 1, diskState});
     }
     m_recoveryFiles = std::move(readable); m_recoveryPage = 0;
     m_searchBar.open(ui::PromptKind::RecoveryList); clearCommandFeedback();
     if (!currentSaved) setCommandStatus("Current edits could not be backed up; they remain open. " + recoveryError, true);
     else if (m_recoveryFiles.empty()) setCommandStatus("No recovery snapshots for this project", false);
     refreshSuggestions();
+}
+bool Application::recoverySnapshotProtected() const {
+    if (m_recoverySelected >= m_recoveryFiles.size() || !m_hasProject || m_recoveryPreview.project != m_project.root().generic_string()) return false;
+    const auto& path = m_recoveryFiles[m_recoverySelected];
+    if (m_hasDocument && m_document.dirty() && path == m_recoveryFile) return true;
+    const auto found = m_inactiveRecoveryFiles.find(m_recoveryPreview.project + '\0' + m_recoveryPreview.file);
+    if (found == m_inactiveRecoveryFiles.end() || found->second != path) return false;
+    if (m_hasDocument && m_filePath == m_recoveryPreview.file && m_document.dirty()) return true;
+    return std::any_of(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [this](const OpenDocument& file) {
+        return file.path == m_recoveryPreview.file && file.document.dirty();
+    });
 }
 void Application::refreshRecoverySuggestions() {
     struct Entry { std::string label, detail; int choice; }; std::vector<Entry> entries;
@@ -2216,6 +2522,7 @@ void Application::refreshRecoverySuggestions() {
                 const auto& summary = m_recoverySummaries[i];
                 const bool history = summary.history;
                 std::string detail = history ? "Previous saved version" : (summary.saved ? "Saved content" : "Unsaved changes");
+                detail += "; " + summary.diskState;
                 std::error_code timeError;
                 const auto written = std::filesystem::last_write_time(m_recoveryFiles[i], timeError);
                 if (!timeError) {
@@ -2229,10 +2536,9 @@ void Application::refreshRecoverySuggestions() {
     } else {
         add("Restore this snapshot", "Opens a copy; does not overwrite disk", 0);
         add("Restore as a new file", "Keeps the current file unchanged", 3);
-        const bool liveSnapshot = m_hasDocument && m_document.dirty() && m_recoverySelected < m_recoveryFiles.size() &&
-                                  m_recoveryFiles[m_recoverySelected] == m_recoveryFile;
-        add("Delete this snapshot", liveSnapshot ? "Unavailable while it protects unsaved edits" : "", 1);
+        add("Delete this snapshot", recoverySnapshotProtected() ? "Unavailable while it protects unsaved edits" : "", 1);
         add("File: " + m_recoveryPreview.file, "", 2);
+        if (m_recoverySelected < m_recoverySummaries.size()) add("Disk: " + m_recoverySummaries[m_recoverySelected].diskState, "Snapshot is not applied until restored", 2);
         add("Cursor: " + std::to_string(m_recoveryPreview.line + 1) + ":" + std::to_string(m_recoveryPreview.column + 1), "Scroll line " + std::to_string(m_recoveryPreview.firstLine + 1), 2);
         add("Text: " + std::to_string(m_recoveryPreview.contents.size()) + " bytes", !m_recoveryPreview.contents.empty() && m_recoveryPreview.contents.back() == '\n' ? "Ends in newline" : "No trailing newline", 2);
         add("Open files to restore: " + std::to_string(m_recoveryPreview.openFiles.size() + 1), "", 2);
@@ -2266,7 +2572,7 @@ void Application::applyRecovery() {
     }
     if (choice == 2 || m_recoverySelected >= m_recoveryFiles.size()) return;
     if (choice == 1) {
-        if (m_hasDocument && m_document.dirty() && m_recoveryFiles[m_recoverySelected] == m_recoveryFile) {
+        if (recoverySnapshotProtected()) {
             setCommandStatus("This snapshot protects your current unsaved edits and cannot be deleted yet", true);
             return;
         }
@@ -2278,7 +2584,7 @@ void Application::applyRecovery() {
     workspace::recovery::Snapshot snapshot; std::string error;
     if (!workspace::recovery::read(m_recoveryFiles[m_recoverySelected], snapshot, error) || snapshot != m_recoveryPreview || snapshot.project != m_project.root().generic_string()) { setCommandStatus("Snapshot changed or is unavailable; reopen recovery", true); return; }
     std::string resolveError;
-    if (m_project.resolve(snapshot.file, resolveError).empty() || m_project.isDirectory(snapshot.file)) { setCommandStatus("Invalid recovery file path", true); return; }
+    if (m_project.resolve(snapshot.file, resolveError).empty()) { setCommandStatus("Invalid recovery file path", true); return; }
     if (choice == 3) {
         const std::filesystem::path original(snapshot.file);
         const auto name = original.stem().string() + ".recovered-" + workspace::newTaskId() + original.extension().string();
@@ -2300,6 +2606,14 @@ void Application::applyRecovery() {
         }
         return;
     }
+    if (m_project.isDirectory(snapshot.file)) { setCommandStatus("The original path is now a folder; restore the snapshot as a new file", true); return; }
+    const auto dirtyCached = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [&snapshot](const OpenDocument& file) {
+        return file.path == snapshot.file && file.document.dirty();
+    });
+    if (dirtyCached != m_inactiveDocuments.end()) {
+        setCommandStatus("This file already has unsaved edits open; save a recovery copy or resolve those edits first", true);
+        return;
+    }
     const bool binaryRecovery = std::any_of(snapshot.contents.begin(), snapshot.contents.end(), [](unsigned char c) {
         return c == 0 || (c < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\f');
     });
@@ -2316,22 +2630,32 @@ void Application::applyRecovery() {
     }
     const bool fileExists = m_project.exists(snapshot.file);
     std::string currentDisk;
-    if (fileExists && !m_project.readFile(snapshot.file, currentDisk, error)) { setCommandStatus(error, true); return; }
-    if (fileExists) {
+    const bool diskReadable = fileExists && m_project.readFile(snapshot.file, currentDisk, error);
+    const bool diskBinary = diskReadable && std::any_of(currentDisk.begin(), currentDisk.end(), [](unsigned char c) {
+        return c == 0 || (c < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\f');
+    });
+    const bool diskEditable = diskReadable && !diskBinary && editor::Document::canEditLosslessly(currentDisk, error);
+    if (diskEditable) {
         openFile(snapshot.file, false);
         if (!m_hasDocument || m_filePath != snapshot.file) return;
     } else {
-        if (m_hasDocument) m_inactiveDocuments.insert(m_inactiveDocuments.begin(), OpenDocument{m_filePath, std::move(m_document), m_firstLine, m_diskContents});
+        if (m_hasDocument && m_filePath == snapshot.file && m_document.dirty()) { setCommandStatus("This file has unsaved edits; save a recovery copy first", true); return; }
+        m_inactiveDocuments.erase(std::remove_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [&snapshot](const OpenDocument& file) {
+            return file.path == snapshot.file && !file.document.dirty();
+        }), m_inactiveDocuments.end());
+        if (m_hasDocument && m_filePath != snapshot.file) m_inactiveDocuments.insert(m_inactiveDocuments.begin(), OpenDocument{m_filePath, std::move(m_document), m_firstLine, m_diskContents});
+        closeCompileTerminal(); m_languageFile.clear(); m_languageDiagnosticsFile.clear();
         m_hasDocument = true; m_filePath = snapshot.file; m_diskContents.clear();
     }
-    const bool sameAsDisk = fileExists && currentDisk == snapshot.contents;
+    const bool sameAsDisk = diskReadable && currentDisk == snapshot.contents;
     m_document = editor::Document::fromUtf8(snapshot.contents);
     m_accessibilityKey.clear();
     if (!sameAsDisk) m_document.markRecovered();
     m_diskContents = sameAsDisk ? snapshot.contents : snapshot.baseline;
     m_document.setCursor(snapshot.line, snapshot.column); m_firstLine = snapshot.firstLine; m_followCursor = false;
     m_searchBar.close(); m_syntaxValid = false; m_compileScriptValid = false; resetDiagnostics();
-    setStatus(fileExists ? "Recovery opened; review changes before saving" : "Recovery opened; original file is missing, copy the recovered text", !fileExists);
+    setStatus(diskEditable ? "Recovery opened; review changes before saving" : "Recovery opened; original file is unavailable or not editable. Save a recovery copy.", !diskEditable);
+    if (m_document.dirty() && !checkpointRecovery() && m_settingsRoot.empty()) setStatus("Recovered edits are open, but recovery storage is unavailable", true);
 }
 
 void Application::openModules() {
@@ -2345,9 +2669,9 @@ void Application::openModules() {
     refreshSuggestions();
 }
 void Application::refreshModuleSuggestions() {
-    struct Entry { std::string label, detail; int choice; };
+    struct Entry { std::string label, detail; int choice; ui::SuggestionKind kind; };
     std::vector<Entry> entries;
-    auto add = [&entries](std::string name, std::string detail, int choice) { entries.push_back({std::move(name), std::move(detail), choice}); };
+    auto add = [&entries](std::string name, std::string detail, int choice, ui::SuggestionKind kind = ui::SuggestionKind::Task) { entries.push_back({std::move(name), std::move(detail), choice, kind}); };
     const auto kind = m_searchBar.kind();
     if (kind == ui::PromptKind::ModuleList) {
         std::string query(m_searchBar.query());
@@ -2361,6 +2685,10 @@ void Application::refreshModuleSuggestions() {
         }
         add("Add module", "Preview a local manifest or GitHub package", -3);
         add("Browse GitHub modules", "Download the Lucid module catalog", -4);
+        if (m_hasDocument && m_document.hasSelection()) {
+            add("Save selection as snippet", "Insert this text literally", -8);
+            add("Save selection as template", "Use {{placeholder:text}}, {{selection}} and {{cursor}} markers", -61);
+        }
     } else if (kind == ui::PromptKind::ModuleCatalog) {
         std::string query(m_searchBar.query());
         std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -2370,8 +2698,9 @@ void Application::refreshModuleSuggestions() {
             std::transform(searchable.begin(), searchable.end(), searchable.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (searchable.find(query) == std::string::npos) continue;
             const bool installed = std::any_of(m_modules.begin(), m_modules.end(), [&](const auto& m) { return m.id == entry.id; });
+            const bool unsupported = std::any_of(entry.requirements.begin(), entry.requirements.end(), [](const std::string& requirement) { return !modules::supportsCapability(requirement); });
             add(entry.name.empty() ? entry.id : entry.name,
-                (entry.description.empty() ? entry.package : entry.description) + "  " + entry.version + (installed ? "  Installed" : ""), static_cast<int>(i));
+                (entry.description.empty() ? entry.package : entry.description) + "  " + entry.version + (installed ? "  Installed" : "") + (unsupported ? "  Requires a newer Lucid" : ""), static_cast<int>(i));
         }
         if (!query.empty() && entries.empty() && !m_moduleFetchFuture.valid() && !m_commandStatusIsError) add("No matching modules", "Try a different search", -6);
         if (query.empty()) add("Refresh catalog", "Check GitHub for modules", -5);
@@ -2379,24 +2708,1184 @@ void Application::refreshModuleSuggestions() {
         const auto& m = m_modulePreview;
         add(m.name + "  " + m.version, m.description.empty() ? m.id : m.description, 101);
         add("Source", m_modulePreviewSource, 101);
-        add("Project files", m.project ? "Requested - unavailable" : "No access", 101);
-        add("Network", m.network ? "Requested - unavailable" : "No access", 101);
-        add("Processes", m.processes ? "Requested - unavailable" : "No access", 101);
-        add("Settings", m.settings ? "Requested - unavailable" : "No access", 101);
-        for (const auto& command : m.commands) add(command.title, command.insert, 101);
+        const bool writesQuery = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "prepare-cmake-query"; });
+        const bool writesCache = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "edit-cmake-options"; });
+        const bool savesResponse = std::find(m.requirements.begin(),m.requirements.end(),"api-response-save-v1") != m.requirements.end();
+        const bool pythonDiscovery = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "browse-python-environments" || c.action == "manage-python-environments"; });
+        const bool ctestAction = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "run-ctest" || c.action == "run-rust-ownership"; });
+        const bool hexAction = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "hex-editor"; });
+        const auto projectAccess = !m.project ? std::string("No access") : std::string("Read project files on request") + (hexAction ? "; save chosen binary" : "") + (pythonDiscovery ? "; inspect user environments and PATH" : "") + (writesQuery ? "; create CMake query" : "") + (writesCache ? "; update reviewed CMake cache option" : "") + (savesResponse ? "; create response file after confirmation" : "");
+        add("Project files", projectAccess, 101);
+        add("Network", m.network ? (m.error.empty() ? "Declared network actions require confirmation" : "Requested - unavailable") : ((pythonDiscovery || ctestAction) && m.processes ? "Chosen programs or tests may access network" : "No access"), 101);
+        add("Processes", m.processes ? (m.error.empty() ? "Runs declared tools and scripts on request; their effects depend on the selected program" : "Requested - unavailable") : "No access", 101);
+        add("Devices", m.devices ? "Can open devices or flash hardware after confirmation; hardware may reset or be erased" : "No access", 101);
+        add("Settings", m.settings ? (m.error.empty() ? std::string("Stores local preferences") + (pythonDiscovery ? "; interpreter choice" : "") + (ctestAction ? "; test names, statuses and durations" : "") : "Requested - unavailable") : "No access", 101);
+        for (const auto& requirement : m.requirements) add("Requires " + requirement, m.error.empty() ? "Supported" : m.error, 101);
+        for (const auto& command : m.commands) add(command.title, command.action.empty() ? (command.snippet ? "Snippet: " : "Text: ") + command.insert : (command.action == "compare-visual-images" || command.action == "compare-visual-configured") ? "Read project screenshots and optional comparison settings" : command.action == "web-preview" ? "Render trusted project code on macOS after confirmation" : command.action == "flash-firmware" ? "Run OpenOCD and flash hardware after explicit confirmation" : command.action == "serial-monitor" ? "Open a selected serial device only after confirmation" : command.action == "identify-usb-boards" ? "Read USB descriptors after confirmation using a project mapping" : command.action == "board-profile" ? "Inspect the current OpenOCD profile without execution" : command.action == "fetch-pull-request" ? "Fetch GitHub pull request data after confirmation" : command.action == "configured-container-actions" ? "Review configured Compose actions before execution" : command.action == "inspect-containers" ? "Run an explicitly selected container runtime after confirmation" : command.action == "review-dependency-risk" ? "Review npm, Go or Cargo versions against OSV after confirmation" : command.action == "edit-api-collection" ? "Edit templates in the current document without sending" : (command.action == "open-api-requests" || command.action == "open-api-environment") ? "Review HTTP requests before sending" : command.action == "compile-shader" ? "Run the selected compiler on the saved shader" : command.action == "release-note-builder" ? "Read saved tasks and local Git commits" : command.action == "accessibility-audit" ? "Check the current HTML buffer locally" : (command.action == "sql-query" || command.action == "sql-explain" || command.action == "sql-query-bound" || command.action == "sql-explain-bound") ? "Read a project-local standalone SQLite snapshot" : command.action == "diagram-preview" ? "Render the current Mermaid buffer locally" : command.action == "run-rust-ownership" ? "Run Cargo and project scripts after confirmation" : command.action == "review-rust-ownership" ? "Read project-local Rust compiler diagnostics" : command.action == "crash-dump-reader" ? "Read a project-local minidump without sending it" : command.action == "inspect-toolchain-profiles" ? "Read declared toolchain profiles without running tools" : command.action == "inspect-svd-registers" ? "Read project-local SVD register metadata" : command.action == "review-linker-map" ? "Read a project-local GNU ld linker map" : command.action == "hex-editor" ? "Read and save a selected project binary with conflict checks" : command.action == "run-ctest" ? "Run CTest discovery and selected project tests" : (command.action == "browse-python-environments" || command.action == "manage-python-environments" || command.action == "install-python-pylsp") ? "Inspect Python locations; validation and creation run the chosen interpreter" : (command.action == "log-correlation" || command.action == "log-correlation-json") ? "Read selected project-local log files" : command.action == "design-token-explorer" ? "Read a project-local design token file" : command.action == "compare-localization" ? "Read two project-local localization files" : command.action == "binary-inspector" ? "Read a project-local binary without running it" : command.action == "benchmark-comparison" ? "Read two project-local benchmark reports" : (command.action == "git-file-history" || command.action == "git-range-history") ? "Run Git locally to inspect file or selected-line history" : command.action == "scan-secrets" ? "Read project files for a local secret scan" : (command.action == "coverage-lcov" || command.action == "coverage-cobertura") ? "Read a coverage report inside the project" : command.action == "edit-cmake-options" ? "Review and update a Boolean CMake cache option" : command.action == "browse-cmake" ? "Read existing CMake build metadata" : command.action == "prepare-cmake-query" ? "Create a CMake query in a chosen build directory" : command.action == "markdown-external-links" ? "Check one reviewed URL after confirmation" : command.action == "markdown-local-links" ? "Check local project paths; no network" : command.action == "markdown-outline" || command.action == "markdown-preview" ? "Read the current Markdown buffer" : command.action == "explain-debug-local" ? "Explain debugger state with local AI" : "Explain the current diagnostic with local AI", 101);
         add("Install module", m.error.empty() ? "Installs disabled; enable it when ready" : m.error, 100);
     } else if (m_moduleSelected < m_modules.size()) {
         const auto& m = m_modules[m_moduleSelected];
         if (kind == ui::PromptKind::ModuleActions) {
             add(m.enabled ? "Disable module" : "Enable module", m.error, 0);
-            if (m.enabled) add("Run a text command", "", 1);
+            if (m.enabled) add("Run a module command", "", 1);
             add("Remove module", "Deletes its module folder", 2);
-            add("Project files", m.project ? "Requested - unavailable" : "No access", 3);
-            add("Network", m.network ? "Requested - unavailable" : "No access", 3);
-            add("Processes", m.processes ? "Requested - unavailable" : "No access", 3);
-            add("Settings", m.settings ? "Requested - unavailable" : "No access", 3);
+            const bool writesQuery = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "prepare-cmake-query"; });
+        const bool writesCache = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "edit-cmake-options"; });
+        const bool savesResponse = std::find(m.requirements.begin(),m.requirements.end(),"api-response-save-v1") != m.requirements.end();
+            const bool pythonDiscovery = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "browse-python-environments" || c.action == "manage-python-environments"; });
+            const bool ctestAction = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "run-ctest" || c.action == "run-rust-ownership"; });
+            const bool hexAction = std::any_of(m.commands.begin(), m.commands.end(), [](const modules::Command& c) { return c.action == "hex-editor"; });
+            const auto projectAccess = !m.project ? std::string("No access") : std::string("Read project files on request") + (hexAction ? "; save chosen binary" : "") + (pythonDiscovery ? "; inspect user environments and PATH" : "") + (writesQuery ? "; create CMake query" : "") + (writesCache ? "; update reviewed CMake cache option" : "") + (savesResponse ? "; create response file after confirmation" : "");
+            add("Project files", projectAccess, 3);
+            add("Network", m.network ? (m.error.empty() ? "Declared network actions require confirmation" : "Requested - unavailable") : ((pythonDiscovery || ctestAction) && m.processes ? "Chosen programs or tests may access network" : "No access"), 3);
+            add("Processes", m.processes ? (m.error.empty() ? "Runs declared tools and scripts on request; their effects depend on the selected program" : "Requested - unavailable") : "No access", 3);
+            add("Devices", m.devices ? "Can open devices or flash hardware after confirmation; hardware may reset or be erased" : "No access", 3);
+            add("Settings", m.settings ? (m.error.empty() ? std::string("Stores local preferences") + (pythonDiscovery ? "; interpreter choice" : "") + (ctestAction ? "; test names, statuses and durations" : "") : "Requested - unavailable") : "No access", 3);
+        } else if (m.enabled && m_rustOwnershipShowing) {
+            add(m_rustOwnershipSelected ? "< Back to diagnostics" : "< Back to module commands", "", -59);
+            m_rustOwnershipSpans.clear();
+            const auto safe = [](const std::string& value) { std::string error; return value.size() <= 4096 && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(value, error) ? value : std::string("(unreadable text)"); };
+            if(m_rustRunStage==2) {add("Review Cargo check","Runs Cargo, build scripts and procedural macros with your privileges; --offline does not sandbox scripts",-60,ui::SuggestionKind::ReadOnlyText);add("Cargo executable",safe(m_rustRunPlan.cargo.generic_string()),-60,ui::SuggestionKind::ReadOnlyText);for(const auto& arg:m_rustRunPlan.arguments)add("Argument",safe(arg),-60,ui::SuggestionKind::ReadOnlyText);add("Confirm Cargo check","Runs project code; output may contain sensitive data",-403);}
+            else if(m_rustRunStage==3) add("Running Cargo check…","Escape requests cancellation; project scripts may have changed files",-60,ui::SuggestionKind::ReadOnlyText);
+            else if (m_rustOwnershipSelected && *m_rustOwnershipSelected < m_rustOwnershipDiagnostics.size()) {
+                const auto& diagnostic = m_rustOwnershipDiagnostics[*m_rustOwnershipSelected]; std::size_t previewRows = 0;
+                const auto message = [&](const std::string& title, const std::string& value) {
+                    if (value.empty() || previewRows >= 256) return;
+                    add(title, "Compiler-provided text", -60, ui::SuggestionKind::ReadOnlyText); ++previewRows;
+                    const auto portion = std::string_view(value).substr(0, std::min<std::size_t>(value.size(), 4096)); std::string error;
+                    if (!editor::Document::canEditLosslessly(portion, error)) { add("Text unavailable in preview", "", -60, ui::SuggestionKind::ReadOnlyText); ++previewRows; return; }
+                    for (const auto& line : text::wrapLines(portion, 58)) { if (previewRows >= 256) break; add(line.empty() ? " " : line, "", -60, ui::SuggestionKind::ReadOnlyText); ++previewRows; }
+                };
+                const auto span = [&](const modules::RustOwnershipSpan& item, const std::string& origin) {
+                    if (m_rustOwnershipSpans.size() >= 512) return;
+                    const auto index = static_cast<int>(m_rustOwnershipSpans.size()); m_rustOwnershipSpans.push_back(item);
+                    add(safe(item.file) + ":" + std::to_string(item.lineStart) + ":" + std::to_string(item.columnStart), origin + (item.label.empty() ? "" : " · " + safe(item.label)) + (item.sourceLines.empty() ? " · no compiler source text; unverified" : " · compiler source text will be checked"), index);
+                    if (item.hasReplacement) message("Suggested replacement (not applied)", item.replacement + "\nApplicability: " + item.applicability);
+                };
+                message(diagnostic.code, diagnostic.message); message("Compiler explanation", diagnostic.explanation);
+                for (const auto& item : diagnostic.spans) span(item, item.primary ? "Primary span" : "Related span");
+                for (const auto& note : diagnostic.notes) { message("Compiler " + safe(note.level), note.message); for (const auto& item : note.spans) span(item, "Related " + safe(note.level) + " span"); }
+                if (previewRows >= 256 || m_rustOwnershipSpans.size() >= 512) add("Preview limited", "Some compiler details were omitted", -60, ui::SuggestionKind::ReadOnlyText);
+            } else for (std::size_t i = 0; i < m_rustOwnershipDiagnostics.size(); ++i) {
+                const auto& diagnostic = m_rustOwnershipDiagnostics[i];
+                const auto end = diagnostic.message.find('\n'); add(safe(diagnostic.code), safe(diagnostic.message.substr(0, end)), static_cast<int>(i));
+            }
+        } else if (m.enabled && m_crashShowing) {
+            add("< Back to module commands", "", -57);
+            if(m_crashIsGdb) {
+                const auto safe=[](const std::string& value){std::string error;return editor::Document::canEditLosslessly(value,error) ? value : std::string("(unreadable text)");};
+                add("GDB backtrace text", "Unverified supplied text; no source navigation or symbolication", -58, ui::SuggestionKind::ReadOnlyText);
+                if(!m_crashGdb.signal.empty()) add("Reported signal",safe(m_crashGdb.signal),-58,ui::SuggestionKind::ReadOnlyText);
+                if(m_crashGdb.incomplete) add("Incomplete backtrace",std::to_string(m_crashGdb.ignoredLines)+" ignored lines or parser limits reached",-58,ui::SuggestionKind::ReadOnlyText);
+                std::size_t shown=0; bool limited=false;
+                for(const auto& thread:m_crashGdb.threads){add("Reported thread " + (thread.number ? std::to_string(thread.number) : std::string("unlabelled")),safe(thread.heading),-58,ui::SuggestionKind::ReadOnlyText);for(const auto& frame:thread.frames){if(shown++>=512){limited=true;break;}add("Frame #"+std::to_string(frame.index),safe(frame.text)+" · unverified",-58,ui::SuggestionKind::ReadOnlyText);}if(limited)break;}
+                if(limited) add("Frame display limited","Only the first 512 frames are shown",-58,ui::SuggestionKind::ReadOnlyText);
+            } else {
+            if (!m_crashDump.format.empty()) add(m_crashDump.format, m_crashDump.architecture.empty() ? "Architecture unavailable" : m_crashDump.architecture, -58, ui::SuggestionKind::ReadOnlyText);
+            if (m_crashDump.exception.present) {
+                std::ostringstream detail; detail << "Code 0x" << std::hex << m_crashDump.exception.code << " · address 0x" << m_crashDump.exception.address;
+                add("Exception in thread " + std::to_string(m_crashDump.exception.threadId), detail.str(), -58, ui::SuggestionKind::ReadOnlyText);
+            }
+            if (!m_crashFuture.valid() && m_crashDump.error.empty()) add("Load source map", "Project-local TSV or Breakpad .sym; mapping is unverified", -220);
+            if (!m_crashMapIdentity.empty()) add("Source map identity", m_crashMapIdentity, -58, ui::SuggestionKind::ReadOnlyText);
+            std::size_t frameCount = 0; bool framesLimited = false;
+            for (const auto& thread : m_crashDump.threads) {
+                std::ostringstream detail; detail << "Stack 0x" << std::hex << thread.stackStart << std::dec << " · " << thread.stackBytes << " bytes";
+                add("Thread " + std::to_string(thread.id), detail.str(), -58, ui::SuggestionKind::ReadOnlyText);
+                if (thread.framesIncomplete) add("Incomplete frame information", "Candidates are not a reliable stack unwind", -58, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& frame : thread.frames) {
+                    if (frameCount >= 512) { framesLimited = true; break; }
+                    const auto frameIndex = frameCount++; std::ostringstream addresses; addresses << "PC 0x" << std::hex << frame.address << " · SP 0x" << frame.stackPointer;
+                    const auto location = modules::locateCrashAddress(frame.address, m_crashDump.modules, m_crashSourceMap);
+                    std::string textError; const bool navigable = !location.path.empty() && editor::Document::canEditLosslessly(location.path, textError);
+                    if (navigable) addresses << " · source mapping unverified · line " << std::dec << location.line;
+                    add(frame.source == modules::CrashFrameSource::Context ? "Context frame" : "Heuristic frame candidate", addresses.str(), navigable ? static_cast<int>(frameIndex) : -58, navigable ? ui::SuggestionKind::Task : ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+            if (framesLimited) add("Frame display limited", "Only the first 512 frames are shown", -58, ui::SuggestionKind::ReadOnlyText);
+            for (const auto& module : m_crashDump.modules) {
+                std::string error; const bool safe = module.name.size() <= 4096 && std::none_of(module.name.begin(), module.name.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(module.name, error);
+                std::ostringstream detail; detail << "Base 0x" << std::hex << module.base << std::dec << " · " << module.size << " bytes";
+                add(safe ? module.name : "(unreadable module name)", detail.str(), -58, ui::SuggestionKind::ReadOnlyText);
+            }
+            }
+        } else if (m.enabled && m_toolchainShowing) {
+            add(m_toolchainSelected ? "< Back to profiles" : "< Back to module commands", "", -193);
+            const auto safe=[](const std::string& value) { std::string error; return value.size()<=4096 && std::none_of(value.begin(),value.end(),[](unsigned char c) { return c<32 || c==127; }) && editor::Document::canEditLosslessly(value,error) ? value : std::string("(unreadable text)"); };
+            if (m_targetConfigureStage>=3) {
+                if(m_targetConfigureStage==3) {add("Review CMake configure", "Runs selected executable and project scripts with your privileges; build files will change",-194,ui::SuggestionKind::ReadOnlyText);add("CMake executable",safe(m_targetConfigurePlan.executable.generic_string()),-194,ui::SuggestionKind::ReadOnlyText);add("Declared target",safe(m_targetConfigurePlan.declaredTarget)+" · informational; no target flag inferred",-194,ui::SuggestionKind::ReadOnlyText);for(const auto& arg:m_targetConfigurePlan.arguments) add("Argument",safe(arg),-194,ui::SuggestionKind::ReadOnlyText);add("Confirm CMake configure", "Executes project code and changes build files",-256);}
+                else if(m_targetConfigureFuture.valid()) add("Configuring target…","Escape requests cancellation; build files may be changed",-194,ui::SuggestionKind::ReadOnlyText);
+                else {add("CMake configure result",m_targetConfigureResult.cancelled?"Cancellation requested; build files may be changed":m_targetConfigureResult.error.empty()?"Exit code " + std::to_string(m_targetConfigureResult.exitCode):safe(m_targetConfigureResult.error),-194,ui::SuggestionKind::ReadOnlyText);if(m_targetConfigureResult.outputTruncated) add("Output truncated","Output limited to 1 MiB",-194,ui::SuggestionKind::ReadOnlyText);std::string textError;if(editor::Document::canEditLosslessly(m_targetConfigureResult.output,textError)){auto text=m_targetConfigureResult.output;for(char& c:text) if(static_cast<unsigned char>(c)<32 && c!='\n' && c!='\t') c=' ';std::size_t pos=0,n=0;while(pos<text.size() && n++<100){auto end=text.find('\n',pos);auto line=text.substr(pos,end==std::string::npos?std::string::npos:end-pos);if(line.size()>1024)line.resize(1024);add(safe(line),"CMake output",-194,ui::SuggestionKind::ReadOnlyText);if(end==std::string::npos)break;pos=end+1;}}}
+            } else if (m_toolchainSaveFuture.valid()) add("Saving target profiles…", "Escape requests cancellation", -194,ui::SuggestionKind::ReadOnlyText);
+            else if (m_toolchainEditMode>=4) {
+                add("Review target change", "No tools run; saving normalizes JSON formatting", -194,ui::SuggestionKind::ReadOnlyText);
+                if (m_toolchainEditMode!=4 && m_toolchainSelected && *m_toolchainSelected<m_toolchainProfiles.size()) add("Existing target",safe(m_toolchainProfiles[*m_toolchainSelected].name),-194,ui::SuggestionKind::ReadOnlyText);
+                if (m_toolchainEditMode!=6) {const auto& p=m_toolchainEditProfile; add("New target",safe(p.name)+" · "+safe(p.targetTriple),-194,ui::SuggestionKind::ReadOnlyText); auto show=[&](const char* title,const std::filesystem::path& path){if(!path.empty()) add(title,safe(path.generic_string()),-194,ui::SuggestionKind::ReadOnlyText);};show("Toolchain file",p.cmakeToolchainFile);show("C compiler",p.cCompiler);show("C++ compiler",p.cppCompiler);show("Sysroot",p.sysroot);}
+                add("Confirm target save", "Replace the original file only if unchanged", -253);
+            } else if (m_toolchainFuture.valid()) add("Reading toolchain profiles…", "Escape cancels", -194, ui::SuggestionKind::ReadOnlyText);
+            else if (m_toolchainSelected && *m_toolchainSelected<m_toolchainProfiles.size()) {
+                const auto& profile=m_toolchainProfiles[*m_toolchainSelected];
+                const auto showPath=[&](const char* name,const std::filesystem::path& path) { try { const auto raw=path.generic_u8string(); const std::string text(reinterpret_cast<const char*>(raw.data()),raw.size()); add(name,path.empty() ? "Not specified" : safe(text) + " · unverified",-194,ui::SuggestionKind::ReadOnlyText); } catch (const std::exception&) { add(name,"Path cannot be displayed",-194,ui::SuggestionKind::ReadOnlyText); } };
+                add("Target triple",safe(profile.targetTriple) + " · declared, not verified",-194,ui::SuggestionKind::ReadOnlyText);
+                showPath("CMake toolchain",profile.cmakeToolchainFile); showPath("C compiler",profile.cCompiler); showPath("C++ compiler",profile.cppCompiler); showPath("Sysroot",profile.sysroot);
+                add("Inspection only", "No compiler or toolchain file was executed; paths may be unavailable",-194,ui::SuggestionKind::ReadOnlyText);
+                if(std::find(m.requirements.begin(),m.requirements.end(),"toolchain-configure-v1")!=m.requirements.end()) add("Configure this target…","Review executable and arguments before running",-255);
+                if(std::find(m.requirements.begin(),m.requirements.end(),"toolchain-target-edit-v1")!=m.requirements.end()) {add("Replace target…","Review changes before saving",-251);add("Remove target…","Review removal before saving",-252);}
+            } else { if(std::find(m.requirements.begin(),m.requirements.end(),"toolchain-target-edit-v1")!=m.requirements.end()) add("Add target…","Review before saving",-250); if (m_toolchainProfiles.empty()) add("No profiles", "Add profiles to the selected JSON file",-194,ui::SuggestionKind::ReadOnlyText); for (std::size_t i=0;i<m_toolchainProfiles.size();++i) add(safe(m_toolchainProfiles[i].name),safe(m_toolchainProfiles[i].targetTriple) + " · select for details",static_cast<int>(i)); }
+        } else if (m.enabled && m_svdShowing) {
+            add(m_svdSelected ? "< Back to registers" : "< Back to module commands", "", -221);
+            add("Declared metadata only", "No hardware access; peripheral arrays, derived fields and nested or derived clusters may be missing", -222, ui::SuggestionKind::ReadOnlyText);
+            const auto safe=[](const std::string& v) { std::string e; return v.size()<=1024 && std::none_of(v.begin(),v.end(),[](unsigned char c){return c<32 || c==127;}) && editor::Document::canEditLosslessly(v,e) ? v : std::string("(unreadable name)"); };
+            if (m_svdFuture.valid()) add("Reading SVD…", "Escape cancels", -222, ui::SuggestionKind::ReadOnlyText);
+            else if (!m_svdRegisters.error.empty()) add("SVD inspection failed", safe(m_svdRegisters.error), -222, ui::SuggestionKind::ReadOnlyText);
+            else if (m_svdSelected && *m_svdSelected<m_svdRegisters.registers.size()) {
+                const auto& reg=m_svdRegisters.registers[*m_svdSelected]; std::ostringstream detail; detail << "Address 0x" << std::hex << reg.address << std::dec << " · " << (reg.sizeBits ? std::to_string(reg.sizeBits) + " bits" : "size unknown");
+                if (reg.resetValue) detail << " · reset 0x" << std::hex << *reg.resetValue;
+                add(safe(reg.peripheral)+"."+safe(reg.name),detail.str(),-222,ui::SuggestionKind::ReadOnlyText);
+                const auto description=[](std::string value){for(char& c:value) if(static_cast<unsigned char>(c)<32 || c==127) c=' ';std::string error;return editor::Document::canEditLosslessly(value,error)?value:std::string("(unreadable description)");};
+                if(!reg.description.empty()) add("Register description",description(reg.description),-222,ui::SuggestionKind::ReadOnlyText);
+                std::size_t enumShown=0; bool enumLimited=false;
+                for (const auto& field:reg.fields) {
+                    add(safe(field.name),"Bits " + std::to_string(field.offset) + "–" + std::to_string(field.offset+field.width-1) + (field.access.empty() ? " · access unspecified" : " · " + safe(field.access)), -222,ui::SuggestionKind::ReadOnlyText);
+                    if(!field.description.empty()) add("Field description: "+safe(field.name),description(field.description),-222,ui::SuggestionKind::ReadOnlyText);
+                    for(const auto& item:field.values) {if(enumShown>=1000){enumLimited=true;break;}++enumShown;std::ostringstream info;if(item.value) info << "Value 0x" << std::hex << *item.value;else info << "No numeric value";if(item.isDefault) info << " · default";if(!item.usage.empty()) info << " · " << safe(item.usage);info << " · declared, unverified";add(safe(field.name)+": "+safe(item.name),info.str(),-222,ui::SuggestionKind::ReadOnlyText);}
+                }
+                if(enumLimited) add("Enumeration display limited","Only the first 1000 declared choices are shown",-222,ui::SuggestionKind::ReadOnlyText);
+            } else { for (const auto& warning : m_svdRegisters.warnings) add("SVD limitation",safe(warning),-222,ui::SuggestionKind::ReadOnlyText);
+                for (std::size_t i=0;i<m_svdRegisters.registers.size();++i) { const auto& reg=m_svdRegisters.registers[i]; std::ostringstream detail; detail << "Address 0x" << std::hex << reg.address << std::dec << " · " << reg.fields.size() << " fields"; add(safe(reg.peripheral)+"."+safe(reg.name),detail.str(),static_cast<int>(i)); } }
+        } else if (m.enabled && m_linkerShowing) {
+            add("< Back to module commands", "", -53);
+            const auto safe = [](const std::string& value) { std::string error; return value.size() <= 1024 && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(value, error) ? value : std::string("(unreadable name)"); };
+            for (const auto& region : m_linkerMap.regions) {
+                std::ostringstream detail; detail << "VMA estimate " << region.used << "/" << region.length << " bytes · explicit LMA " << region.loadUsed << " bytes";
+                add("Region: " + safe(region.name), detail.str(), -56, ui::SuggestionKind::ReadOnlyText);
+            }
+            if (m_linkerSectionOffset) add("< Previous 256 sections", "", -54);
+            if (m_linkerSectionOffset + 256 < m_linkerMap.sections.size()) add("Next 256 sections >", "", -55);
+            for (std::size_t i = m_linkerSectionOffset; i < std::min(m_linkerSectionOffset + 256, m_linkerMap.sections.size()); ++i) {
+                const auto& section = m_linkerMap.sections[i]; std::ostringstream detail;
+                detail << "VMA 0x" << std::hex << section.address << std::dec << " · " << section.size << " bytes";
+                if (section.hasLoadAddress) detail << " · LMA 0x" << std::hex << section.loadAddress;
+                add("Section: " + safe(section.name), detail.str(), -56, ui::SuggestionKind::ReadOnlyText);
+            }
+        } else if (m.enabled && m_hexShowing) {
+            add("< Close binary", "Unsaved edits require confirmation", -40);
+            if (m_hexFile) {
+                const auto& bytes = m_hexFile->buffer().bytes();
+                add("Save binary", bytes == m_hexBaseline ? "No unsaved changes" : "Checks for external changes before writing", -41);
+                add("Undo", "Undo the most recent byte edit", -42);
+                add("Redo", "Redo a byte edit", -43);
+                add("Edit at offset", "Overwrite bytes; no insertion or deletion", -44);
+                add("Insert bytes", "Insert at an offset, including the end of the file", -52);
+                add("Select byte range", "Choose an offset and length", -49);
+                if (m_hexFile->buffer().selectionLength()) {
+                    add("Overwrite selection", std::to_string(m_hexFile->buffer().selectionLength()) + " bytes selected", -50);
+                    add("Delete selection", "Undoable until saved", -51);
+                }
+                add("Find bytes", "Search hexadecimal bytes", -45);
+                if (!m_hexLastNeedle.empty()) {
+                    add("Find next match", "Continue the last byte search; wraps at the end", -205);
+                    add("Find previous match", "Continue backwards; wraps at the beginning", -206);
+                }
+                add("Go to offset", "Decimal or 0x-prefixed hexadecimal", -48);
+                if (m_hexViewOffset > 0) add("< Previous 256 bytes", "", -46);
+                if (m_hexViewOffset + 256 < bytes.size()) add("Next 256 bytes >", "", -47);
+                for (std::size_t row = 0; row < 16 && m_hexViewOffset + row * 16 < bytes.size(); ++row) {
+                    const auto offset = m_hexViewOffset + row * 16; const auto count = std::min<std::size_t>(16, bytes.size() - offset);
+                    std::ostringstream label; label << "0x" << std::hex << offset << "  "; std::string ascii;
+                    for (std::size_t j = 0; j < count; ++j) { const auto byte = static_cast<unsigned char>(bytes[offset + j]); label << modules::HexBuffer::formatByte(byte) << ' '; ascii += byte >= 32 && byte < 127 ? static_cast<char>(byte) : '.'; }
+                    const auto selectedStart = m_hexFile->buffer().selectionOffset(), selectedLength = m_hexFile->buffer().selectionLength();
+                    const bool selected = selectedLength && offset < selectedStart + selectedLength && selectedStart < offset + count;
+                    add(label.str(), ascii + (selected ? " · contains selected bytes" : "") + " · Enter edits from this offset", static_cast<int>(row));
+                }
+            }
+        } else if (m.enabled && m_ctestShowing) {
+            add(m_ctestRerunSelected ? "< Back to rerun candidates" : m_ctestRerunShowing || m_ctestSelected ? "< Back to tests" : "< Back to module commands", "", -36);
+            if (m_ctestRerunShowing) {
+                if (m_ctestRunFuture.valid()) add("Running selected test…", "Escape requests cancellation; earlier completed runs remain recorded", -38, ui::SuggestionKind::ReadOnlyText);
+                else if (m_ctestRerunSelected && *m_ctestRerunSelected < m_ctestRerunCandidates.size()) {
+                    const auto& candidate = m_ctestRerunCandidates[*m_ctestRerunSelected];
+                    add("Confirm rerun: " + candidate.name, "Runs project code; test is rediscovered and checked before execution", -217);
+                    add("History is partial", "Only saved observations are included; fixture setup and cleanup are excluded", -38, ui::SuggestionKind::ReadOnlyText);
+                } else {
+                    add("Review recorded failures", "Latest saved observations only; history may omit tests and runs", -38, ui::SuggestionKind::ReadOnlyText);
+                    for (std::size_t i = 0; i < m_ctestRerunCandidates.size(); ++i) {
+                        const auto& candidate = m_ctestRerunCandidates[i];
+                        const char* status = candidate.status == modules::FailedRerunStatus::Ready ? "Select to review rerun" : candidate.status == modules::FailedRerunStatus::NotDiscovered ? "Not found in discovery" : candidate.status == modules::FailedRerunStatus::AmbiguousDiscovery ? "Ambiguous discovery" : candidate.status == modules::FailedRerunStatus::AmbiguousResult ? "Ambiguous saved result" : "Name cannot be targeted exactly";
+                        std::string error; const bool safe = editor::Document::canEditLosslessly(candidate.name, error) && std::none_of(candidate.name.begin(), candidate.name.end(), [](unsigned char c) { return c < 32 || c == 127; });
+                        add(safe ? candidate.name : "(unreadable test name)", std::string(status) + " · last observed saved run " + std::to_string(candidate.lastObservedRun + 1), candidate.status == modules::FailedRerunStatus::Ready ? static_cast<int>(i) : -38, candidate.status == modules::FailedRerunStatus::Ready ? ui::SuggestionKind::Task : ui::SuggestionKind::ReadOnlyText);
+                    }
+                    if (m_ctestRerunCandidates.empty()) add("No recorded failures", "This does not establish that all tests passed", -38, ui::SuggestionKind::ReadOnlyText);
+                }
+            } else if (m_ctestSelected && *m_ctestSelected < m_ctestDiscovery.tests.size()) {
+                const auto& test = m_ctestDiscovery.tests[*m_ctestSelected];
+                add("Run this test", modules::ctestSingleRunSupported() ? "Runs project code; automatic CTest fixtures are excluded" : "Unavailable on this platform", -37);
+                const auto summary = std::find_if(m_ctestSummaries.begin(), m_ctestSummaries.end(), [&](const auto& entry) { return entry.name == test.name; });
+                if (summary != m_ctestSummaries.end()) {
+                    auto details = std::to_string(summary->passed) + " passed · " + std::to_string(summary->failed) + " failed · " + std::to_string(summary->skipped) + " skipped";
+                    if (summary->ambiguousRuns) details += " · " + std::to_string(summary->ambiguousRuns) + " ambiguous";
+                    add("Saved history: " + std::to_string(summary->observations) + " observations", details, -38, ui::SuggestionKind::ReadOnlyText);
+                    if (summary->consecutiveFailures) add("Consecutive failures: " + std::to_string(summary->consecutiveFailures), "Among observed runs; absent tests are ignored", -38, ui::SuggestionKind::ReadOnlyText);
+                    add("Pass/fail transitions: " + std::to_string(summary->passFailTransitions), "Triage signal, not proof of flakiness; skipped and ambiguous results break transitions", -38, ui::SuggestionKind::ReadOnlyText);
+                    if (summary->mostRecentFailureRunIndex && *summary->mostRecentFailureRunIndex < m_ctestHistory.runs.size()) add("Last failure: saved run " + std::to_string(*summary->mostRecentFailureRunIndex + 1) + " of " + std::to_string(m_ctestHistory.runs.size()), "Longest observed failure streak: " + std::to_string(summary->longestFailureStreak) + "; absent tests are ignored", -38, ui::SuggestionKind::ReadOnlyText);
+                    if (summary->durationDeltaSeconds) add("Duration change: " + std::string(*summary->durationDeltaSeconds >= 0 ? "+" : "") + std::to_string(*summary->durationDeltaSeconds) + " s", "Latest compared with previous recorded duration", -38, ui::SuggestionKind::ReadOnlyText);
+                }
+                const auto last = m_ctestLast.find(test.name), previous = m_ctestPrevious.find(test.name);
+                if (last != m_ctestLast.end()) {
+                    const auto status = [](modules::TestResultStatus s) { return s == modules::TestResultStatus::Passed ? "Passed" : s == modules::TestResultStatus::Failed ? "Failed" : "Skipped"; };
+                    add(std::string("Latest: ") + status(last->second.status), previous == m_ctestPrevious.end() ? "No previous run recorded" : std::string("Previous: ") + status(previous->second.status), -38, ui::SuggestionKind::ReadOnlyText);
+                    const auto output = last->second.failureMessage + "\n" + last->second.failureText + "\n" + last->second.output + "\n" + last->second.errorOutput;
+                    std::size_t offset = 0, boundary = 0;
+                    while (offset < output.size() && offset < 16384) { (void)text::nextUtf8(output, offset); if (offset <= 16384) boundary = offset; }
+                    const auto preview = std::string_view(output).substr(0, boundary);
+                    std::string error; if (editor::Document::canEditLosslessly(preview, error)) { std::size_t shown = 0; for (const auto& line : text::wrapLines(preview, 58)) { if (shown++ >= 256) break; add(line.empty() ? " " : line, "", -38, ui::SuggestionKind::ReadOnlyText); } if (boundary < output.size() || shown > 256) add("Output preview truncated", "", -38, ui::SuggestionKind::ReadOnlyText); }
+                    else add("Output contains unsupported characters", "", -38, ui::SuggestionKind::ReadOnlyText);
+                }
+            } else { if (m_ctestHistoryReady) add("Review recorded failures…", "Plan reruns from retained partial history", -215); for (std::size_t i = 0; i < m_ctestDiscovery.tests.size(); ++i) {
+                const auto& test = m_ctestDiscovery.tests[i]; const auto last = m_ctestLast.find(test.name);
+                std::string error; const bool safe = std::none_of(test.name.begin(), test.name.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(test.name, error);
+                add(safe ? test.name : "(test name contains control characters)", last == m_ctestLast.end() ? "No recorded run" : last->second.status == modules::TestResultStatus::Passed ? "Passed" : last->second.status == modules::TestResultStatus::Failed ? "Failed" : "Skipped", static_cast<int>(i));
+            } }
+        } else if (m.enabled && m_pythonShowing) {
+            add(m_pythonProvisionBootstrap ? "< Back to interpreter" : m_pythonSelected ? "< Back to interpreters" : "< Back to module commands", "", -31);
+            if (m_pythonSelected && *m_pythonSelected < m_pythonEnvironments.size()) {
+                const auto& environment = m_pythonEnvironments[*m_pythonSelected];
+                if (m_pythonProvisionFuture.valid()) {
+                    add("Installing Python language server…", "May take several minutes; Escape requests cancellation", -32, ui::SuggestionKind::ReadOnlyText);
+                } else if (m_pythonProvisionBootstrap) {
+                    add(*m_pythonProvisionBootstrap ? "Confirm: bootstrap pip and install" : "Confirm: install with existing pip", "Downloads " + std::string(modules::pythonLanguageServerRequirement()) + " and dependencies from PyPI; runs code and changes this environment. Cancellation can leave partial changes.", -162);
+                    add(environment.interpreter.generic_string(), *m_pythonProvisionBootstrap ? "Runs ensurepip first, then installs python-lsp-server" : "Runs pip in the remembered interpreter", -32, ui::SuggestionKind::ReadOnlyText);
+                } else {
+                    add("Validate and remember interpreter", "Runs the selected executable; preference is local to this project", -33);
+                    add("Create a virtual environment", "Runs the selected interpreter; chooses a new project directory", -34);
+                    if (m.network && std::find(m.requirements.begin(), m.requirements.end(), "python-pylsp-install-v1") != m.requirements.end() && m_pythonPreferenceReady && environment.interpreter == m_pythonPreference.interpreter && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "install-python-pylsp"; })) {
+                        add("Install Python language server", "Use existing pip; review network and environment changes first", -160);
+                        add("Bootstrap pip and install server", "Use ensurepip first; review changes before confirming", -161);
+                    }
+                    add(environment.interpreter.generic_string(), "Selected candidate; execution can run arbitrary code", -32, ui::SuggestionKind::ReadOnlyText);
+                }
+            } else {
+            if (m_pythonManage && m_pythonPreferenceReady && !m_pythonPreference.interpreter.empty()) add("Clear remembered interpreter", m_pythonPreference.interpreter.generic_string(), -35);
+            for (std::size_t i = 0; i < m_pythonEnvironments.size(); ++i) {
+                const auto& environment = m_pythonEnvironments[i];
+                const auto path = environment.interpreter.generic_string(); std::string error;
+                const bool safe = path.size() <= 4096 && std::none_of(path.begin(), path.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(path, error);
+                const bool safeVersion = std::none_of(environment.version.begin(), environment.version.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(environment.version, error);
+                add(safe ? path : "(unreadable interpreter path)", (environment.interpreter == m_pythonUnlistedInterpreter ? "Unverified saved or entered path" : environment.projectLocal ? "Project environment" : environment.environmentRoot.empty() ? "Standalone or entered interpreter" : "User environment") + (environment.version.empty() || !safeVersion ? " · version unknown" : " · metadata " + environment.version) + (m_pythonPreferenceReady && environment.interpreter == m_pythonPreference.interpreter ? " · remembered" : ""), m_pythonManage ? static_cast<int>(i) : -32, m_pythonManage ? ui::SuggestionKind::Task : ui::SuggestionKind::ReadOnlyText);
+            }
+            if (m_pythonManage && m_pythonPreferenceReady) add("Choose interpreter path…", "Enter an absolute path; it will not run until you validate it", -207);
+            }
+        } else if (m.enabled && m_logShowing) {
+            add(m_logSelected ? "< Back to log results" : "< Back to module commands", "", -29);
+            if (m_logSelected && *m_logSelected < m_logReport.records.size()) {
+                const auto& record = m_logReport.records[*m_logSelected];
+                add("Open log at this record", "Requires the saved file to match the imported snapshot", -180);
+                add(record.source + ":" + std::to_string(record.line), "Saved log record", -30, ui::SuggestionKind::ReadOnlyText);
+                std::string error;
+                if (!editor::Document::canEditLosslessly(record.text, error)) add("Log contains unsupported characters", "Open the source file to inspect it", -30, ui::SuggestionKind::ReadOnlyText);
+                else { std::size_t shown = 0; for (const auto& line : text::wrapLines(record.text, 58)) { if (shown++ >= 256) { add("Preview truncated", "Open the source file for full text", -30, ui::SuggestionKind::ReadOnlyText); break; } add(line.empty() ? " " : line, "", -30, ui::SuggestionKind::ReadOnlyText); } }
+            } else { if(m_logJson) add("JSON Lines enabled", "Explicit zoned timestamps only; raw logs may contain secrets", -30, ui::SuggestionKind::ReadOnlyText); for (std::size_t i = 0; i < m_logReport.records.size(); ++i) {
+                const auto& record = m_logReport.records[i]; const auto end = record.text.find('\n'); auto first = record.text.substr(0, end);
+                std::string error; if (first.size() > 4096 || !editor::Document::canEditLosslessly(first, error) || std::any_of(first.begin(), first.end(), [](unsigned char c) { return c < 32 && c != '\t'; })) first = "(log text unavailable in preview)";
+                add(first, record.source + ":" + std::to_string(record.line), static_cast<int>(i));
+            } }
+        } else if (m.enabled && m_designTokenShowing) {
+            add(m_designTokenSelected ? "< Back to tokens" : "< Back to module commands", "", -27);
+            const auto safe = [](const std::string& value) { std::string error; return value.size() <= 4096 && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(value, error) ? value : std::string("(unreadable text)"); };
+            if (m_designTokenSelected && *m_designTokenSelected < m_designTokenReport.tokens.size()) {
+                const auto& token = m_designTokenReport.tokens[*m_designTokenSelected];
+                add(safe(token.name), safe(token.type) + " · " + safe(token.value), -28, ui::SuggestionKind::ReadOnlyText);
+                if (m_designTokenAliasEnabled && *m_designTokenSelected<m_designTokenAliases.size()) {
+                    const auto& alias=m_designTokenAliases[*m_designTokenSelected]; using S=modules::DesignAliasStatus;
+                    const char* status=alias.status==S::Literal?"Literal":alias.status==S::Resolved?"Resolved":alias.status==S::Missing?"Missing target":alias.status==S::Cycle?"Cycle":alias.status==S::Ambiguous?"Ambiguous target":alias.status==S::DepthLimit?"Alias depth limit":"Unsupported expression";
+                    add("Alias status",status,-28,ui::SuggestionKind::ReadOnlyText);
+                    if(alias.targetIndex<m_designTokenReport.tokens.size()) add("Follow alias target",safe(m_designTokenReport.tokens[alias.targetIndex].name) + " · verifies saved snapshot",-312);
+                    if(alias.status==S::Resolved && alias.resolvedIndex<m_designTokenReport.tokens.size()) add("Resolved value",safe(m_designTokenReport.tokens[alias.resolvedIndex].value) + " · " + std::to_string(alias.hops) + " hops",-28,ui::SuggestionKind::ReadOnlyText);
+                    add("Resolution limits","One JSON file; CSS cascade, embedded expressions and type compatibility are not resolved",-28,ui::SuggestionKind::ReadOnlyText);
+                }
+                add("Open token definition", "Navigate to the imported CSS declaration or JSON value", -181);
+                add("Search token name", "Search project text; aliases and transformed names may differ", -182);
+            } else {
+            if (m_designTokenReport.warningsTruncated) add("Warning list truncated", "Some unsupported syntax notices were omitted", -28, ui::SuggestionKind::ReadOnlyText);
+            for (const auto& warning : m_designTokenReport.warnings) add("Warning", safe(warning), -28, ui::SuggestionKind::ReadOnlyText);
+            for (std::size_t i = 0; i < m_designTokenReport.tokens.size(); ++i) {
+                const auto& token = m_designTokenReport.tokens[i];
+                add(safe(token.name), safe(token.type) + " · " + safe(token.value) + " · select for actions", static_cast<int>(i));
+            }
+            }
+        } else if (m.enabled && m_localizationShowing) {
+            add(m_localizationSelected ? "< Back to translations" : "< Back to module commands", "", -25);
+            if (m_localizationEditPreview) {
+                add("Apply reviewed translation", "Updates the open document only; Undo restores it. Enter confirms.", -271);
+                add(m_localizationEditPlan.inserted ? "New translation" : "Updated translation", m_localizationEditPlan.value, -26, ui::SuggestionKind::ReadOnlyText);
+                const auto& preview = m_localizationEditPlan.preview;
+                for (const auto& name : preview.missingPlaceholders) add("Missing placeholder: {" + name + "}", "Present in source, absent in translation", -26, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& name : preview.extraPlaceholders) add("Extra placeholder: {" + name + "}", "Absent from source", -26, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& count : preview.differingPlaceholderCounts) add("Placeholder count: {" + count.name + "}", "Source " + std::to_string(count.source) + " · translation " + std::to_string(count.translation), -26, ui::SuggestionKind::ReadOnlyText);
+                add("< Cancel edit", "No text changed", -272);
+            } else if (m_localizationSelected && *m_localizationSelected < m_localizationEntries.size()) {
+                const auto& entry = m_localizationEntries[*m_localizationSelected];
+                if (entry.inSource && std::find(m.requirements.begin(), m.requirements.end(), "localization-edit-v1") != m.requirements.end()) add("Edit translation…", "Review before changing the open document", -270);
+                if (entry.inSource) add("Open source value", "Navigate to the compared JSON value", -172);
+                if (entry.inTranslation) add("Open translation value", "Navigate to the compared JSON value", -173);
+                const auto preview = [&](std::string_view title, bool present, const std::string& value) {
+                    add(std::string(title), present ? "Text preview" : "Missing", -26, ui::SuggestionKind::ReadOnlyText);
+                    if (!present) return;
+                    std::string error;
+                    if (!editor::Document::canEditLosslessly(value, error)) { add("Text contains unsupported characters", "Open the file to inspect it", -26, ui::SuggestionKind::ReadOnlyText); return; }
+                    std::size_t shown = 0;
+                    for (const auto& line : text::wrapLines(value, 58)) {
+                        if (shown++ >= 256) { add("Preview truncated", "Open the file for the full text", -26, ui::SuggestionKind::ReadOnlyText); break; }
+                        add(line.empty() ? " " : line, "", -26, ui::SuggestionKind::ReadOnlyText);
+                    }
+                };
+                if (!entry.missingPlaceholders.empty() || !entry.extraPlaceholders.empty() || !entry.differingPlaceholderCounts.empty()) {
+                    std::size_t shown = 0;
+                    for (const auto& name : entry.missingPlaceholders) { if (shown++ >= 100) break; add("Missing placeholder: {" + name + "}", "Present in source, absent in translation", -26, ui::SuggestionKind::ReadOnlyText); }
+                    for (const auto& name : entry.extraPlaceholders) { if (shown++ >= 100) break; add("Extra placeholder: {" + name + "}", "Present in translation, absent in source", -26, ui::SuggestionKind::ReadOnlyText); }
+                    for (const auto& count : entry.differingPlaceholderCounts) { if (shown++ >= 100) break; add("Placeholder count: {" + count.name + "}", "Source " + std::to_string(count.source) + " · translation " + std::to_string(count.translation), -26, ui::SuggestionKind::ReadOnlyText); }
+                    if (entry.missingPlaceholders.size() + entry.extraPlaceholders.size() + entry.differingPlaceholderCounts.size() > 100) add("Placeholder list limited to 100", "", -26, ui::SuggestionKind::ReadOnlyText);
+                }
+                preview("Source", entry.inSource, entry.sourceText); preview("Translation", entry.inTranslation, entry.translationText);
+            } else for (std::size_t i = 0; i < m_localizationEntries.size(); ++i) {
+                const auto& entry = m_localizationEntries[i];
+                std::string detail = !entry.inTranslation ? "Missing translation" : !entry.inSource ? "Translation only" : "Source " + std::to_string(entry.sourceLength) + " · translation " + std::to_string(entry.translationLength) + " code points";
+                if (!entry.missingPlaceholders.empty() || !entry.extraPlaceholders.empty()) detail += " · " + std::to_string(entry.missingPlaceholders.size()) + " missing / " + std::to_string(entry.extraPlaceholders.size()) + " extra placeholders";
+                if (!entry.differingPlaceholderCounts.empty()) detail += " · " + std::to_string(entry.differingPlaceholderCounts.size()) + " placeholder count differences";
+                if (entry.translationLong) detail += " · long text";
+                if (entry.translationHasRtl) detail += " · RTL-script characters";
+                const bool keySafe = std::none_of(entry.key.begin(), entry.key.end(), [](unsigned char c) { return c < 32 || c == 127; });
+                add(keySafe ? entry.key : "(key contains control characters)", detail, static_cast<int>(i));
+            }
+        } else if (m.enabled && m_binaryShowing) {
+            add(m_binaryCategory ? "< Back to categories" : "< Back to module commands", "", -23);
+            if (!m_binaryInspection.format.empty()) add(m_binaryInspection.format + " · " + m_binaryInspection.architecture, "File format and architecture", -24, ui::SuggestionKind::ReadOnlyText);
+            const auto safeName = [](const std::string& value) { std::string error; return value.size() <= 4096 && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(value, error) ? value : std::string("(unreadable name)"); };
+            if (m_binaryFuture.valid()) add("Inspecting binary…", "Escape cancels", -24, ui::SuggestionKind::ReadOnlyText);
+            else if (!m_binaryInspection.error.empty()) add("Inspection failed", m_binaryInspection.error, -24, ui::SuggestionKind::ReadOnlyText);
+            else if (!m_binaryCategory) {
+                if (!m_binaryInspection.slices.empty()) add("Architectures", "Slice " + std::to_string(m_binarySlice + 1) + " of " + std::to_string(m_binaryInspection.slices.size()), 5);
+                const auto detail = m_binaryInspection.incomplete ? " results · some entries omitted" : " results";
+                add("Sections", std::to_string(m_binaryInspection.sections.size()) + detail, 0);
+                add("Libraries", std::to_string(m_binaryInspection.libraries.size()) + detail, 1);
+                add("Symbols", std::to_string(m_binaryInspection.symbols.size()) + detail, 2);
+                if (m_binaryInspection.format == "PE") { add("PE imports", std::to_string(m_binaryInspection.peImports.size()) + detail, 3); add("PE exports", std::to_string(m_binaryInspection.peExports.size()) + detail, 4); }
+            } else if (*m_binaryCategory == 5) {
+                for (std::size_t i = 0; i < m_binaryInspection.slices.size(); ++i) {
+                    const auto& slice = m_binaryInspection.slices[i];
+                    add(safeName(slice.architecture), "Slice " + std::to_string(i + 1) + " · offset " + std::to_string(slice.offset) + " · " + std::to_string(slice.size) + " bytes" + (i == m_binarySlice ? " · selected" : ""), static_cast<int>(i));
+                }
+            } else if (*m_binaryCategory == 0) {
+                if (m_binaryInspection.sections.empty()) add("No sections found", "Metadata may be absent or unsupported", -24, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& section : m_binaryInspection.sections) add(safeName(section.name), "Offset " + std::to_string(section.offset) + " · " + std::to_string(section.size) + " bytes", -24, ui::SuggestionKind::ReadOnlyText);
+            } else if (*m_binaryCategory == 1) {
+                if (m_binaryInspection.libraries.empty()) add("No libraries found", "Metadata may be absent or unsupported", -24, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& library : m_binaryInspection.libraries) add(safeName(library), "Linked library", -24, ui::SuggestionKind::ReadOnlyText);
+            } else if (*m_binaryCategory == 2) {
+                if (m_binaryInspection.symbols.empty()) add("No symbols found", "The binary may be stripped", -24, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& symbol : m_binaryInspection.symbols) add(safeName(symbol), "Symbol table", -24, ui::SuggestionKind::ReadOnlyText);
+            } else {
+                const bool imports=*m_binaryCategory==3; const auto& entries=imports ? m_binaryInspection.peImports : m_binaryInspection.peExports;
+                if (entries.empty()) add(imports ? "No PE imports found" : "No PE exports found", "Metadata may be absent or unsupported", -24, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& entry : entries) {
+                    const auto title=entry.byOrdinal ? "Ordinal " + std::to_string(entry.ordinal) : safeName(entry.name);
+                    std::string detail;
+                    if (imports) detail="Library: " + safeName(entry.library);
+                    else { std::ostringstream address; address << "Ordinal " << entry.ordinal << " · RVA 0x" << std::hex << entry.rva; detail=address.str(); if (!entry.forwarder.empty()) detail += " · Forwarder: " + safeName(entry.forwarder); }
+                    add(title,detail,-24,ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+        } else if (m.enabled && m_benchmarkShowing) {
+            add(m_benchmarkSelected ? "< Back to comparisons" : "< Back to module commands", "", -21);
+            const auto safe = [](const std::string& value) { std::string error; if (!editor::Document::canEditLosslessly(value,error)) return std::string("(invalid text)"); auto text=value.substr(0,512); for (char& c : text) if (static_cast<unsigned char>(c)<32 || c==127) c=' '; while (!text.empty() && !editor::Document::canEditLosslessly(text,error)) text.pop_back(); return text; };
+            const auto number = [](double value) { std::ostringstream out; out.precision(10); out << value; return out.str(); };
+            if (m_benchmarkSelected && *m_benchmarkSelected < m_benchmarkComparison.entries.size()) {
+                const auto& entry=m_benchmarkComparison.entries[*m_benchmarkSelected]; using A = modules::BenchmarkAssessment;
+                add(safe(entry.name), "Threshold classification is not statistical proof", -22, ui::SuggestionKind::ReadOnlyText);
+                const auto side = [&](const char* title, bool present, double value, const std::string& unit, const std::string& statistic, std::size_t samples, bool lower) {
+                    if (!present) { add(title,"Not present",-22,ui::SuggestionKind::ReadOnlyText); return; }
+                    const auto sampleText = samples ? std::to_string(samples) + (samples==1 ? " sample" : " samples") : "sample count unknown";
+                    add(title, number(value) + " " + safe(unit) + " · " + (statistic.empty() ? "single" : safe(statistic)) + " · " + sampleText + " · " + (lower ? "lower is better" : "higher is better"), -22, ui::SuggestionKind::ReadOnlyText);
+                };
+                side("Baseline",entry.assessment!=A::CandidateOnly,entry.baseline,entry.baselineUnit,entry.baselineStatistic,entry.baselineSamples,entry.baselineLowerIsBetter);
+                side("Candidate",entry.assessment!=A::BaselineOnly,entry.candidate,entry.candidateUnit,entry.candidateStatistic,entry.candidateSamples,entry.candidateLowerIsBetter);
+                if (std::find(m.requirements.begin(),m.requirements.end(),"benchmark-samples-v1")!=m.requirements.end()) {
+                    const auto spread=[&](const char* title,bool available,double minimum,double maximum,double stddev,const std::string& unit) {
+                        if(!available) {add(title,"No repeated raw-sample spread available",-22,ui::SuggestionKind::ReadOnlyText);return;}
+                        add(title,"min " + number(minimum) + " · max " + number(maximum) + " · sample SD " + number(stddev) + " " + safe(unit),-22,ui::SuggestionKind::ReadOnlyText);
+                    };
+                    spread("Baseline variability",entry.baselineHasSpread,entry.baselineMin,entry.baselineMax,entry.baselineStddev,entry.baselineUnit);
+                    spread("Candidate variability",entry.candidateHasSpread,entry.candidateMin,entry.candidateMax,entry.candidateStddev,entry.candidateUnit);
+                    add("Descriptive samples only", "Spread and 5% threshold do not establish statistical significance", -22,ui::SuggestionKind::ReadOnlyText);
+                }
+                if (entry.hasPercentChange) add("Observed change",number(entry.percentChange) + "% · noise and significance not assessed",-22,ui::SuggestionKind::ReadOnlyText);
+                if (!entry.reason.empty()) add("Not comparable",safe(entry.reason),-22,ui::SuggestionKind::ReadOnlyText);
+            } else {
+            add(m_benchmarkFilter==0 ? "All measurements (selected)" : "All measurements", "Show all comparisons", -177);
+            add(m_benchmarkFilter==1 ? "Possible regressions (selected)" : "Possible regressions", "Observed changes beyond 5%; not significance", -178);
+            add(m_benchmarkFilter==2 ? "Not comparable (selected)" : "Not comparable", "Missing, incompatible or unpaired measurements", -179);
+            for (std::size_t i=0; i<m_benchmarkComparison.entries.size(); ++i) {
+                const auto& entry = m_benchmarkComparison.entries[i];
+                using A = modules::BenchmarkAssessment;
+                if (m_benchmarkFilter==1 && entry.assessment!=A::PossibleRegression) continue;
+                if (m_benchmarkFilter==2 && entry.assessment!=A::Incomparable && entry.assessment!=A::BaselineOnly && entry.assessment!=A::CandidateOnly) continue;
+                const char* label = entry.assessment == A::PossibleRegression ? "Possible regression" : entry.assessment == A::Improvement ? "Improvement" : entry.assessment == A::WithinThreshold ? "Within 5%" : entry.assessment == A::BaselineOnly ? "Baseline only" : entry.assessment == A::CandidateOnly ? "Candidate only" : "Not comparable";
+                std::string detail = label;
+                if (entry.assessment != A::CandidateOnly) detail += " · baseline " + number(entry.baseline) + " " + safe(entry.baselineUnit);
+                if (entry.assessment != A::BaselineOnly) detail += " · candidate " + number(entry.candidate) + " " + safe(entry.candidateUnit);
+                if (entry.hasPercentChange) detail += " · " + number(entry.percentChange) + "%";
+                if (!entry.reason.empty()) detail += " · " + safe(entry.reason);
+                add(safe(entry.name), detail, static_cast<int>(i));
+            }
+            }
+        } else if (m.enabled && m_moduleHistoryShowing) {
+            add(m_moduleHistoryDiffShowing ? "< Back to history" : "< Back to module commands", "", -18);
+            if (m_moduleHistoryDiffShowing) {
+                if (m_moduleHistoryDiff.lines.empty() && !m_moduleHistoryFuture.valid() && !m_commandStatusIsError) add("No textual diff", "The commit may have no textual changes at this path", -19, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& line : m_moduleHistoryDiff.lines) add(line.text, "Historical content", -19, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_moduleHistoryRange) {
+                for (std::size_t i = 0; i < m_moduleRangeHistory.size(); ++i) {
+                    const auto& entry = m_moduleRangeHistory[i];
+                    add(entry.subject.empty() ? "(no subject)" : entry.subject, entry.hash.substr(0, 10) + " · " + entry.author + " · " + entry.date, static_cast<int>(i));
+                }
+            } else {
+                for (std::size_t i = 0; i < m_moduleHistoryEntries.size(); ++i) {
+                    const auto& entry = m_moduleHistoryEntries[i];
+                    add(entry.subject.empty() ? "(no subject)" : entry.subject, entry.hash.substr(0, 10) + " · " + entry.author + " · " + entry.date + " · " + entry.path, static_cast<int>(i));
+                }
+            }
+        } else if (m.enabled && m_coverageShowing) {
+            add("< Back to module commands", "", -17);
+            if (m_coverageFuture.valid()) add("Reading coverage report…", "Escape cancels", -150, ui::SuggestionKind::ReadOnlyText);
+            else if (m_coverageComparing) {
+                add("< Back to current coverage", "Keep the current report and source snapshots", -214);
+                add("Approximate comparison", "Exact path and line numbers only; source may have changed and both reports may be stale", -150, ui::SuggestionKind::ReadOnlyText);
+                if (m_coverageComparison.baselineIncomplete || m_coverageComparison.currentIncomplete || m_coverageComparison.baselineSkippedFiles || m_coverageComparison.currentSkippedFiles)
+                    add("Incomplete comparison", "Baseline skipped " + std::to_string(m_coverageComparison.baselineSkippedFiles) + " files; current skipped " + std::to_string(m_coverageComparison.currentSkippedFiles) + "; one or both reports may be incomplete", -150, ui::SuggestionKind::ReadOnlyText);
+                std::map<std::pair<std::string, std::size_t>, std::size_t> currentLines;
+                for (std::size_t i = 0; i < m_coverageReport.lines.size(); ++i) currentLines[{m_coverageReport.lines[i].path, m_coverageReport.lines[i].line}] = i;
+                for (const auto& change : m_coverageComparison.changes) {
+                    const char* label = change.kind == modules::CoverageChangeKind::Regressed ? "Less covered" : change.kind == modules::CoverageChangeKind::Improved ? "More covered" : change.kind == modules::CoverageChangeKind::BranchCountsChanged ? "Branch counts changed" : change.kind == modules::CoverageChangeKind::BaselineOnly ? "Baseline only" : "Current only";
+                    std::string detail = std::string(label) + " · approximate";
+                    if (change.kind != modules::CoverageChangeKind::BaselineOnly && change.kind != modules::CoverageChangeKind::CurrentOnly) detail += " · branches " + std::to_string(change.baseline.branchesCovered) + "/" + std::to_string(change.baseline.branchesUncovered) + "/" + std::to_string(change.baseline.branchesUnknown) + " → " + std::to_string(change.current.branchesCovered) + "/" + std::to_string(change.current.branchesUncovered) + "/" + std::to_string(change.current.branchesUnknown) + " covered/uncovered/unknown";
+                    const auto it = currentLines.find({change.path, change.line});
+                    add(change.path + ":" + std::to_string(change.line + 1), detail, it == currentLines.end() ? -150 : static_cast<int>(it->second), it == currentLines.end() ? ui::SuggestionKind::ReadOnlyText : ui::SuggestionKind::Task);
+                }
+                if (m_coverageComparison.changes.empty()) add("No differences found", "Matching path and line records only; reports may be incomplete or stale", -150, ui::SuggestionKind::ReadOnlyText);
+            }
+            else {
+                const auto& counts = m_coverageSummary.total;
+                const auto total = counts.linesCovered + counts.linesUncovered;
+                auto detail = std::to_string(counts.linesCovered) + " covered · " + std::to_string(counts.linesUncovered) + " uncovered";
+                if (total) detail += " · " + std::to_string(counts.linesCovered * 100 / total) + "%";
+                detail += m_coverageReport.incomplete ? " · incomplete report · may be stale" : " · report may be stale";
+                add("Imported line coverage", detail, -150, ui::SuggestionKind::ReadOnlyText);
+                if (counts.branchesCovered || counts.branchesUncovered || counts.branchesUnknown) add("Imported branches", std::to_string(counts.branchesCovered) + " covered · " + std::to_string(counts.branchesUncovered) + " uncovered · " + std::to_string(counts.branchesUnknown) + " no count" + (m_coverageReport.incomplete ? " · incomplete report · may be stale" : " · report may be stale"), -150, ui::SuggestionKind::ReadOnlyText);
+                if (m_coverageFilesMode) {
+                    add("< Back to coverage lines", "Return to line results", -154);
+                    for (std::size_t i = 0; i < m_coverageSummary.files.size(); ++i) {
+                        const auto& file = m_coverageSummary.files[i]; const auto& c = file.counts;
+                        auto fileDetail = std::to_string(c.linesCovered) + " covered · " + std::to_string(c.linesUncovered) + " uncovered";
+                        const auto lines = c.linesCovered + c.linesUncovered;
+                        if (lines) fileDetail += " · " + std::to_string(c.linesCovered * 100 / lines) + "%";
+                        if (c.branchesCovered || c.branchesUncovered || c.branchesUnknown) fileDetail += " · branches " + std::to_string(c.branchesCovered) + "/" + std::to_string(c.branchesCovered + c.branchesUncovered) + " known covered · " + std::to_string(c.branchesUnknown) + " unknown";
+                        fileDetail += m_coverageReport.incomplete ? " · incomplete · may be stale" : " · may be stale";
+                        add(file.path, fileDetail + " · select to filter lines", static_cast<int>(i));
+                    }
+                } else {
+                    add("Browse files", "Show per-file coverage and filter lines", -154);
+                    if (!m_coverageFile.empty()) add("All files", "Clear file filter: " + m_coverageFile, -155);
+                    add(m_coverageFilter == 0 ? "All lines (selected)" : "All lines", "Show covered and uncovered lines", -151);
+                    add(m_coverageFilter == 1 ? "Uncovered lines (selected)" : "Uncovered lines", "Show lines with no hits", -152);
+                    add(m_coverageFilter == 2 ? "Covered lines (selected)" : "Covered lines", "Show lines with hits", -153);
+                    add("Compare with baseline…", "Choose a second report in the same format", -213);
+                    for (std::size_t i = 0; i < m_coverageReport.lines.size(); ++i) {
+                        const auto& line = m_coverageReport.lines[i];
+                        if ((!m_coverageFile.empty() && line.path != m_coverageFile) || (m_coverageFilter == 1 && line.covered) || (m_coverageFilter == 2 && !line.covered)) continue;
+                        std::string lineDetail = line.covered ? "Covered" : "Uncovered";
+                        if (line.branchesCovered || line.branchesUncovered || line.branchesUnknown) lineDetail += " · branches " + std::to_string(line.branchesCovered) + " covered, " + std::to_string(line.branchesUncovered) + " uncovered, " + std::to_string(line.branchesUnknown) + " no count";
+                        add(line.path + ":" + std::to_string(line.line + 1), lineDetail, static_cast<int>(i));
+                    }
+                }
+            }
+        } else if (m.enabled && m_markdownLinksShowing) {
+            if (m_markdownExternalMode && m_markdownExternalSelected && *m_markdownExternalSelected < m_markdownLinksResults.links.size()) {
+                const auto& link = m_markdownLinksResults.links[*m_markdownExternalSelected];
+                add("< Back to links", "", -250);
+                if (link.sourceOffset) add("Open link in source", "Inspect the destination before checking", -251);
+                if (link.sourceOffset) add("Check selected external link", "Sends a HEAD request only after confirmation", -252);
+                add("Latest result", link.detail, -253, ui::SuggestionKind::ReadOnlyText);
+            } else {
+            add("< Back to module commands", "", -15);
+            add(m_markdownLinksFilter==0 ? "All links (selected)" : "All links", "Show all checked and unchecked links", -183);
+            add(m_markdownLinksFilter==1 ? "Missing links (selected)" : "Missing links", "Show project-local targets that were not found", -184);
+            add(m_markdownLinksFilter==2 ? "Not checked (selected)" : "Not checked", "External links, fragments and unsupported targets", -185);
+            for (std::size_t i=0;i<m_markdownLinksResults.links.size();++i) {
+                const auto& link=m_markdownLinksResults.links[i];
+                if (m_markdownExternalMode && !isHttpMarkdownLink(link.destination)) continue;
+                if (m_markdownLinksFilter==1 && link.status!=modules::MarkdownLinkStatus::Missing) continue;
+                if (m_markdownLinksFilter==2 && link.status!=modules::MarkdownLinkStatus::NotChecked) continue;
+                const auto prefix = link.status == modules::MarkdownLinkStatus::Found ? "Found: " : link.status == modules::MarkdownLinkStatus::Missing ? "Missing: " : "Not checked: ";
+                if (isHttpMarkdownLink(link.destination)) add(std::string(prefix) + "External link " + std::to_string(i + 1), link.detail + (m_markdownExternalMode ? " · select to review" : " · destination hidden"), m_markdownExternalMode || link.sourceOffset ? static_cast<int>(i) : -16, m_markdownExternalMode || link.sourceOffset ? ui::SuggestionKind::Task : ui::SuggestionKind::ReadOnlyText);
+                else add(prefix + link.destination, link.detail + (link.sourceOffset ? " · select to navigate" : " · source location unavailable"), link.sourceOffset ? static_cast<int>(i) : -16, link.sourceOffset ? ui::SuggestionKind::Task : ui::SuggestionKind::ReadOnlyText);
+            }
+            }
+        } else if (m.enabled && m_markdownPreviewShowing) {
+            add("< Back to module commands", "", -13);
+            for (const auto& line : m_markdownPreviewLines) add(line.first, "", -14, line.second);
+        } else if (m.enabled && m_pullRequestShowing) {
+            add(m_pullPatchSelected ? "< Back to pull request" : "< Back to module commands", m_pullPatchSelected ? "Return to files and comments" : "Cancels and clears pull request data", -101);
+            if (m_pullReviewPosting && m_pullCommentFuture.valid()) add("Submitting review…", "The result may be uncertain; refresh before retrying", -104, ui::SuggestionKind::ReadOnlyText);
+            else if (m_pullReviewMode && m_pullCommentConfirm) {
+                const char* event = m_pullReviewMode == 1 ? "Approve" : m_pullReviewMode == 2 ? "Request changes" : "Comment";
+                add(std::string("Confirm ") + event + " review using GH_TOKEN", "Sends this review to GitHub. Enter confirms.", -211);
+                add("Cancel review", "Nothing is sent", -212);
+                add("Pull request", m_pullRequestUrl, -104, ui::SuggestionKind::ReadOnlyText);
+                add("Reviewed head", m_pullRequestData.headSha, -104, ui::SuggestionKind::ReadOnlyText);
+                add("Review message", m_pullCommentBody.empty() ? "(no message)" : m_pullCommentBody, -104, ui::SuggestionKind::ReadOnlyText);
+            }
+            else if (m_pullPatchSelected) {
+                if (m_pullCommentFuture.valid()) add("Posting comment…", "A failed or cancelled request may have succeeded; refresh before retrying", -104, ui::SuggestionKind::ReadOnlyText);
+                else if (m_pullCommentConfirm) {
+                    add("Post review comment using GH_TOKEN", "Sends the comment to GitHub; Enter confirms.", -105);
+                    add("Cancel comment", "No comment is sent", -106);
+                    if (*m_pullPatchSelected < m_pullRequestData.files.size()) { auto path = m_pullRequestData.files[*m_pullPatchSelected].path; for (char& c : path) if (static_cast<unsigned char>(c) < 32 || c == 127) c = ' '; std::string error; if (!editor::Document::canEditLosslessly(path, error)) path = "[Text unavailable]"; add("Target", path + ":" + std::to_string(m_pullCommentLine), -104, ui::SuggestionKind::ReadOnlyText); }
+                    add("Comment", m_pullCommentBody, -104, ui::SuggestionKind::ReadOnlyText);
+                }
+                else if (m_pullPatchFuture.valid()) add("Reading patch…", "Escape returns to pull request", -104, ui::SuggestionKind::ReadOnlyText);
+                else if (!m_pullPatchError.empty()) add("Patch unavailable", m_pullPatchError, -104, ui::SuggestionKind::ReadOnlyText);
+                else {
+                    const auto clean = [](std::string value) { if (value.size() > 1024) value.resize(1024); for (char& c : value) if (static_cast<unsigned char>(c) < 32 || c == 127) c = ' '; std::string error; return editor::Document::canEditLosslessly(value, error) ? value : std::string("[Text unavailable]"); };
+                    std::size_t count = 0, lineIndex = 0; bool limited = false;
+                    for (const auto& hunk : m_pullPatchHunks) {
+                        if (count >= 1000) { limited = true; break; }
+                        add(clean(hunk.heading), "Hunk", -104, ui::SuggestionKind::ReadOnlyText); ++count;
+                        for (const auto& line : hunk.lines) {
+                            if (count >= 1000) { limited = true; break; }
+                            const char marker = line.kind == modules::PatchLineKind::Added ? '+' : line.kind == modules::PatchLineKind::Removed ? '-' : line.kind == modules::PatchLineKind::NoNewline ? '\\' : ' ';
+                            const std::string location = (line.oldLine ? std::to_string(line.oldLine) : "–") + " → " + (line.newLine ? std::to_string(line.newLine) : "–");
+                            const bool commentable = line.newLine && !m_pullRequestData.partial && !m_pullRequestData.headSha.empty() && std::find(m.requirements.begin(), m.requirements.end(), "pull-request-comment-v1") != m.requirements.end();
+                            add(std::string(1, marker) + " " + clean(line.text), location + (commentable ? " · Enter to comment" : ""), commentable ? static_cast<int>(lineIndex) : -104, commentable ? ui::SuggestionKind{} : ui::SuggestionKind::ReadOnlyText); ++count; ++lineIndex;
+                        }
+                        if (limited) break;
+                    }
+                    if (limited) add("Display limited to 1000 patch lines", "The remainder is not shown", -104, ui::SuggestionKind::ReadOnlyText);
+                }
+            } else if (m_pullRequestFuture.valid()) add("Fetching from GitHub…", "Escape cancels", -104, ui::SuggestionKind::ReadOnlyText);
+            else if (!m_pullRequestFetched) {
+                if (!m_pullRequestError.empty()) add("Request failed", m_pullRequestError, -104, ui::SuggestionKind::ReadOnlyText);
+                add("Fetch anonymously", "Connects to api.github.com for the selected pull request. Enter confirms.", -102);
+                if (const char* token = std::getenv("GH_TOKEN"); token && *token) add("Fetch using GH_TOKEN", "Sends the environment token to api.github.com. Enter confirms.", -103);
+            } else {
+                auto clean = [](std::string value) { if (value.size() > 1024) value.resize(1024); for (char& c : value) if (static_cast<unsigned char>(c) < 32 || c == 127) c = ' '; std::string error; return editor::Document::canEditLosslessly(value, error) ? value : std::string("[Text unavailable]"); };
+                add("#" + m_pullRequestData.number + " " + clean(m_pullRequestData.title), clean(m_pullRequestData.state + " · " + m_pullRequestData.author + " · " + m_pullRequestData.headRef + " → " + m_pullRequestData.baseRef), -104, ui::SuggestionKind::ReadOnlyText);
+                if (!m_pullRequestData.partial && !m_pullRequestData.headSha.empty() && m_pullRequestData.state == "open" && std::find(m.requirements.begin(), m.requirements.end(), "pull-request-review-v1") != m.requirements.end()) {
+                    add("Approve pull request…", "Draft a review; confirmation required", -208);
+                    add("Request changes…", "Draft a review; confirmation required", -209);
+                    add("Submit comment review…", "Draft a review; confirmation required", -210);
+                }
+                if (!m_pullRequestData.body.empty()) add("Description", clean(m_pullRequestData.body), -104, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& warning : m_pullRequestData.warnings) add("Incomplete data", clean(warning), -104, ui::SuggestionKind::ReadOnlyText);
+                std::size_t shown = 0;
+                for (std::size_t index = 0; index < m_pullRequestData.files.size(); ++index) {
+                    const auto& file = m_pullRequestData.files[index];
+                    if (shown++ >= 300) break;
+                    auto detail = file.status;
+                    if (!file.previousPath.empty()) detail += " · from " + file.previousPath;
+                    if (file.hasCounts) detail += " · +" + std::to_string(file.additions) + " / -" + std::to_string(file.deletions);
+                    if (!file.hasPatch) detail += " · patch unavailable";
+                    add("File: " + clean(file.path), clean(detail), static_cast<int>(index));
+                }
+                for (const auto& comment : m_pullRequestData.comments) {
+                    if (shown++ >= 600) break;
+                    auto location = comment.path;
+                    if (comment.hasLine) location += ":" + std::to_string(comment.line);
+                    if (!comment.side.empty()) location += " · " + comment.side;
+                    add("Comment: " + clean(comment.author) + " · " + clean(location), clean(comment.body), -104, ui::SuggestionKind::ReadOnlyText);
+                }
+                for (const auto& check : m_pullRequestData.checks) { if (shown++ >= 900) break; add("Check: " + clean(check.name), clean(check.status + " · " + check.conclusion), -104, ui::SuggestionKind::ReadOnlyText); }
+                if (shown >= 900 || m_pullRequestData.files.size() > 300 || m_pullRequestData.comments.size() > 300 || m_pullRequestData.checks.size() > 300) add("Display limited", "Some entries are not shown", -104, ui::SuggestionKind::ReadOnlyText);
+            }
+        } else if (m.enabled && m_usbBoardShowing) {
+            add("< Back to module commands", "Clear board results", -224);
+            add("Project mapping is unverified", "VID/PID may identify a shared probe, not a board; no firmware is flashed", -225, ui::SuggestionKind::ReadOnlyText);
+            if (!m_usbBoardConfirmed) add("Confirm USB descriptor discovery", "Read OS USB identifiers; no device is opened", -223);
+            else if (m_usbBoardFuture.valid()) add("Reading USB descriptors…", "No device is opened", -225,ui::SuggestionKind::ReadOnlyText);
+            else {
+                if (!m_usbBoardScan.error.empty()) add("Discovery unavailable",m_usbBoardScan.error,-225,ui::SuggestionKind::ReadOnlyText);
+                if (m_usbBoardScan.incomplete) add("Discovery incomplete","Some descriptors could not be read",-225,ui::SuggestionKind::ReadOnlyText);
+                for (const auto& device:m_usbBoardScan.devices) {
+                    const auto match=modules::identifyBoard(device.ids,m_usbBoardMappings); std::ostringstream detail; detail << "VID " << std::hex << device.ids.vendor << " · PID " << device.ids.product;
+                    const auto safe=[](const std::string& v) {std::string e; return v.size()<=1024 && std::none_of(v.begin(),v.end(),[](unsigned char c){return c<32||c==127;}) && editor::Document::canEditLosslessly(v,e) ? v : std::string("(unreadable)");};
+                    if (match.state==modules::BoardIdentity::State::Match) detail << " · project mapping: " << safe(match.name) << " · " << safe(match.profile) << " · unverified";
+                    else detail << (match.state==modules::BoardIdentity::State::Ambiguous ? " · ambiguous mappings" : " · no mapping");
+                    add(safe(device.location),detail.str(),-225,ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+        } else if (m.enabled && m_serialShowing) {
+            add("< Back to module commands", "Cancel pending work and clear data", -110);
+            if (m_serialStage == 5) add("Reading firmware snapshot…", "Escape cancels; hardware is not touched", -114, ui::SuggestionKind::ReadOnlyText);
+            else if (m_serialStage == 7) {
+                add("Confirm firmware flash", "Erases and writes connected hardware. Runs selected OpenOCD and scripts with your privileges; cancellation may leave it partially flashed.", -170);
+                add("Firmware: " + m_flashSnapshot.profile.firmware, "SHA-256 " + m_flashSnapshot.sha256, -114, ui::SuggestionKind::ReadOnlyText);
+                if (m_flashSnapshot.binaryAddress) { std::ostringstream range; range << "0x" << std::hex << *m_flashSnapshot.binaryAddress << "–0x" << (static_cast<std::uint64_t>(*m_flashSnapshot.binaryAddress)+m_flashSnapshot.bytes.size()-1) << std::dec << " · " << m_flashSnapshot.bytes.size() << " bytes"; add("Raw BIN address range",range.str()+" · wrong address can destroy data; erase may extend beyond this range",-114,ui::SuggestionKind::ReadOnlyText); }
+                add("Interface: " + m_flashSnapshot.profile.interfaceConfig, "Target: " + m_flashSnapshot.profile.targetConfig, -114, ui::SuggestionKind::ReadOnlyText);
+                add("OpenOCD: " + m_flashExecutable.generic_string(), "Review the executable and connected device before confirming", -114, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_serialStage == 8) add("Flashing firmware…", "Escape requests cancellation; hardware may be partially written", -114, ui::SuggestionKind::ReadOnlyText);
+            else if (m_serialStage == 9) {
+                add(m_flashResult.error.empty() && !m_flashResult.cancelled && !m_flashResult.timedOut && m_flashResult.exitCode == 0 ? "OpenOCD reported success" : "Flash did not complete successfully", "Verify the connected hardware; a failed or cancelled flash may be partial", -114, ui::SuggestionKind::ReadOnlyText);
+                if (!m_flashResult.error.empty()) add("Error", m_flashResult.error, -114, ui::SuggestionKind::ReadOnlyText);
+                std::string output = m_flashResult.output; for (char& c : output) if ((static_cast<unsigned char>(c) < 32 && c != '\n' && c != '\t') || c == 127) c = ' ';
+                std::string textError; if (!editor::Document::canEditLosslessly(output, textError)) add("Output unavailable", "OpenOCD returned non-text output", -114, ui::SuggestionKind::ReadOnlyText);
+                else { std::size_t pos = 0, count = 0; while (pos < output.size() && count++ < 200) { const auto end = output.find('\n', pos); auto line = output.substr(pos, end == std::string::npos ? std::string::npos : end - pos); if (line.size() > 1024) { line.resize(1024); while (!line.empty() && !editor::Document::canEditLosslessly(line, textError)) line.pop_back(); } add(line.empty() ? " " : line, "OpenOCD output", -114, ui::SuggestionKind::ReadOnlyText); if (end == std::string::npos) break; pos = end + 1; } }
+                if (m_flashResult.outputTruncated) add("Output limit reached", "OpenOCD output was truncated", -114, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_serialStage == 4) {
+                add("Interface", m_boardProfile.interfaceConfig.empty() ? "Not specified" : m_boardProfile.interfaceConfig, -114, ui::SuggestionKind::ReadOnlyText);
+                add("Target", m_boardProfile.targetConfig.empty() ? "Not specified" : m_boardProfile.targetConfig, -114, ui::SuggestionKind::ReadOnlyText);
+                add("Firmware", m_boardProfile.firmware.empty() ? "Not specified" : m_boardProfile.firmware, -114, ui::SuggestionKind::ReadOnlyText);
+                add("Adapter speed", std::to_string(m_boardProfile.adapterKhz) + " kHz", -114, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& warning : m_boardProfile.warnings) add("Unsupported directive", warning, -114, ui::SuggestionKind::ReadOnlyText);
+                if (m_boardProfile.incomplete) add("Profile truncated", "Only the supported bounded subset was inspected", -114, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_serialScanFuture.valid()) add("Finding serial devices…", "No device is opened", -114, ui::SuggestionKind::ReadOnlyText);
+            else if (m_serialStage == 0) {
+                if (!m_serialScan.error.empty()) add("Device scan", m_serialScan.error, -114, ui::SuggestionKind::ReadOnlyText);
+                if (m_serialScan.incomplete) add("Device list may be incomplete", "Only recognized names are listed", -114, ui::SuggestionKind::ReadOnlyText);
+                for (std::size_t i = 0; i < m_serialScan.devices.size(); ++i) add(m_serialScan.devices[i].name, m_serialScan.devices[i].path.generic_string(), static_cast<int>(i));
+                if (m_serialScan.devices.empty()) add("No recognized serial devices", "Devices are identified by name, not hardware", -114, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_serialStage == 1) {
+                add("Capture at 115200 baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " for 5 seconds. May reset hardware or affect other processes. Enter confirms.", -111);
+                add("Capture at 9600 baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " for 5 seconds. May reset hardware or affect other processes. Enter confirms.", -112);
+                if (std::find(m.requirements.begin(),m.requirements.end(),"serial-continuous-v1")!=m.requirements.end()) add("Monitor at 115200 baud", "Opens " + m_serialScan.devices[m_serialSelected].name + " until stopped (24-hour limit). May reset hardware or affect other processes. Enter confirms.", -230);
+            } else if ((m_serialStage==10 || m_serialStage==11) && m_serialMonitor) {
+                if (m_serialFuture.valid()) add("Stop monitoring", "Stop and restore port settings", -231); else add("Monitor stopped", "Port settings are restored best-effort", -114, ui::SuggestionKind::ReadOnlyText);
+                const auto snapshot=m_serialMonitor->snapshot();
+                if (snapshot.dropped) add("Earlier bytes overwritten", std::to_string(snapshot.dropped) + " bytes discarded", -114, ui::SuggestionKind::ReadOnlyText);
+                if (!m_serialResult.error.empty()) add("Monitor error",m_serialResult.error,-114,ui::SuggestionKind::ReadOnlyText);
+                if (m_serialResult.restoreFailed) add("Port settings may not have been restored","Check the device before using it again",-114,ui::SuggestionKind::ReadOnlyText);
+                std::string e; const bool binary=std::any_of(snapshot.bytes.begin(),snapshot.bytes.end(),[](unsigned char c){return c==0 || (c<32 && c!='\n' && c!='\r' && c!='\t') || c==127;});
+                if (binary || !editor::Document::canEditLosslessly(snapshot.bytes,e)) add("Binary serial output",std::to_string(snapshot.bytes.size()) + " bytes; text unavailable",-114,ui::SuggestionKind::ReadOnlyText);
+                else {std::size_t pos=0,count=0; while(pos<snapshot.bytes.size() && count++<200) {const auto end=snapshot.bytes.find('\n',pos);auto line=snapshot.bytes.substr(pos,end==std::string::npos ? std::string::npos : end-pos);if(line.size()>1024) {line.resize(1024);while(!line.empty() && !editor::Document::canEditLosslessly(line,e)) line.pop_back();} add(line.empty()?" ":line,"Serial output",-114,ui::SuggestionKind::ReadOnlyText);if(end==std::string::npos) break;pos=end+1;} if(pos<snapshot.bytes.size() && count>200) add("Display limited","Only the first 200 lines are shown",-114,ui::SuggestionKind::ReadOnlyText);}
+            } else if (m_serialFuture.valid()) add("Capturing serial output…", "Escape cancels; opening may have reset hardware", -114, ui::SuggestionKind::ReadOnlyText);
+            else {
+                if (!m_serialResult.error.empty()) add("Capture error", m_serialResult.error, -114, ui::SuggestionKind::ReadOnlyText);
+                if (m_serialResult.truncated) add("Output truncated", "Capture reached its size limit", -114, ui::SuggestionKind::ReadOnlyText);
+                if (m_serialResult.restoreFailed) add("Port settings may not have been restored", "Check the device before using it again", -114, ui::SuggestionKind::ReadOnlyText);
+                std::string safe = m_serialResult.bytes; for (char& c : safe) if ((static_cast<unsigned char>(c) < 32 && c != '\n' && c != '\t') || c == 127) c = ' ';
+                std::string error; if (!editor::Document::canEditLosslessly(safe, error)) add("Binary serial output", std::to_string(safe.size()) + " bytes; text unavailable", -114, ui::SuggestionKind::ReadOnlyText);
+                else { std::size_t pos = 0, count = 0; while (pos < safe.size() && count++ < 200) { const auto end = safe.find('\n', pos); auto line = safe.substr(pos, end == std::string::npos ? std::string::npos : end - pos); if (line.size() > 1024) { line.resize(1024); while (!line.empty() && !editor::Document::canEditLosslessly(line, error)) line.pop_back(); } add(line.empty() ? " " : line, "", -114, ui::SuggestionKind::ReadOnlyText); if (end == std::string::npos) break; pos = end + 1; } if (pos < safe.size() && count > 200) add("Display limited", "Only the first 200 lines are shown", -114, ui::SuggestionKind::ReadOnlyText); }
+            }
+        } else if (m.enabled && m_webShowing) {
+            add("< Back to module commands", "Cancels preview", -120);
+            if (!m_webError.empty()) add("Preview error", m_webError, -123, ui::SuggestionKind::ReadOnlyText);
+            if (!m_webStarted) {
+#if defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+                add("Render trusted project code", "Test-only WebView2 path runs project JavaScript; it is not a sandbox. Enter confirms.", -121);
+#else
+                add("Render trusted project code", "Runs JavaScript in WebKit; network isolation is not guaranteed. Enter confirms.", -121);
+#endif
+            }
+            else if (m_webBundleFuture.valid() || !m_webReady) add("Preparing preview…", "Escape cancels", -123, ui::SuggestionKind::ReadOnlyText);
+            else add("Show rendered preview", "Reduced snapshot; Escape returns", -122);
+        } else if (m.enabled && m_shaderShowing) {
+            add("< Back to module commands", "Cancels and clears shader diagnostics", -105);
+            if (m_shaderPreviewStage) {
+                if (m_shaderPreviewStage == 1) {
+                    add("Confirm GPU shader preview", "Executes this shader on the GPU. It can hang or affect the driver; the helper is not a GPU sandbox.", -223);
+                    add("Cancel preview", "No GPU work is submitted", -225);
+                    add("Artifact", m_shaderOutput + " · 256 × 256 · reviewed snapshot", -108, ui::SuggestionKind::ReadOnlyText);
+                    add("Supported interface", "One fragment main; no descriptors, push constants or built-ins. Interface checks are not full SPIR-V validation.", -108, ui::SuggestionKind::ReadOnlyText);
+                } else if (m_shaderPreviewStage == 2) add("Rendering shader…", "Escape requests cancellation; GPU hangs may outlive the helper", -108, ui::SuggestionKind::ReadOnlyText);
+                else if (m_shaderPreviewStage == 3) { add("Show rendered shader", "Captured GPU output; Escape closes the image", -224); add("Back to compilation", "", -225); }
+                else add("Back to compilation", "Preview failed; inspect the status message", -225);
+            }
+            else if (m_spirvShowing) {
+                add("< Back to compilation", "Return to compiler results", -221);
+                if (m_spirvFuture.valid()) add("Reading SPIR-V metadata…", "Escape cancels", -108, ui::SuggestionKind::ReadOnlyText);
+                else if (!m_spirvResult.error.empty()) add("Artifact inspection failed", m_spirvResult.error, -108, ui::SuggestionKind::ReadOnlyText);
+                else {
+                    add("SPIR-V metadata", "Captured from saved artifact; may change. Not a rendered preview or validity check.", -108, ui::SuggestionKind::ReadOnlyText);
+                    if (m_spirvResult.inspection.incomplete) add("Metadata incomplete", "Unsupported modes or stages may be omitted", -108, ui::SuggestionKind::ReadOnlyText);
+                    for (const auto& entry : m_spirvResult.inspection.entryPoints) {
+                        auto name=entry.name; std::string error; if (!editor::Document::canEditLosslessly(name,error)) name="[Invalid entry point name]";
+                        static constexpr const char* stages[] = {"Vertex", "Tessellation control", "Tessellation evaluation", "Geometry", "Fragment", "Compute"};
+                        std::string detail = entry.executionModel < 6 ? stages[entry.executionModel] : "Unknown stage " + std::to_string(entry.executionModel);
+                        if (entry.localSize) detail += " · local size " + std::to_string(entry.localSize->x) + " × " + std::to_string(entry.localSize->y) + " × " + std::to_string(entry.localSize->z);
+                        add(name, detail, -108, ui::SuggestionKind::ReadOnlyText);
+                    }
+                    if (m_spirvResult.inspection.entryPoints.empty()) add("No entry points found", "The artifact may be incomplete or unsupported", -108, ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+            else if (m_shaderIncludesShowing) {
+                add("< Back to shader", "Return to compiler controls", -219);
+                if (m_shaderIncludesFuture.valid()) add("Inspecting includes…", "Escape cancels", -108, ui::SuggestionKind::ReadOnlyText);
+                else {
+                    add("Advisory include graph", "Conditions, macros and compiler include paths are not evaluated; source may change", -108, ui::SuggestionKind::ReadOnlyText);
+                    if (m_shaderIncludes.incomplete) add("Include graph incomplete", "Missing, cyclic, unsupported or bounded inputs may be omitted", -108, ui::SuggestionKind::ReadOnlyText);
+                    for (std::size_t i = 0; i < m_shaderIncludes.edges.size(); ++i) {
+                        const auto& edge = m_shaderIncludes.edges[i];
+                        const char* state = edge.status == modules::ShaderIncludeStatus::Resolved ? "Resolved path" : edge.status == modules::ShaderIncludeStatus::Cycle ? "Cycle" : edge.status == modules::ShaderIncludeStatus::Unresolved ? "Unresolved" : "Unsupported syntax";
+                        auto clean = [](std::string s) { for (char& c : s) if (static_cast<unsigned char>(c)<32 || c==127) c=' '; std::string e; return editor::Document::canEditLosslessly(s,e) ? s : std::string("[Invalid path]"); };
+                        add(clean(edge.source) + ":" + std::to_string(edge.line), std::string(state) + (edge.target.empty() ? "" : " · " + clean(edge.target)) + " · open directive", static_cast<int>(i));
+                    }
+                    if (m_shaderIncludes.edges.empty()) add("No literal includes found", "This does not prove that the compiler has no dependencies", -108, ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+            else if (m_shaderFuture.valid()) add("Compiling shader…", "Escape cancels", -108, ui::SuggestionKind::ReadOnlyText);
+            else if (!m_shaderCompleted) {
+                if (m_shaderArtifact) add((m_shaderExpectedOutput ? "Replace " : "Create ") + m_shaderOutput, "Runs the selected compiler and writes this output. Enter confirms; existing content is checked.", -106);
+                else {
+                    add("Compile saved " + m_shaderStage + " shader", "Runs the selected compiler, which can access files and have side effects. Enter confirms.", -106);
+                    if (std::find(m.requirements.begin(), m.requirements.end(), "shader-artifact-v1") != m.requirements.end()) add("Save SPIR-V artifact…", "Choose an output path and review before running the compiler", -124);
+                    if (std::find(m.requirements.begin(), m.requirements.end(), "shader-includes-v1") != m.requirements.end()) add("Inspect includes", "Reads project-local files without running the compiler", -218);
+                }
+            }
+            else {
+                add(m_shaderResult.succeeded ? "Compilation succeeded" : "Compilation failed", m_shaderResult.error.empty() ? "Diagnostics refer to the saved shader; source may become stale" : m_shaderResult.error, -108, ui::SuggestionKind::ReadOnlyText);
+                if (m_shaderArtifact && m_shaderResult.succeeded && std::find(m.requirements.begin(), m.requirements.end(), "shader-spirv-inspection-v1") != m.requirements.end()) add("Inspect saved SPIR-V metadata", "Reads the current artifact; not a rendered preview", -220);
+                if (m_shaderArtifact && m_shaderResult.succeeded && std::find(m.requirements.begin(), m.requirements.end(), "shader-render-preview-v1") != m.requirements.end()) add("Preview fragment shader…", "Review GPU execution risks before confirming", -222);
+                const auto& diagnostics = m_shaderResult.diagnostics;
+                for (std::size_t i = 0; i < diagnostics.diagnostics.size(); ++i) {
+                    const auto& d = diagnostics.diagnostics[i]; auto message = d.message;
+                    for (char& c : message) if (static_cast<unsigned char>(c) < 32 || c == 127) c = ' ';
+                    std::string textError; if (!editor::Document::canEditLosslessly(message, textError)) message = "[Invalid compiler text]";
+                    add(d.severity + " · line " + std::to_string(d.line), message, static_cast<int>(i));
+                }
+                if (diagnostics.incomplete || diagnostics.unparsedLines) add("Some compiler output was not parsed", std::to_string(diagnostics.unparsedLines) + " unparsed lines", -108, ui::SuggestionKind::ReadOnlyText);
+            }
+        } else if (m.enabled && m_containerShowing) {
+            add("< Back to module commands", "Cancels and clears container data", -96);
+            if (m_containerFuture.valid() || m_containerActionPrepareFuture.valid()) add(m_containerActionMode ? "Preparing or running the project action…" : "Reading container data…", "Escape cancels; an action may have changed container state", -99, ui::SuggestionKind::ReadOnlyText);
+            else if (m_containerActionMode && m_containerStage == 5) {
+                add("Configured project actions", "Select an action to review; nothing runs yet", -99, ui::SuggestionKind::ReadOnlyText);
+                for (std::size_t i = 0; i < m_containerProjectActions.size(); ++i) add(m_containerProjectActions[i].name, m_containerProjectActions[i].operation + " · " + m_containerProjectActions[i].composeFile, static_cast<int>(i));
+            } else if (m_containerActionMode && m_containerStage == 6) {
+                const auto& review = m_containerActionReview;
+                add("Confirm " + review.action.operation + " for configured services", "Runs the selected runtime with your privileges; Compose may run project code, load other files, and use a remote host.", -261);
+                add("Runtime", review.executable.generic_string(), -99, ui::SuggestionKind::ReadOnlyText);
+                add("Compose file", review.action.composeFile, -99, ui::SuggestionKind::ReadOnlyText);
+                std::string services; for (const auto& service : review.action.services) { if (!services.empty()) services += ", "; services += service; }
+                add("Services", services, -99, ui::SuggestionKind::ReadOnlyText);
+                add("< Cancel", "No action is run", -262);
+            } else if (m_containerActionMode && m_containerStage == 8) {
+                add("< Back to configured actions", "", -262);
+                add("Action output", "May contain sensitive data; output and runtime are bounded", -99, ui::SuggestionKind::ReadOnlyText);
+                std::string output = m_containerOutput; for (char& c : output) if ((static_cast<unsigned char>(c) < 32 && c != '\n' && c != '\t') || c == 127) c = ' ';
+                std::string textError; if (!editor::Document::canEditLosslessly(output, textError)) add("Output unavailable", "Runtime returned non-text output", -99, ui::SuggestionKind::ReadOnlyText);
+                else { std::size_t pos = 0, count = 0; while (pos < output.size() && count++ < 200) { auto end = output.find('\n', pos); if (end == std::string::npos) end = output.size(); auto line = output.substr(pos, std::min<std::size_t>(end - pos, 1000)); if (!editor::Document::canEditLosslessly(line,textError)) line = "[Truncated text]"; add(line.empty()?" ":line, "", -99, ui::SuggestionKind::ReadOnlyText); pos = end == output.size() ? end : end + 1; } if (pos < output.size()) add("Output display limited", "More output omitted", -99, ui::SuggestionKind::ReadOnlyText); }
+            }
+            else if (m_containerStage == 0) {
+                if (m_hasProject) add("List containers for this project", "Matches the Compose working-directory label exactly on the configured host. Enter confirms.", -135);
+                add("List all host containers", "Runs the selected runtime and queries all containers on its configured host. Enter confirms.", -97);
+            }
+            else if (m_containerStage == 1) {
+                add(m_containerProjectRoot.empty() ? "Containers on configured host" : "Containers matching this project", m_containerProjectRoot.empty() ? "Not filtered to this project; select one to inspect logs" : "Exact Compose working-directory label match; other containers may be omitted", -99, ui::SuggestionKind::ReadOnlyText);
+                if (m_containerListing.containers.empty()) add("No containers found", "", -99, ui::SuggestionKind::ReadOnlyText);
+                auto clean = [](std::string value) { for (char& c : value) if (static_cast<unsigned char>(c) < 32 || c == 127) c = ' '; std::string error; return editor::Document::canEditLosslessly(value, error) ? value : std::string("[Invalid text]"); };
+                for (std::size_t i = 0; i < m_containerListing.containers.size(); ++i) { const auto& item = m_containerListing.containers[i]; add(clean(item.names.empty() ? item.id : item.names), clean(item.image + " · " + item.status), static_cast<int>(i)); }
+                if (!m_containerListing.warnings.empty()) add("Listing contains unsupported fields", "Some runtime information was omitted", -99, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_containerStage == 2 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size()) {
+                add("Read recent container logs", "Runs the selected runtime; logs may contain secrets. Enter confirms.", -98);
+                if (std::find(m.requirements.begin(), m.requirements.end(), "container-lifecycle-v1") != m.requirements.end()) {
+                    add("Start container…", "Review the selected target before starting", -130);
+                    add("Stop container…", "Review the selected target before stopping", -131);
+                    add("Restart container…", "Review the selected target before restarting", -132);
+                }
+                add("< Back to containers", "", -95);
+            } else if (m_containerStage == 4 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size()) {
+                const auto& target = m_containerListing.containers[*m_containerSelected];
+                add("Confirm " + m_containerOperation + " container " + target.id, "Runs the selected runtime on its configured host. This changes container state.", -133);
+                add("< Cancel", "No action is run", -134);
+            } else if (m_containerStage == 3) {
+                add("< Back to containers", "", -95);
+                add("Recent logs", "May contain sensitive data; output is limited", -99, ui::SuggestionKind::ReadOnlyText);
+                std::size_t pos = 0, count = 0;
+                while (pos < m_containerOutput.size() && count++ < 500) { auto end = m_containerOutput.find('\n', pos); if (end == std::string::npos) end = m_containerOutput.size(); auto line = m_containerOutput.substr(pos, std::min<std::size_t>(end - pos, 1000)); for (char& ch : line) if (static_cast<unsigned char>(ch) < 32 || ch == 127) ch = ' '; std::string textError; if (!editor::Document::canEditLosslessly(line, textError)) line = "[Log line is binary, invalid UTF-8, or was truncated]"; add(line.empty() ? " " : line, "", -99, ui::SuggestionKind::ReadOnlyText); pos = end == m_containerOutput.size() ? end : end + 1; }
+                if (pos < m_containerOutput.size()) add("Log display limited", "Additional output omitted", -99, ui::SuggestionKind::ReadOnlyText);
+            }
+        } else if (m.enabled && m_dependencyShowing) {
+            add("< Back to module commands", "Clears the advisory review", -84);
+            if (m_dependencyFuture.valid() || m_dependencyDetailFuture.valid()) add(m_dependencyDetailFuture.valid() ? "Loading advisory…" : m_dependencyQuerying ? "Querying OSV…" : "Reading lockfile…", "Escape cancels", -86, ui::SuggestionKind::ReadOnlyText);
+            else if (m_dependencyArtifactStage) {
+                if (m_dependencyArtifactStage == 1) {
+                    add("Verify selected local artifact", "Reads up to 64 MiB locally. A match is not proof of publisher identity or lockfile trust. Enter confirms.", -276);
+                    add("Artifact", m_dependencyArtifactPath, -86, ui::SuggestionKind::ReadOnlyText);
+                    add("Expected checksum", m_dependencyReport.packages[m_dependencyArtifactIndex].declaredChecksum, -86, ui::SuggestionKind::ReadOnlyText);
+                    add("< Cancel", "No artifact is read", -277);
+                } else if (m_dependencyArtifactStage == 2) add("Hashing local artifact…", "Escape requests cancellation", -86, ui::SuggestionKind::ReadOnlyText);
+                else {
+                    const auto status = m_dependencyArtifactResult.status;
+                    add(status == modules::DependencyArtifactStatus::Matched ? "Checksum matches lockfile" : status == modules::DependencyArtifactStatus::Mismatched ? "Checksum does not match" : status == modules::DependencyArtifactStatus::Unsupported ? "Checksum algorithm unsupported" : "Verification failed", "Checks only bytes read against the lockfile; publisher and lockfile trust are not verified", -86, ui::SuggestionKind::ReadOnlyText);
+                    if (!m_dependencyArtifactResult.sha256.empty()) add(m_dependencyReport.packages[m_dependencyArtifactIndex].ecosystem == "Go" ? "ZIP byte SHA-256 (not Go h1)" : "Computed SHA-256", m_dependencyArtifactResult.sha256 + " · " + std::to_string(m_dependencyArtifactResult.bytesRead) + " bytes", -86, ui::SuggestionKind::ReadOnlyText);
+                    if (!m_dependencyArtifactResult.error.empty()) add("Details", m_dependencyArtifactResult.error, -86, ui::SuggestionKind::ReadOnlyText);
+                    add("< Back to provenance", "", -277);
+                }
+            } else if (m_dependencyProvenanceShowing) {
+                add(m_dependencyProvenanceSelected ? "< Back to packages" : "< Back to dependency review", "", -231);
+                add("Declared in lockfile", "Sources and checksums have not been independently verified", -86, ui::SuggestionKind::ReadOnlyText);
+                if (m_dependencyProvenanceSelected && *m_dependencyProvenanceSelected < m_dependencyReport.packages.size()) {
+                    const auto& package = m_dependencyReport.packages[*m_dependencyProvenanceSelected];
+                    add(package.name + " " + package.version, package.ecosystem, -86, ui::SuggestionKind::ReadOnlyText);
+                    add("Declared source", package.declaredSource.empty() ? "Unavailable or unsupported" : package.declaredSource, -86, ui::SuggestionKind::ReadOnlyText);
+                    add("Declared checksum", package.declaredChecksum.empty() ? "Unavailable or unsupported" : package.declaredChecksum, -86, ui::SuggestionKind::ReadOnlyText);
+                    add("Verification", "Lockfile declarations only; no package contents were checked", -86, ui::SuggestionKind::ReadOnlyText);
+                    if (m_hasProject && std::find(m.requirements.begin(), m.requirements.end(), "dependency-artifact-verify-v1") != m.requirements.end()) {
+                        const bool extended = std::find(m.requirements.begin(), m.requirements.end(), "dependency-artifact-sha2-v2") != m.requirements.end();
+                        const bool goHash = std::find(m.requirements.begin(), m.requirements.end(), "dependency-artifact-go-v1") != m.requirements.end();
+                        const bool supported = (package.ecosystem == "npm" && (package.declaredChecksum.starts_with("sha256-") || (extended && (package.declaredChecksum.starts_with("sha384-") || package.declaredChecksum.starts_with("sha512-"))))) || (package.ecosystem == "crates.io" && package.declaredChecksum.starts_with("sha256:")) || (goHash && package.ecosystem == "Go" && package.declaredChecksum.starts_with("h1:"));
+                        if (supported) add("Verify a local artifact…", "Checks a selected project's file against the lockfile", -275);
+                        else add("Local checksum verification unavailable", goHash ? "Supports npm SHA-2, crates.io SHA-256 and bounded Go module ZIPs" : extended ? "Supports npm SHA-256/384/512 SRI and crates.io SHA-256 only" : "Supports npm SHA-256 SRI and crates.io SHA-256 only", -86, ui::SuggestionKind::ReadOnlyText);
+                    }
+                } else {
+                    for (std::size_t i = 0; i < std::min<std::size_t>(m_dependencyReport.packages.size(), 1000); ++i) {
+                        const auto& package = m_dependencyReport.packages[i];
+                        add(package.name + " " + package.version, package.ecosystem + " · select to inspect declared provenance", static_cast<int>(i));
+                    }
+                    if (m_dependencyReport.packages.size() > 1000) add("Package display limited to 1000", "Additional packages are not shown", -86, ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+            else if (!m_dependencySelectedId.empty()) {
+                add("< Back to findings", "", -88);
+                if (!m_dependencyError.empty()) add("Advisory error", m_dependencyError, -86, ui::SuggestionKind::ReadOnlyText);
+                if (!m_dependencyDetailReady) add("Fetch " + m_dependencySelectedId + " from OSV", "Sends the advisory ID to api.osv.dev. Enter confirms.", -87);
+                else {
+                    auto clean = [](std::string text) { if (text.size() > 1024) text.resize(1024); for (char& c : text) if (static_cast<unsigned char>(c) < 32 || c == 127) c = ' '; std::string error; return editor::Document::canEditLosslessly(text, error) ? text : std::string("[Invalid advisory text]"); };
+                    add(clean(m_dependencyDetail.id), clean(m_dependencyDetail.summary), -86, ui::SuggestionKind::ReadOnlyText);
+                    if (!m_dependencyDetail.details.empty()) add("Details", clean(m_dependencyDetail.details), -86, ui::SuggestionKind::ReadOnlyText);
+                    for (const auto& alias : m_dependencyDetail.aliases) add("Alias", clean(alias), -86, ui::SuggestionKind::ReadOnlyText);
+                    for (const auto& fixed : m_dependencyDetail.fixedVersions) add("Reported fixed version", clean(fixed), -86, ui::SuggestionKind::ReadOnlyText);
+                    for (const auto& reference : m_dependencyDetail.references) add("Reference", clean(reference), -86, ui::SuggestionKind::ReadOnlyText);
+                    add("Review affected ranges", "Fixed versions may not apply to your dependency path; verify before upgrading.", -86, ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+            else if (m_dependencyReady && !m_dependencyQueried) {
+                if (!m_dependencyError.empty()) add("Query failed", m_dependencyError, -86, ui::SuggestionKind::ReadOnlyText);
+                if (m_dependencyReport.packages.empty()) add("No eligible packages to check", "See coverage limits below", -86, ui::SuggestionKind::ReadOnlyText);
+                else add("Check " + std::to_string(m_dependencyReport.packages.size()) + " " + m_dependencyReport.packages.front().ecosystem + " packages with OSV", "Sends package names and versions to api.osv.dev. Enter confirms.", -85);
+                if (!m_dependencyReport.packages.empty() && std::find(m.requirements.begin(), m.requirements.end(), "dependency-provenance-v1") != m.requirements.end()) add("View declared package provenance", "Local lockfile metadata; no download or verification", -230);
+                for (const auto& limitation : m_dependencyReport.limitations) add("Coverage limit", limitation, -86, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_dependencyQueried) {
+                std::size_t affected = 0, shown = 0;
+                for (const auto& package : m_dependencyReport.packages) if (!package.vulnerabilities.empty()) ++affected;
+                add("OSV results", std::to_string(affected) + " affected of " + std::to_string(m_dependencyReport.packages.size()) + " checked; absence of findings is not a safety guarantee", -86, ui::SuggestionKind::ReadOnlyText);
+                if (!m_dependencyReport.packages.empty() && std::find(m.requirements.begin(), m.requirements.end(), "dependency-provenance-v1") != m.requirements.end()) add("View declared package provenance", "Local lockfile metadata; no download or verification", -230);
+                for (const auto& limitation : m_dependencyReport.limitations) add("Coverage limit", limitation, -86, ui::SuggestionKind::ReadOnlyText);
+                m_dependencyIds.clear();
+                for (const auto& package : m_dependencyReport.packages) if (!package.vulnerabilities.empty()) {
+                    if (shown++ == 300) { add("Results limited to 300 affected packages", "", -86, ui::SuggestionKind::ReadOnlyText); break; }
+                    std::string ids; for (const auto& id : package.vulnerabilities) { if (!ids.empty()) ids += ", "; if (ids.size() + id.size() > 500) { ids += "…"; break; } ids += id; }
+                    add(package.name + " " + package.version, ids, -86, ui::SuggestionKind::ReadOnlyText);
+                    for (const auto& id : package.vulnerabilities) {
+                        if (m_dependencyIds.size() >= 1000) break;
+                        m_dependencyIds.push_back(id); add("  " + id, "Select to review advisory", static_cast<int>(m_dependencyIds.size() - 1));
+                    }
+                }
+                if (m_dependencyIds.size() == 1000) add("Advisory list limited to 1000 IDs", "Some findings may not be shown", -86, ui::SuggestionKind::ReadOnlyText);
+            } else if (!m_dependencyError.empty()) add("Lockfile could not be read", m_dependencyError, -86, ui::SuggestionKind::ReadOnlyText);
+        } else if (m.enabled && m_apiShowing) {
+            add("< Back to module commands", "Clears the request and response", -81);
+            if (m_apiEditMode) {
+                if (m_apiEditConfirm && m_apiEditSelected && *m_apiEditSelected < m_apiEditNames.size()) {
+                    add("Remove " + m_apiEditNames[*m_apiEditSelected] + "?", "Removes this template from the open document; Undo restores it. Enter confirms.", -248);
+                    add("Cancel", "Keep the template", -249);
+                } else if (m_apiEditSelected && *m_apiEditSelected < m_apiEditNames.size()) {
+                    add(m_apiEditNames[*m_apiEditSelected], "Edit request fields directly in the document", -83, ui::SuggestionKind::ReadOnlyText);
+                    add("Rename template…", "Change its display name", -246);
+                    add("Remove template…", "Review removal first", -247);
+                    add("< Back to templates", "", -249);
+                } else {
+                    add("Add request template…", "Adds a GET template; edit its URL in the document", -245);
+                    for (std::size_t i = 0; i < m_apiEditNames.size(); ++i) add(m_apiEditNames[i], "Select to rename or remove", static_cast<int>(i));
+                }
+            } else if (m_apiChoosingEnvironment) {
+                add("Environment values are plaintext", "Files and memory are not encrypted; protect secrets and avoid committing them", -83, ui::SuggestionKind::ReadOnlyText);
+                for (std::size_t i = 0; i < m_apiEnvironments.size(); ++i) add(m_apiEnvironments[i].name, "Select this environment; variable values are hidden", static_cast<int>(i));
+            } else if (!m_apiSelected) {
+                for (std::size_t i = 0; i < m_apiRequests.size(); ++i)
+                    add(m_apiRequests[i].name, m_apiRequests[i].method + " · select to review destination", static_cast<int>(i));
+            } else if (!m_apiConfirmed) {
+                const auto& request = m_apiRequests[*m_apiSelected];
+                const auto start = request.url.find("://");
+                const auto end = request.url.find_first_of("/?#", start + 3);
+                const auto destination = request.url.substr(0, end);
+                add("Send " + request.method + " to " + destination, "Sends the selected headers and body. Enter confirms; redirects are not followed.", -82);
+                add("Cancel", "No network request is sent", -81);
+            } else if (m_apiFuture.valid()) add("Sending request…", "Escape cancels", -83, ui::SuggestionKind::ReadOnlyText);
+            else {
+                add(m_apiResponse.status ? "HTTP " + std::to_string(m_apiResponse.status) : "No HTTP status", m_apiResponse.error.empty() ? "Response may contain sensitive data" : m_apiResponse.error, -83, ui::SuggestionKind::ReadOnlyText);
+                const bool canSave=m.project && std::find(m.requirements.begin(),m.requirements.end(),"api-response-save-v1")!=m.requirements.end() && m_hasProject && m_project.root().generic_string()==m_apiRoot && m_apiResponse.error.empty() && m_apiResponse.status>=100 && m_apiResponse.status<=599;
+                if (canSave && m_apiSaveStage==0) add("Save response body…", "Writes plaintext or binary data that may contain secrets; confirmation required", -202);
+                else if (m_apiSaveStage==2) { add("Confirm create: " + m_apiSavePath, "Saves exact response body, possibly sensitive, to a new project file; existing files are never overwritten", -201); add("Cancel save", "No file is written", -203); }
+                else if (m_apiSaveStage==3) add("Saving response…", "Escape requests cancellation; a file may already have been created", -83, ui::SuggestionKind::ReadOnlyText);
+                else if (m_apiSaveStage==4) add("Response body saved", "The new file may contain sensitive data", -83, ui::SuggestionKind::ReadOnlyText);
+                const bool canAssert=m.project && std::find(m.requirements.begin(),m.requirements.end(),"api-response-assertions-v1")!=m.requirements.end() && m_hasProject && m_project.root().generic_string()==m_apiRoot && m_apiResponse.error.empty() && m_apiResponse.status>=100 && m_apiResponse.status<=599;
+                if (canAssert && m_apiAssertionStage==0 && m_apiSaveStage==0) add("Check response assertions…", "Read a project JSON file locally; no request is sent", -303);
+                else if (m_apiAssertionStage==2) add("Checking response assertions…", "Escape cancels; values remain hidden", -83, ui::SuggestionKind::ReadOnlyText);
+                else if (m_apiAssertionStage==3) {
+                    add("Response assertions", m_apiAssertions.error.empty()?"Expected and actual values are hidden":m_apiAssertions.error, -83, ui::SuggestionKind::ReadOnlyText);
+                    for (std::size_t i=0;i<m_apiAssertions.results.size();++i) { const auto& result=m_apiAssertions.results[i]; add(std::string(result.passed?"Pass ":"Fail ")+std::to_string(i+1),result.detail,-83,ui::SuggestionKind::ReadOnlyText); }
+                    add("Check another assertion file…", "Local evaluation only", -303);
+                }
+                add(m_apiResponseView==0 ? "Response summary (selected)" : "Response summary", "Status, duration and byte counts", -198);
+                add(m_apiResponseView==1 ? "Headers (selected)" : "Headers", "May contain sensitive data", -199);
+                add(m_apiResponseView==2 ? "Body (selected)" : "Body", "May contain sensitive data", -200);
+                if (m_apiResponseView==0) add("Response size",std::to_string(m_apiResponse.headers.size()) + " header bytes · " + std::to_string(m_apiResponse.body.size()) + " body bytes · " + std::to_string(m_apiResponse.elapsedMilliseconds) + " ms",-83,ui::SuggestionKind::ReadOnlyText);
+                else {
+                    const auto& content = m_apiResponseView==1 ? m_apiResponse.headers : m_apiResponse.body; std::string textError;
+                    if (!editor::Document::canEditLosslessly(content, textError)) add("Binary or invalid text", std::to_string(content.size()) + " bytes", -83, ui::SuggestionKind::ReadOnlyText);
+                    else {
+                    std::size_t pos = 0, lines = 0;
+                    while (pos < content.size() && lines++ < 200) {
+                        auto end = content.find('\n', pos); if (end == std::string::npos) end = content.size();
+                        auto line = content.substr(pos, std::min<std::size_t>(end - pos, 1000));
+                        while (!line.empty() && !editor::Document::canEditLosslessly(line, textError)) line.resize(text::lastUtf8Start(line));
+                        for (char& c : line) if ((static_cast<unsigned char>(c)<32 && c!='\t') || c==127) c=' ';
+                        if (end - pos > 1000) line += "…";
+                        add(line.empty() ? " " : line, "", -83, ui::SuggestionKind::ReadOnlyText);
+                        pos = end == content.size() ? end : end + 1;
+                    }
+                    if (content.empty()) add("Empty", "No content", -83, ui::SuggestionKind::ReadOnlyText);
+                    if (pos < content.size()) add("Response display limited to 200 lines", "", -83, ui::SuggestionKind::ReadOnlyText);
+                    }
+                }
+            }
+        } else if (m.enabled && m_visualShowing) {
+            add("< Back to module commands", "", -90);
+            if (m_visualConfigStage) {
+                if (m_visualConfigStage==1) { add("Add mask…", "Enter x y width height in source pixels", -307); add("Remove mask…", "Enter a one-based mask number", -308); add("Change threshold…", "Enter a value from 0 to 255", -309); add("Cancel config edit", "No document changes", -311); }
+                else if (m_visualConfigStage==3 || m_visualConfigStage==5) add("Reviewing configuration…", "Escape cancels", -93, ui::SuggestionKind::ReadOnlyText);
+                else if (m_visualConfigStage==4) {
+                    add("Configuration draft", "JSON formatting will be normalized; screenshot files are not changed", -93, ui::SuggestionKind::ReadOnlyText);
+                    if(m_visualConfigChange.operation==modules::VisualConfigOperation::AddMask) { const auto& r=m_visualConfigChange.mask; add("Add mask", "x " + std::to_string(r.x) + " · y " + std::to_string(r.y) + " · " + std::to_string(r.width) + " × " + std::to_string(r.height),-93,ui::SuggestionKind::ReadOnlyText); }
+                    else if(m_visualConfigChange.operation==modules::VisualConfigOperation::RemoveMask) add("Remove mask", "Mask " + std::to_string(m_visualConfigChange.index+1),-93,ui::SuggestionKind::ReadOnlyText);
+                    else add("Threshold", std::to_string(m_visualConfigDraft.before.threshold) + " → " + std::to_string(m_visualConfigDraft.after.threshold),-93,ui::SuggestionKind::ReadOnlyText);
+                    add("Changed pixels", std::to_string(m_visualConfigDraft.beforeCounts.changed) + " → " + std::to_string(m_visualConfigDraft.afterCounts.changed), -93, ui::SuggestionKind::ReadOnlyText);
+                    add("Masked pixels", std::to_string(m_visualConfigDraft.beforeCounts.masked) + " → " + std::to_string(m_visualConfigDraft.afterCounts.masked), -93, ui::SuggestionKind::ReadOnlyText);
+                    add("Compared pixels", std::to_string(m_visualConfigDraft.beforeCounts.compared) + " → " + std::to_string(m_visualConfigDraft.afterCounts.compared), -93, ui::SuggestionKind::ReadOnlyText);
+                    add("Apply to open configuration", "One undoable document edit; save separately", -310); add("Cancel draft", "No document changes", -311);
+                }
+            } else if (m_visualFuture.valid() || m_visualApprovalFuture.valid() || m_visualCropFuture.valid()) add("Working…", "Escape cancels", -93, ui::SuggestionKind::ReadOnlyText);
+            else if (m_visualReview) {
+                const auto& comparison = m_visualReview->comparison();
+                add("Visual comparison", std::to_string(comparison.changedPixels) + " changed of " + std::to_string(comparison.comparedPixels) + " pixels", -93, ui::SuggestionKind::ReadOnlyText);
+                add("View baseline, candidate and difference", "Preview is limited to 1024 pixels per side", -91);
+                if (std::find(m.requirements.begin(),m.requirements.end(),"visual-review-crop-v1")!=m.requirements.end()) add("Inspect source-pixel crop", "Up to 512×512 source pixels; arrows move, 0 returns to overview; display may scale", -305);
+                if (m_visualConfigured && std::find(m.requirements.begin(),m.requirements.end(),"visual-config-edit-v1")!=m.requirements.end()) add("Edit visual configuration…", "Open the reviewed config file as a document first", -306);
+                if (!m_visualConfirm) add("Approve candidate as baseline", "Review images first; this replaces the baseline file", -92);
+                else add("Confirm replacing baseline", "Writes the reviewed candidate after checking both files", -94);
+            }
+        } else if (m.enabled && m_sqlShowing) {
+            add(m_sqlRowShowing ? "< Back to change preview" : m_sqlSchemaShowing && m_sqlSchemaSelected ? "< Back to schema" : m_sqlSchemaShowing ? "< Back to results" : "< Back to module commands", "", m_sqlRowShowing ? -304 : -75);
+            if (m_sqlChangeMode && m_sqlRowShowing) {
+                add("Sensitive row values", "Net snapshot comparison; values may contain secrets. Row identity can change.", -76, ui::SuggestionKind::ReadOnlyText);
+                add("Comparison limits", "Not a complete history; REPLACE and row ID changes can resemble insertion or deletion", -76, ui::SuggestionKind::ReadOnlyText);
+                if (m_sqlRowFuture.valid()) add("Comparing row snapshots…", "Escape cancels", -76, ui::SuggestionKind::ReadOnlyText);
+                else if (!m_sqlRowDiff.error.empty()) add("Row comparison unavailable", m_sqlRowDiff.error, -76, ui::SuggestionKind::ReadOnlyText);
+                else {
+                    add("Row presence", std::string(m_sqlRowDiff.beforeExists?"Before: present":"Before: absent") + (m_sqlRowDiff.afterExists?" · After: present":" · After: absent"), -76, ui::SuggestionKind::ReadOnlyText);
+                    add("Displayed values", "Equal text may hide numeric precision differences; truncated values are incomplete", -76, ui::SuggestionKind::ReadOnlyText);
+                    const auto safe=[](const std::string& input) { std::string error, output; if (!editor::Document::canEditLosslessly(input,error)) return std::string("[binary or invalid text]"); std::size_t end=std::min<std::size_t>(input.size(),120); if (end<input.size()) while(end && (static_cast<unsigned char>(input[end])&0xc0U)==0x80U) --end; for(unsigned char c:std::string_view(input).substr(0,end)) output+=c<32 || c==127 ? ' ' : static_cast<char>(c); if(end<input.size()) output+="…"; return output; };
+                    const auto value=[&](const modules::SqlValue& v,bool exists) { if(!exists) return std::string("[row absent]"); if(v.type==modules::SqlValueType::Null) return std::string("NULL"); std::string result; if(v.type==modules::SqlValueType::Blob) { constexpr char hex[]="0123456789abcdef"; result="BLOB 0x"; const auto count=std::min<std::size_t>(v.value.size(),48); for(std::size_t i=0;i<count;++i) { const auto c=static_cast<unsigned char>(v.value[i]); result+=hex[c>>4]; result+=hex[c&15]; } if(count<v.value.size() || v.truncated) result+="… (truncated)"; } else { result=safe(v.value); if(v.truncated) result+=" (truncated)"; } return result; };
+                    for(const auto& cell:m_sqlRowDiff.cells) {
+                        add(safe(cell.column), cell.before.truncated || cell.after.truncated ? "Possibly different · truncated" : cell.changed ? "Displayed values differ" : "Same displayed value", -76, ui::SuggestionKind::ReadOnlyText);
+                        add("Before",value(cell.before,m_sqlRowDiff.beforeExists),-76,ui::SuggestionKind::ReadOnlyText);
+                        add("After",value(cell.after,m_sqlRowDiff.afterExists),-76,ui::SuggestionKind::ReadOnlyText);
+                    }
+                }
+            } else if (m_sqlChangeMode) {
+                if (m_sqlChangeFuture.valid()) add("Previewing SQLite change…", "Isolated copy; Escape cancels", -76, ui::SuggestionKind::ReadOnlyText);
+                else if (!m_sqlChange.error.empty()) add("Preview failed", m_sqlChange.error, -76, ui::SuggestionKind::ReadOnlyText);
+                else if (m_sqlChangeStage == 1) {
+                    add("SQL change preview", m_sqlQuery, -76, ui::SuggestionKind::ReadOnlyText);
+                    add("Rows affected", std::to_string(m_sqlChange.affected) + " · source: " + m_sqlDatabase, -76, ui::SuggestionKind::ReadOnlyText);
+                    if (m_sqlBound) add("Bound values hidden", "Bindings file may contain secrets; the saved file is checked again before export", -76, ui::SuggestionKind::ReadOnlyText);
+                    add("Choose a new database copy", "Original remains unchanged; no external writers are locked", -301);
+                } else if (m_sqlChangeStage == 3) {
+                    add("SQL change preview", m_sqlQuery, -76, ui::SuggestionKind::ReadOnlyText);
+                    add("Rows affected", std::to_string(m_sqlChange.affected) + " · source: " + m_sqlDatabase, -76, ui::SuggestionKind::ReadOnlyText);
+                    if (m_sqlBound) add("Bound values hidden", "Bindings file may contain secrets; the saved file is checked again before export", -76, ui::SuggestionKind::ReadOnlyText);
+                    add("Confirm create database copy: " + m_sqlCsvPath, "Creates a separate file; source and path may race with external processes", -302);
+                } else if (m_sqlChangeStage == 4) add("Creating database copy…", "Escape requests cancellation", -76, ui::SuggestionKind::ReadOnlyText);
+                else if (m_sqlChangeStage == 5) add("Database copy created", m_sqlCsvPath, -76, ui::SuggestionKind::ReadOnlyText);
+                if (!m_sqlChangeFuture.valid() && m_sqlChange.error.empty() && (m_sqlChangeStage==1 || m_sqlChangeStage==3)) {
+                    add("Observed rows (incomplete)", std::to_string(m_sqlChange.observedRows.size()) + (m_sqlChange.observedRowsTruncated ? " · limit reached" : "") + " · row IDs may be sensitive; values are not shown", -76, ui::SuggestionKind::ReadOnlyText);
+                    add("Some changes are not observed", "WITHOUT ROWID tables, whole-table deletes and REPLACE conflict deletions may be omitted", -76, ui::SuggestionKind::ReadOnlyText);
+                    for (std::size_t rowIndex=0; rowIndex<m_sqlChange.observedRows.size(); ++rowIndex) {
+                        const auto& row=m_sqlChange.observedRows[rowIndex]; std::string table, textError;
+                        if (!editor::Document::canEditLosslessly(row.table,textError)) table="[invalid table name]";
+                        else { for (unsigned char c : row.table) table += c < 32 || c == 127 ? ' ' : static_cast<char>(c); }
+                        const char* op=row.operation==modules::SqlRowOperation::Insert ? "Insert" : row.operation==modules::SqlRowOperation::Update ? "Update" : "Delete";
+                        const bool canInspect=std::find(m.requirements.begin(),m.requirements.end(),"sql-change-row-diff-v1")!=m.requirements.end();
+                        if (canInspect) add(std::string(op) + " · " + table, "rowid " + std::to_string(row.rowid) + " · select to inspect sensitive values", -4000-static_cast<int>(rowIndex));
+                        else add(std::string(op) + " · " + table, "rowid " + std::to_string(row.rowid), -76, ui::SuggestionKind::ReadOnlyText);
+                    }
+                }
+            } else if (m_sqlSchemaShowing) {
+                const auto safeSchema = [](const std::string& value) {
+                    std::string textError, clean;
+                    if (!editor::Document::canEditLosslessly(value,textError)) return std::string("[binary or invalid text]");
+                    for (unsigned char c:value) clean += c<32 || c==127 ? ' ' : static_cast<char>(c);
+                    return clean;
+                };
+                if (m_sqlSchemaFuture.valid()) add("Inspecting the query snapshot…", "Escape cancels", -76, ui::SuggestionKind::ReadOnlyText);
+                else if (!m_sqlSchema.error.empty()) add("Schema inspection failed", m_sqlSchema.error, -76, ui::SuggestionKind::ReadOnlyText);
+                else if (m_sqlSchemaSelected && *m_sqlSchemaSelected < m_sqlSchema.objects.size()) {
+                    const auto& object=m_sqlSchema.objects[*m_sqlSchemaSelected];
+                    add(safeSchema(object.type) + ": " + safeSchema(object.name), object.truncated ? "Metadata truncated" : "Read-only snapshot metadata", -76, ui::SuggestionKind::ReadOnlyText);
+                    if (std::find(m.requirements.begin(), m.requirements.end(), "sql-columns-v1") != m.requirements.end() && (object.type == "table" || object.type == "view")) {
+                        if (object.truncated) add("Columns unavailable", "Schema object name was truncated", -76, ui::SuggestionKind::ReadOnlyText);
+                        else if (m_sqlColumnsFuture.valid()) add("Inspecting columns…", "The same read-only query snapshot is used", -76, ui::SuggestionKind::ReadOnlyText);
+                        else if (!m_sqlColumns.error.empty()) add("Column inspection failed", m_sqlColumns.error, -76, ui::SuggestionKind::ReadOnlyText);
+                        else {
+                            add("Columns", std::to_string(m_sqlColumns.columns.size()) + (m_sqlColumns.truncated ? " · truncated" : "") + " · snapshot metadata", -76, ui::SuggestionKind::ReadOnlyText);
+                            for (const auto& column : m_sqlColumns.columns) {
+                                std::string detail = safeSchema(column.declaredType.empty() ? "(no declared type)" : column.declaredType);
+                                if (column.notNull) detail += " · NOT NULL";
+                                if (column.primaryKeyOrder) detail += " · primary key " + std::to_string(column.primaryKeyOrder);
+                                if (column.hasDefault) detail += " · default " + safeSchema(column.defaultValue);
+                                if (column.hiddenKind == 1) detail += " · hidden";
+                                if (column.hiddenKind == 2 || column.hiddenKind == 3) detail += " · generated";
+                                if (column.truncated) detail += " · truncated";
+                                add(safeSchema(column.name), detail, -76, ui::SuggestionKind::ReadOnlyText);
+                            }
+                        }
+                    }
+                    if (!object.definitionAvailable) add("No CREATE definition available", "", -76, ui::SuggestionKind::ReadOnlyText);
+                    else { std::size_t count=0; for (const auto& line:text::wrapLines(safeSchema(object.definition),58)) { if (count++>=512) break; add(line.empty()?" ":line,"",-76,ui::SuggestionKind::ReadOnlyText); } }
+                } else {
+                    add("SQLite schema", std::to_string(m_sqlSchema.objects.size()) + " objects" + (m_sqlSchema.truncated ? " · truncated" : "") + " · query snapshot", -76, ui::SuggestionKind::ReadOnlyText);
+                    for (std::size_t i=0;i<m_sqlSchema.objects.size();++i) {
+                        const auto& object=m_sqlSchema.objects[i];
+                        add(safeSchema(object.type) + ": " + safeSchema(object.name), "Table: " + safeSchema(object.table) + (object.truncated ? " · truncated" : ""), static_cast<int>(i));
+                    }
+                }
+            }
+            else if (m_sqlFuture.valid()) add("Running read-only SQLite snapshot query…", "Escape cancels", -76, ui::SuggestionKind::ReadOnlyText);
+            else if (!m_sqlResult.error.empty()) add("Query failed", m_sqlResult.error, -76, ui::SuggestionKind::ReadOnlyText);
+            else {
+                const auto safe = [](const std::string& value) {
+                    std::string out; std::string error;
+                    if (!editor::Document::canEditLosslessly(value, error)) return std::string("[binary or invalid text]");
+                    std::size_t end = std::min<std::size_t>(value.size(), 300);
+                    if (end < value.size()) while (end && (static_cast<unsigned char>(value[end]) & 0xc0U) == 0x80U) --end;
+                    for (unsigned char c : std::string_view(value).substr(0, end)) { if (c < 32 || c == 127) out += ' '; else out += static_cast<char>(c); }
+                    if (end < value.size()) out += "…";
+                    return out;
+                };
+                if (m_sqlCsvStage==0) add("Browse database schema", "Inspect the same snapshot used by this query", -240);
+                add(m_sqlExplain ? "SQLite query plan" : "SQLite query results", std::to_string(m_sqlResult.rows.size()) + " rows" + (m_sqlResult.truncated ? " · truncated" : ""), -76, ui::SuggestionKind::ReadOnlyText);
+                if (m_sqlCsvStage == 0) {
+                    const bool partial = m_sqlResult.truncated || std::any_of(m_sqlResult.rows.begin(),m_sqlResult.rows.end(),[](const auto& row) { return std::any_of(row.begin(),row.end(),[](const auto& value) { return value.truncated; }); });
+                    add(partial ? "Export partial results to CSV" : "Export results to CSV", partial ? "Only retained data is exported; formula protection changes risky text" : "Plaintext output; formula protection changes risky text", -175);
+                } else if (m_sqlCsvStage == 1) add("Preparing CSV…", "Escape cancels", -76, ui::SuggestionKind::ReadOnlyText);
+                else if (m_sqlCsvStage == 3) add("Confirm create CSV: " + m_sqlCsvPath, std::string(m_sqlCsv.partial ? "Partial results. " : "") + "Plaintext results; risky text is prefixed with an apostrophe. Existing files are not overwritten.", -176);
+                else if (m_sqlCsvStage == 4) add("Writing CSV…", "Escape requests cancellation", -76, ui::SuggestionKind::ReadOnlyText);
+                else if (m_sqlCsvStage == 5) add("CSV created", m_sqlCsvPath + " · plaintext; protect sensitive results", -76, ui::SuggestionKind::ReadOnlyText);
+                for (std::size_t rowIndex = 0; rowIndex < m_sqlResult.rows.size(); ++rowIndex) {
+                    std::string line;
+                    const auto& row = m_sqlResult.rows[rowIndex];
+                    for (std::size_t col = 0; col < row.size(); ++col) {
+                        if (!line.empty()) line += " · ";
+                        line += safe(m_sqlResult.columns[col]) + ": ";
+                        const auto& value = row[col];
+                        line += value.type == modules::SqlValueType::Null ? "NULL" : value.type == modules::SqlValueType::Blob ? "[BLOB " + std::to_string(value.value.size()) + " bytes]" : safe(value.value);
+                        if (value.truncated) line += "…";
+                        if (line.size() > 1200) { line.resize(text::lastUtf8Start(line.substr(0, 1201))); line += "…"; break; }
+                    }
+                    add("Row " + std::to_string(rowIndex + 1), line, -76, ui::SuggestionKind::ReadOnlyText);
+                }
+            }
+        } else if (m.enabled && m_releaseNotesShowing) {
+            add(m_releaseNotesPreview ? "< Back to selection" : "< Back to module commands", "", -72);
+            add("Insert selected items as draft", "Inserts at the cursor; review and edit before saving", -73);
+            if (m_releaseNotesPreview) {
+                add("Draft preview", std::to_string(m_releaseNotesDraft.included) + " selected items · editable after insertion", -74, ui::SuggestionKind::ReadOnlyText);
+                auto preview=std::string_view(m_releaseNotesDraft.markdown).substr(0,std::min<std::size_t>(m_releaseNotesDraft.markdown.size(),65536));
+                std::string previewError; while (!preview.empty() && !editor::Document::canEditLosslessly(preview,previewError)) preview.remove_suffix(1);
+                std::size_t shown=0; for (const auto& line : text::wrapLines(preview,58)) { if (shown++>=512) break; add(line.empty() ? " " : line,"",-74,ui::SuggestionKind::ReadOnlyText); }
+                if (shown>=512 || preview.size()<m_releaseNotesDraft.markdown.size()) add("Preview truncated", "The full draft will be inserted", -74, ui::SuggestionKind::ReadOnlyText);
+            } else {
+            add("Preview selected draft", "Review the generated Markdown before insertion", -195);
+            const auto selected=std::count_if(m_releaseNotesEntries.begin(),m_releaseNotesEntries.end(),[](const auto& e) { return e.selected; });
+            add(m_releaseNotesFilter==0 ? "All items (selected)" : "All items", std::to_string(selected) + " selected", -196);
+            add(m_releaseNotesFilter==1 ? "Selected items (selected)" : "Selected items", "Review only chosen commits and tasks", -197);
+            if (m_releaseNotesFuture.valid()) add("Loading commits and tasks…", "", -74, ui::SuggestionKind::ReadOnlyText);
+            else if (m_releaseNotesEntries.empty()) add("No commits or tasks found", "", -74, ui::SuggestionKind::ReadOnlyText);
+            for (std::size_t i = 0; i < m_releaseNotesEntries.size(); ++i) {
+                const auto& item = m_releaseNotesEntries[i];
+                if (m_releaseNotesFilter==1 && !item.selected) continue;
+                add(std::string(item.selected ? "[x] " : "[ ] ") + item.title, item.reference + " · " + item.category + " · Enter toggles", static_cast<int>(i));
+            }
+            }
+        } else if (m.enabled && m_accessibilityShowing) {
+            add("< Back to module commands", "", -70);
+            add("Static checks only", m_accessibilityAudit.limitation, -71, ui::SuggestionKind::ReadOnlyText);
+            if (m_accessibilityFuture.valid()) add("Checking current HTML…", "", -71, ui::SuggestionKind::ReadOnlyText);
+            else if (m_accessibilityAudit.findings.empty()) add("No findings in supported checks", "This is not a complete accessibility assessment", -71, ui::SuggestionKind::ReadOnlyText);
+            for (std::size_t i = 0; i < m_accessibilityAudit.findings.size(); ++i) {
+                const auto& finding = m_accessibilityAudit.findings[i];
+                add(finding.message, finding.rule + " · line " + std::to_string(finding.line) + ":" + std::to_string(finding.column), static_cast<int>(i));
+            }
+        } else if (m.enabled && m_moduleMarkdownShowing) {
+            add("< Back to module commands", "", -12);
+            for (std::size_t i = 0; i < m_moduleMarkdownOutline.headings.size(); ++i) {
+                const auto& heading = m_moduleMarkdownOutline.headings[i];
+                add(heading.text.empty() ? "(empty heading)" : heading.text, "Heading " + std::to_string(heading.level) + " · line " + std::to_string(heading.line + 1), static_cast<int>(i));
+            }
+        } else if (m.enabled && m_moduleCMakeShowing) {
+            add(m_moduleCMakeOption ? "< Back to options" : m_moduleCMakeTarget || m_moduleCMakeOptions ? "< Back to targets" : "< Back to module commands", "", -9);
+            if(m_cmakeBuildStage>=2) {
+                if(m_cmakeBuildPrepareFuture.valid()) add("Preparing build review…","No process started",-10,ui::SuggestionKind::ReadOnlyText);
+                else if(m_cmakeBuildStage==3) {add("Review target build","Runs CMake, build tools and project code with your privileges",-10,ui::SuggestionKind::ReadOnlyText);add("CMake executable",m_cmakeBuildPlan.executable.generic_string(),-10,ui::SuggestionKind::ReadOnlyText);for(const auto& arg:m_cmakeBuildPlan.arguments)add("Argument",arg,-10,ui::SuggestionKind::ReadOnlyText);add("Confirm target build","Runs project code and can modify files",-401);}
+                else if(m_cmakeBuildFuture.valid()) add("Building target…","Escape requests cancellation; files may already have changed",-10,ui::SuggestionKind::ReadOnlyText);
+                else {add("Build result",m_cmakeBuildResult.cancelled?"Cancelled; files may have changed":m_cmakeBuildResult.error.empty()?"Exit code " + std::to_string(m_cmakeBuildResult.exitCode):m_cmakeBuildResult.error,-10,ui::SuggestionKind::ReadOnlyText);if(m_cmakeBuildResult.outputTruncated)add("Output truncated","Output limited to 1 MiB",-10,ui::SuggestionKind::ReadOnlyText);std::string error;if(editor::Document::canEditLosslessly(m_cmakeBuildResult.output,error)){auto text=m_cmakeBuildResult.output;for(char& c:text)if(static_cast<unsigned char>(c)<32 && c!='\n' && c!='\t')c=' ';std::size_t pos=0,n=0;while(pos<text.size() && n++<100){auto end=text.find('\n',pos);auto line=text.substr(pos,end==std::string::npos?std::string::npos:end-pos);if(line.size()>1024)line.resize(1024);add(line.empty()?" ":line,"Build output",-10,ui::SuggestionKind::ReadOnlyText);if(end==std::string::npos)break;pos=end+1;}}}
+            } else if (m_moduleCMakeOptions) {
+                if (m_cmakeValuesFuture.valid()) add("Reading typed cache values…","Saved cache only",-10,ui::SuggestionKind::ReadOnlyText);
+                else if (m_cmakeValueMode && m_cmakeValueSelected && *m_cmakeValueSelected<m_cmakeValues.size()) {
+                    const auto safe=[](const std::string& value){std::string error;return editor::Document::canEditLosslessly(value,error)?value:std::string("(unreadable)");};
+                    const auto& v=m_cmakeValues[*m_cmakeValueSelected]; add(safe(v.name) + " = " + safe(v.value),v.type + " · path values are unverified",-10,ui::SuggestionKind::ReadOnlyText);
+                    for(const auto& c:v.choices) add("Allowed: " + safe(c),"Exact choice",-10,ui::SuggestionKind::ReadOnlyText);
+                    if(!m_cmakeCacheUpdate.path.empty()) add("Confirm " + safe(v.name) + " = " + safe(m_cmakeCacheTarget),"Writes reviewed cache; reconfigure before building",-188);
+                    else if(!m_cmakeCachePrepareFuture.valid() && !m_cmakeCacheSaveFuture.valid()) add("Enter new value…","Exact allowed choice if restricted",-321);
+                } else if(m_cmakeValueMode) {const auto safe=[](const std::string& value){std::string error;return editor::Document::canEditLosslessly(value,error)?value:std::string("(unreadable)");};for(std::size_t i=0;i<m_cmakeValues.size();++i) add(safe(m_cmakeValues[i].name) + " = " + safe(m_cmakeValues[i].value),m_cmakeValues[i].type + " · select to edit",static_cast<int>(i));}
+                else if (m_cmakeCachePrepareFuture.valid() || m_cmakeCacheSaveFuture.valid()) add("Working with CMake cache…", "Wait for the operation to finish", -10, ui::SuggestionKind::ReadOnlyText);
+                else if (m_moduleCMakeOption && *m_moduleCMakeOption < m_moduleCMakeModel.options.size()) {
+                    const auto& option = m_moduleCMakeModel.options[*m_moduleCMakeOption];
+                    add(option.name + " = " + option.value, option.description, -10, ui::SuggestionKind::ReadOnlyText);
+                    if (!m_cmakeCacheUpdate.path.empty()) add("Confirm " + option.name + " = " + m_cmakeCacheTarget, "Writes the reviewed CMakeCache.txt; reconfigure before building", -188);
+                    else { add("Set ON", "Review cache change before writing", -186); add("Set OFF", "Review cache change before writing", -187); }
+                } else if (!m_moduleCMakeModel.optionsAvailable) add("Build options unavailable", "Prepare the query and reconfigure", -10);
+                else { if(m_moduleCMakeEditing && !m_moduleCMakeStale && std::find(m.requirements.begin(),m.requirements.end(),"cmake-cache-values-v1")!=m.requirements.end()) add("Text and path options", "Read saved STRING/PATH/FILEPATH values", -320); if (m_moduleCMakeStale) add("Reconfigure required", "Cache changed; File API options are stale", -10, ui::SuggestionKind::ReadOnlyText);
+                    for (std::size_t i=0;i<m_moduleCMakeModel.options.size();++i) { const auto& option=m_moduleCMakeModel.options[i]; add(option.name + " = " + option.value, option.description + (m_moduleCMakeEditing && !m_moduleCMakeStale ? " · select to edit" : ""), m_moduleCMakeEditing && !m_moduleCMakeStale ? static_cast<int>(i) : -10, m_moduleCMakeEditing && !m_moduleCMakeStale ? ui::SuggestionKind::Task : ui::SuggestionKind::ReadOnlyText); }
+                }
+            } else if (m_moduleCMakeTarget && *m_moduleCMakeTarget < m_moduleCMakeModel.targets.size()) {
+                const auto& target = m_moduleCMakeModel.targets[*m_moduleCMakeTarget];
+                if(!m_moduleCMakeEditing && !m_moduleCMakeStale && std::find(m.requirements.begin(),m.requirements.end(),"cmake-build-target-v1")!=m.requirements.end()) add("Build this target…","Review executable and command before running",-400);
+                for (std::size_t i = 0; i < target.sources.size(); ++i) add(target.sources[i].path, target.sources[i].generated ? "Generated source" : "Source", static_cast<int>(i));
+                for (const auto& group : target.groups) {
+                    add("Language: " + group.language, "Compile group", -10);
+                    for (const auto& include : group.includes) add("Include: " + include, "Compile group", -10);
+                    for (const auto& define : group.definitions) add("Define: " + define, "Compile group", -10);
+                    for (const auto& flag : group.flags) add("Flag: " + flag, "Compile group", -10);
+                }
+            } else {
+                add("Build options", m_moduleCMakeModel.optionsAvailable ? std::to_string(m_moduleCMakeModel.options.size()) + " Boolean options" : "Query and reconfigure to load", -11);
+                for (std::size_t i = 0; i < m_moduleCMakeModel.targets.size(); ++i) {
+                    const auto& target = m_moduleCMakeModel.targets[i]; add(target.name, target.type + (target.configuration.empty() ? "" : " · " + target.configuration), static_cast<int>(i));
+                }
+            }
+        } else if (m.enabled && m_moduleScanShowingResults) {
+            add("< Back to module commands", "", -7);
+            add(m_moduleScanFilter==0 ? "All findings (selected)" : "All findings", "Pattern scan; opening a file reveals its contents", -189);
+            add(m_moduleScanFilter==1 ? "AWS findings (selected)" : "AWS findings", "Show AWS access-key patterns", -190);
+            add(m_moduleScanFilter==2 ? "GitHub findings (selected)" : "GitHub findings", "Show GitHub token patterns", -191);
+            add(m_moduleScanFilter==3 ? "Private keys (selected)" : "Private keys", "Show private-key headers", -192);
+            for (std::size_t i = 0; i < m_moduleScanResults.findings.size(); ++i) {
+                const auto& f = m_moduleScanResults.findings[i];
+                if ((m_moduleScanFilter==1 && f.kind.find("AWS")==std::string::npos) || (m_moduleScanFilter==2 && f.kind.find("GitHub")==std::string::npos) || (m_moduleScanFilter==3 && f.kind.find("Private key")==std::string::npos)) continue;
+                add(f.path + ":" + std::to_string(f.line + 1) + ":" + std::to_string(f.column + 1), f.kind, static_cast<int>(i));
+            }
         } else if (m.enabled) {
-            for (std::size_t i = 0; i < m.commands.size(); ++i) add(m.commands[i].title, "Insert text", static_cast<int>(i));
+            for (std::size_t i = 0; i < m.commands.size(); ++i) add(m.commands[i].title, m.commands[i].action.empty() ? "Insert text" : (m.commands[i].action == "compare-visual-images" || m.commands[i].action == "compare-visual-configured") ? "Compare screenshots locally" : m.commands[i].action == "web-preview" ? "Render a trusted web preview on macOS" : m.commands[i].action == "flash-firmware" ? "Flash reviewed firmware after confirmation" : m.commands[i].action == "serial-monitor" ? "Find serial devices and capture after confirmation" : m.commands[i].action == "identify-usb-boards" ? "Identify USB descriptors using a project mapping" : m.commands[i].action == "board-profile" ? "Inspect an OpenOCD profile" : m.commands[i].action == "fetch-pull-request" ? "Review a GitHub pull request" : m.commands[i].action == "configured-container-actions" ? "Review and run a configured Compose action" : m.commands[i].action == "inspect-containers" ? "List containers and review logs" : m.commands[i].action == "review-dependency-risk" ? "Check an npm, Go or Cargo lockfile against OSV" : m.commands[i].action == "edit-api-collection" ? "Add, rename or remove request templates" : (m.commands[i].action == "open-api-requests" || m.commands[i].action == "open-api-environment") ? "Choose and confirm an HTTP request" : m.commands[i].action == "compile-shader" ? "Compile a saved GLSL shader" : m.commands[i].action == "release-note-builder" ? "Select commits and tasks for an editable draft" : m.commands[i].action == "accessibility-audit" ? "Run limited static HTML checks" : (m.commands[i].action == "sql-query" || m.commands[i].action == "sql-explain" || m.commands[i].action == "sql-query-bound" || m.commands[i].action == "sql-explain-bound") ? "Query a standalone SQLite snapshot locally" : m.commands[i].action == "diagram-preview" ? "Preview current Mermaid flowchart" : m.commands[i].action == "run-rust-ownership" ? "Run Cargo after explicit confirmation" : m.commands[i].action == "review-rust-ownership" ? "Review Rust ownership diagnostics" : m.commands[i].action == "crash-dump-reader" ? "Inspect minidump metadata" : m.commands[i].action == "inspect-toolchain-profiles" ? "Inspect unverified toolchain profiles" : m.commands[i].action == "inspect-svd-registers" ? "Inspect declared SVD registers" : m.commands[i].action == "review-linker-map" ? "Review linker map memory estimates" : m.commands[i].action == "hex-editor" ? "Inspect and edit binary bytes" : m.commands[i].action == "run-ctest" ? "Discover and run CTest tests" : (m.commands[i].action == "browse-python-environments" || m.commands[i].action == "manage-python-environments" || m.commands[i].action == "install-python-pylsp") ? "Discover and manage Python environments" : (m.commands[i].action == "log-correlation" || m.commands[i].action == "log-correlation-json") ? "Align and search saved logs" : m.commands[i].action == "design-token-explorer" ? "Explore and search design tokens" : m.commands[i].action == "compare-localization" ? "Compare localization JSON files" : m.commands[i].action == "binary-inspector" ? "Inspect a binary without running it" : m.commands[i].action == "benchmark-comparison" ? "Compare two saved benchmark reports" : m.commands[i].action == "git-range-history" ? "Trace selected lines through Git history" : m.commands[i].action == "git-file-history" ? "Inspect the current file history with Git" : m.commands[i].action == "scan-secrets" ? "Scan project files locally" : (m.commands[i].action == "coverage-lcov" || m.commands[i].action == "coverage-cobertura") ? "Import line coverage" : m.commands[i].action == "edit-cmake-options" ? "Review a Boolean cache change" : m.commands[i].action == "browse-cmake" ? "Browse existing CMake metadata" : m.commands[i].action == "prepare-cmake-query" ? "Create a CMake query on request" : m.commands[i].action == "markdown-outline" ? "Navigate headings in the current buffer" : m.commands[i].action == "markdown-preview" ? "Preview the current Markdown buffer" : m.commands[i].action == "markdown-external-links" ? "Review and check an external link" : m.commands[i].action == "markdown-local-links" ? "Check local project links" : m.commands[i].action == "explain-debug-local" ? "Explain debugger state locally" : "Explain the current diagnostic locally", static_cast<int>(i));
         }
     }
     const auto pageSize = pagedContentCount();
@@ -2404,16 +3893,752 @@ void Application::refreshModuleSuggestions() {
     m_modulePage = std::min(m_modulePage, pages - 1); m_moduleChoices.clear();
     auto append = [this](const Entry& e) {
         m_suggestionPaths.push_back(e.label); m_suggestionDetails.push_back(e.detail);
-        m_suggestions.push_back({m_suggestionPaths.back(), ui::SuggestionKind::Task, m_suggestionDetails.back()});
+        m_suggestions.push_back({m_suggestionPaths.back(), e.kind, m_suggestionDetails.back()});
         m_moduleChoices.push_back(e.choice);
     };
     const auto start = m_modulePage * pageSize;
     for (std::size_t i = start; i < std::min(entries.size(), start + pageSize); ++i) append(entries[i]);
-    if (m_modulePage) append({"< Previous page", "", -1});
-    if (m_modulePage + 1 < pages) append({"Next page >", "", -2});
+    if (m_modulePage) append({"< Previous page", "", -1, ui::SuggestionKind::Task});
+    if (m_modulePage + 1 < pages) append({"Next page >", "", -2, ui::SuggestionKind::Task});
     if (m_selectedSuggestion >= static_cast<int>(m_moduleChoices.size())) m_selectedSuggestion = -1;
 }
+bool Application::navigateSnippet(bool backwards) {
+    if (!m_snippetSession) return false;
+    auto& session = *m_snippetSession;
+    if (!m_hasDocument || m_filePath != session.file || (m_hasProject ? m_project.root().generic_string() : std::string{}) != session.root || session.active >= session.fields.size()) { m_snippetSession.reset(); return false; }
+    const auto current = m_document.toUtf8(); const auto& old = session.snapshot;
+    const auto active = session.active; const auto range = session.fields[active];
+    const auto tail = old.size() - range.end;
+    if (current.size() > 16U * 1024U * 1024U || current.size() < range.start + tail ||
+        !std::string_view(current).starts_with(std::string_view(old).substr(0, range.start)) ||
+        !std::string_view(current).ends_with(std::string_view(old).substr(range.end))) { m_snippetSession.reset(); setStatus("Snippet navigation ended after an edit outside its field", false); return false; }
+    if (old != current) {
+        const auto oldEnd = range.end, newEnd = current.size() - tail;
+        session.fields[active].end = newEnd;
+        for (std::size_t i = active + 1; i < session.fields.size(); ++i) {
+            session.fields[i].start = session.fields[i].start - oldEnd + newEnd;
+            session.fields[i].end = session.fields[i].end - oldEnd + newEnd;
+        }
+        if (session.finalFieldIndex > active) session.finalOffset = session.finalOffset - oldEnd + newEnd;
+    }
+    session.snapshot = current;
+    const editor::TextPosition cursor{m_document.cursorLine(), m_document.cursorColumn()};
+    const auto start = snippetByteOffset(current, m_document.hasSelection() ? m_document.selectionStart() : cursor);
+    const auto end = snippetByteOffset(current, m_document.hasSelection() ? m_document.selectionEnd() : cursor);
+    if (start < session.fields[active].start || end > session.fields[active].end) { m_snippetSession.reset(); setStatus("Snippet navigation ended", false); return false; }
+    if (!backwards && active + 1 == session.fields.size()) {
+        const auto position = snippetPosition(current, session.finalOffset); m_snippetSession.reset();
+        m_document.setCursor(position.line, position.column); setStatus("Snippet complete", false); return true;
+    }
+    session.active = backwards ? (active ? active - 1 : 0) : active + 1;
+    const auto next = session.fields[session.active]; const auto first = snippetPosition(current, next.start), last = snippetPosition(current, next.end);
+    m_document.setCursor(first.line, first.column); m_document.extendSelectionTo(last.line, last.column);
+    setStatus("Snippet field " + std::to_string(session.active + 1) + "/" + std::to_string(session.fields.size()) + " · Tab next · Shift+Tab previous · Escape ends", false); return true;
+}
+
+bool Application::pythonModuleReady(std::string& error) {
+    if (!m_pythonManage || !m_pythonPreferenceReady || !m_hasProject || m_project.root().generic_string() != m_pythonRoot || m_moduleSelected >= m_modules.size() || std::getenv("LUCID_SETTINGS_READ_ONLY")) { error = "Python preference or project is unavailable; reopen the module"; return false; }
+    const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh;
+    if (!modules::list(m_moduleRoot, fresh, error)) return false;
+    const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+    if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements ||
+        std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "manage-python-environments"; })) { error = "Module changed or was disabled; reopen Modules"; return false; }
+    error.clear(); return true;
+}
+
+bool Application::ctestModuleReady(std::string& error) {
+    if (!m_hasProject || m_project.root().generic_string() != m_ctestRoot || m_moduleSelected >= m_modules.size()) { error = "Project changed; reopen the module"; return false; }
+    const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh;
+    if (!modules::list(m_moduleRoot, fresh, error)) return false;
+    const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+    if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "run-ctest"; })) { error = "Module changed or was disabled; reopen Modules"; return false; }
+    error.clear(); return true;
+}
+
+bool Application::hexModuleReady(std::string& error) {
+    if (!m_hasProject || m_project.root().generic_string() != m_hexRoot || m_moduleSelected >= m_modules.size()) { error = "Project changed; return to the original project"; return false; }
+    const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh;
+    if (!modules::list(m_moduleRoot, fresh, error)) return false;
+    const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+    if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "hex-editor"; })) { error = "Module changed or was disabled; reopen Modules"; return false; }
+    error.clear(); return true;
+}
+
+bool Application::dependencyArtifactReady(std::string& error) const {
+    if (!m_dependencyShowing || !m_dependencyProvenanceShowing || !m_dependencyProvenanceSelected || *m_dependencyProvenanceSelected != m_dependencyArtifactIndex || m_dependencyArtifactIndex >= m_dependencyReport.packages.size() || !m_hasProject || m_project.root().generic_string() != m_dependencyArtifactRoot || !m_hasDocument || m_filePath != m_dependencyFile || m_document.revision() != m_dependencyRevision || m_document.toUtf8() != m_dependencyDocumentSnapshot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_dependencyModule) { error = "Lockfile, project or selection changed; reopen the review"; return false; }
+    std::vector<modules::Module> fresh;
+    if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) { return module.id == m_dependencyModule && module.enabled && module.valid && module.project && std::find(module.requirements.begin(), module.requirements.end(), "dependency-artifact-verify-v1") != module.requirements.end() && (m_dependencyReport.packages[m_dependencyArtifactIndex].ecosystem != "Go" || std::find(module.requirements.begin(), module.requirements.end(), "dependency-artifact-go-v1") != module.requirements.end()) && (!(m_dependencyReport.packages[m_dependencyArtifactIndex].ecosystem == "npm" && (m_dependencyReport.packages[m_dependencyArtifactIndex].declaredChecksum.starts_with("sha384-") || m_dependencyReport.packages[m_dependencyArtifactIndex].declaredChecksum.starts_with("sha512-"))) || std::find(module.requirements.begin(), module.requirements.end(), "dependency-artifact-sha2-v2") != module.requirements.end()) && std::any_of(module.commands.begin(), module.commands.end(), [](const auto& command) { return command.action == "review-dependency-risk"; }); })) { error = "Module changed or disabled; reopen the review"; return false; }
+    std::string disk;
+    if (!m_project.readFileBounded(normalizeRelative(m_dependencyFile), disk, error, 8U * 1024U * 1024U) || disk != m_diskContents) { error = "Lockfile changed on disk; reopen the review"; return false; }
+    error.clear(); return true;
+}
+
 void Application::applyModuleCommand() {
+    const auto moduleStillEnabled = [this](const std::string& id, const char* action) {
+        if (m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != id) return false;
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) return false;
+        return std::any_of(fresh.begin(), fresh.end(), [&](const auto& m) { return m.id == id && m.enabled && m.valid && m.project && m.network && std::any_of(m.commands.begin(), m.commands.end(), [action](const auto& c) { return c.action == action; }); });
+    };
+    const auto applyApiTemplateEdit = [this](const modules::ApiCollectionEdit& edit, std::string& error) {
+        if (!m_apiShowing || !m_apiEditMode || !m_hasDocument || m_filePath != m_apiFile || m_document.revision() != m_apiRevision || m_document.toUtf8() != m_apiEditBaseline || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_apiModule) { error = "Document or module changed; reopen the editor"; return false; }
+        std::vector<modules::Module> fresh;
+        if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) { return module.id == m_apiModule && module.valid && module.enabled && std::find(module.requirements.begin(), module.requirements.end(), "api-collection-edit-v1") != module.requirements.end() && std::any_of(module.commands.begin(), module.commands.end(), [](const auto& command) { return command.action == "edit-api-collection"; }); })) { error = "Module changed or disabled; reopen the editor"; return false; }
+        if (edit.offset > m_apiEditBaseline.size() || edit.length > m_apiEditBaseline.size() - edit.offset) { error = "Invalid edit boundaries"; return false; }
+        auto updated = m_apiEditBaseline; updated.replace(edit.offset, edit.length, edit.replacement);
+        std::vector<std::string> names; if (!modules::listApiRequestTemplates(updated, names, error)) return false;
+        if (!m_document.replaceAllUtf8(updated)) { error = "Could not apply the edit losslessly"; return false; }
+        m_apiEditBaseline = std::move(updated); m_apiEditNames = std::move(names); m_apiRevision = m_document.revision(); m_apiEditSelected.reset(); m_apiEditConfirm = false;
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return true;
+    };
+    const auto localizationEditReady = [this](std::string& error) {
+        if (!m_localizationShowing || !m_localizationSelected || *m_localizationSelected >= m_localizationEntries.size() || !m_hasProject || m_project.root().generic_string() != m_localizationRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_localizationEditModule || m_hasDocument != m_localizationEditContextHasDocument || (m_hasDocument && (m_filePath != m_localizationEditContextFile || m_document.revision() != m_localizationEditContextRevision || m_document.dirty()))) { error = "Open context changed or contains unsaved edits; compare again"; return false; }
+        std::vector<modules::Module> fresh;
+        if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) { return module.id == m_localizationEditModule && module.enabled && module.valid && module.project && std::find(module.requirements.begin(), module.requirements.end(), "localization-edit-v1") != module.requirements.end() && std::any_of(module.commands.begin(), module.commands.end(), [](const auto& command) { return command.action == "compare-localization"; }); })) { error = "Module changed or disabled; compare again"; return false; }
+        const auto source = normalizeRelative(m_localizationSource), translation = normalizeRelative(m_localizationTranslation);
+        const auto sourcePath = m_project.resolve(source, error); if (!error.empty()) return false;
+        const auto translationPath = m_project.resolve(translation, error); if (!error.empty()) return false;
+        std::error_code sameError; const bool sameFile = std::filesystem::equivalent(sourcePath, translationPath, sameError);
+        if (sameError || sameFile) { error = "Source and translation must be different available project files"; return false; }
+        for (const auto& doc : m_inactiveDocuments) if ((doc.path == source || doc.path == translation) && doc.document.dirty()) { error = "Save or resolve open localization edits first"; return false; }
+        std::string sourceText, translationText;
+        if (!m_project.readFileBounded(source, sourceText, error, 1024U * 1024U) || !m_project.readFileBounded(translation, translationText, error, 1024U * 1024U) || sourceText != m_localizationSourceSnapshot || translationText != m_localizationTranslationSnapshot) { error = "Source or translation changed; compare again"; return false; }
+        return true;
+    };
+    if (m_searchBar.kind() == ui::PromptKind::ModuleLocalizationEdit) {
+        std::string error; modules::LocalizationEditPlan plan;
+        if (!localizationEditReady(error) || !modules::prepareLocalizationEdit(m_localizationSourceSnapshot, m_localizationTranslationSnapshot, m_localizationEntries[*m_localizationSelected].key, m_searchBar.query(), plan, error)) { setCommandStatus(error, true); return; }
+        m_localizationEditPlan = std::move(plan); m_localizationEditPreview = true; m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Review the translation and placeholder differences", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleApiTemplateName) {
+        modules::ApiCollectionEdit edit; std::string error; const auto name = std::string(m_searchBar.query());
+        const bool prepared = m_apiEditAdding ? modules::appendApiRequestTemplate(m_apiEditBaseline, name, edit, error) : m_apiEditSelected && modules::renameApiRequest(m_apiEditBaseline, *m_apiEditSelected, name, edit, error);
+        if (!prepared || !applyApiTemplateEdit(edit, error)) { setCommandStatus(error.empty() ? "Template is no longer available" : error, true); return; }
+        setCommandStatus("Template updated in the document; Undo restores the previous text", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleFlashExecutable) {
+        if (m_serialStage==12) {
+            const std::string input(m_searchBar.query()); std::uint64_t address=0;
+            if (input.size()<3 || input.size()>10 || !input.starts_with("0x")) {setCommandStatus("Enter an explicit hexadecimal address, for example 0x08000000",true);return;}
+            const auto [end,ec]=std::from_chars(input.data()+2,input.data()+input.size(),address,16);
+            if (ec!=std::errc{} || end!=input.data()+input.size() || address>0xffffffffULL) {setCommandStatus("Invalid 32-bit hexadecimal address",true);return;}
+            if (!m_hasProject || !m_hasDocument || m_project.root().generic_string()!=m_flashRoot || m_filePath!=m_flashFile || m_document.revision()!=m_flashRevision || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_serialModule) {setCommandStatus("Project or profile changed; start again",true);return;}
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[this](const auto& m){return m.id==m_serialModule && m.enabled && m.valid && m.devices && m.project && m.processes && std::find(m.requirements.begin(),m.requirements.end(),"openocd-bin-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="flash-firmware";});})) {setCommandStatus("Flash capability changed; start again",true);return;}
+            const auto profile=modules::parseBoardProfile(m_document.toUtf8()); const auto project=m_project; m_flashCancel=std::make_shared<std::atomic_bool>(false); m_serialStage=5; m_searchBar.open(ui::PromptKind::ModuleCommands);m_flashGeneration=m_searchBar.generation();m_modulePage=0;m_selectedSuggestion=-1;
+            m_flashPrepareFuture=std::async(std::launch::async,[project,profile,address,cancel=m_flashCancel]{FlashPrepareResult result; (void)modules::prepareFirmware(project,profile,result.snapshot,result.error,cancel.get(),static_cast<std::uint32_t>(address));return result;});
+            refreshSuggestions();setCommandStatus("Reading firmware snapshot; no hardware is accessed",false);return;
+        }
+        const auto input = std::string(m_searchBar.query());
+        const auto executable = std::filesystem::path(std::u8string(input.begin(), input.end()));
+        std::error_code ec;
+        if (!executable.is_absolute() || !std::filesystem::is_regular_file(executable, ec) || ec) { setCommandStatus("Select an existing absolute OpenOCD executable", true); return; }
+        if (!m_hasProject || !m_hasDocument || m_project.root().generic_string() != m_flashRoot || m_filePath != m_flashFile || m_document.revision() != m_flashRevision || m_serialStage != 6) { setCommandStatus("Project or profile changed; start again", true); return; }
+        m_flashExecutable = executable; m_serialStage = 7; m_searchBar.open(ui::PromptKind::ModuleCommands); m_flashGeneration = m_searchBar.generation();
+        m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Review the firmware hash and hardware warning before confirming", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModulePullRequestComment) {
+        const std::string body(m_searchBar.query()); std::string error;
+        if ((m_pullReviewMode != 1 && body.find_first_not_of(" \t\r\n") == std::string::npos) || body.size() > 16000 || !editor::Document::canEditLosslessly(body, error)) { setCommandStatus("Enter a valid message of up to 16000 bytes" , true); return; }
+        m_pullCommentBody = body; m_pullCommentConfirm = true; m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_pullRequestGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        setCommandStatus(m_pullReviewMode ? "Review the decision and message before sending" : "Review the comment before sending", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModulePullRequestUrl) {
+        modules::PullRequestEndpoints endpoints; std::string error; const std::string url(m_searchBar.query());
+        if (!modules::pullRequestEndpoints(url, endpoints, error)) { setCommandStatus(error, true); return; }
+        if (m_pullRequestFuture.valid()) { setCommandStatus("A pull request is still loading", false); return; }
+        m_pullRequestUrl = url; m_pullRequestData = {}; m_pullRequestError.clear(); m_pullPatchSelected.reset(); m_pullPatchHunks.clear(); m_pullPatchError.clear(); m_pullRequestShowing = true; m_pullRequestFetched = false;
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_pullRequestGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        setCommandStatus("Review the GitHub request before confirming", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleShaderCompiler) {
+        const std::string input(m_searchBar.query());
+        const std::filesystem::path path(std::u8string(input.begin(), input.end()));
+        const auto filename = path.filename().string();
+        if (!path.is_absolute() || (filename != "glslangValidator" && filename != "glslangValidator.exe")) { setCommandStatus("Enter an absolute glslangValidator executable path", true); return; }
+        if (m_shaderFuture.valid()) { setCommandStatus("A shader compilation is still finishing", false); return; }
+        m_shaderCompiler = path; m_shaderResult = {}; m_shaderPreviewStage = 0; m_shaderPreviewBytes.clear(); m_spirvResult = {}; m_spirvShowing = false; m_shaderIncludes = {}; m_shaderIncludesShowing = false; m_shaderShowing = true; m_shaderCompleted = false; m_shaderArtifact = false; m_shaderOutput.clear(); m_shaderExpectedOutput.reset();
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_shaderGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        setCommandStatus("Review the compiler action before confirming", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleShaderOutput) {
+        const std::string output(m_searchBar.query()); std::string error;
+        if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot || output.empty() || output == m_shaderFile || m_project.resolve(output, error).empty()) { setCommandStatus(error.empty() ? "Choose a different project-relative output path" : error, true); return; }
+        m_shaderExpectedOutput.reset();
+        if (m_project.exists(output)) {
+            std::string contents;
+            if (m_project.isDirectory(output) || !m_project.readFileBounded(output, contents, error, workspace::Project::maxFileSize)) { setCommandStatus(error.empty() ? "Cannot read output file" : error, true); return; }
+            m_shaderExpectedOutput = std::move(contents);
+        }
+        m_shaderOutput = output; m_shaderArtifact = true;
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_shaderGeneration = m_searchBar.generation(); m_selectedSuggestion = -1; refreshSuggestions();
+        setCommandStatus("Review the output action before confirming", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleDependencyArtifactPath) {
+        std::string error; if (!dependencyArtifactReady(error)) { setCommandStatus(error, true); return; }
+        const std::string path(m_searchBar.query()); const auto resolved = m_project.resolve(path, error);
+        if (!error.empty() || resolved.empty() || path.size() > 4096) { setCommandStatus(error.empty() ? "Enter a project-relative artifact path" : error, true); return; }
+        m_dependencyArtifactPath = path; m_dependencyArtifactResult = {}; m_dependencyArtifactStage = 1; m_searchBar.open(ui::PromptKind::ModuleCommands); m_dependencyGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Review the local file and checksum before confirming", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleContainerActionPath) {
+        if (!m_containerActionMode || !m_hasProject || m_project.root().generic_string() != m_containerProjectRoot || !moduleStillEnabled(m_containerModule, "configured-container-actions")) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        std::string error, source; const std::string path(m_searchBar.query()); std::vector<modules::ContainerProjectAction> actions;
+        if (!m_project.readFileBounded(path, source, error, 128U * 1024U) || !modules::parseContainerProjectActions(source, actions, error)) { setCommandStatus(error, true); return; }
+        m_containerActionConfigPath = path; m_containerActionConfigSnapshot = std::move(source); m_containerProjectActions = std::move(actions); m_containerActionReview = {}; m_containerOutput.clear(); m_containerStage = 5; m_containerShowing = true;
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_containerGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Select an action to review; nothing runs yet", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleContainerPath) {
+        const std::string input(m_searchBar.query());
+        const std::filesystem::path path(std::u8string(input.begin(), input.end()));
+        const auto filename = path.filename().string();
+        if (!path.is_absolute() || (filename != "docker" && filename != "podman" && filename != "docker.exe" && filename != "podman.exe")) { setCommandStatus("Enter an absolute path named docker or podman", true); return; }
+        if (m_containerFuture.valid()) { setCommandStatus("A container operation is still finishing", false); return; }
+        m_containerRuntime = path;
+        if (m_containerActionMode) { if (!m_hasProject || m_project.root().generic_string() != m_containerProjectRoot) { setCommandStatus("Project changed; reopen the command", true); return; } m_searchBar.open(ui::PromptKind::ModuleContainerActionPath); clearCommandFeedback(); setCommandStatus("Enter the project-relative action configuration JSON path", false); return; }
+        m_containerListing = {}; m_containerOutput.clear(); m_containerProjectRoot.clear(); m_containerSelected.reset(); m_containerStage = 0; m_containerShowing = true;
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_containerGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        setCommandStatus("Review the runtime action before confirming", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleApiSavePath) {
+        if (m_apiAssertionStage==1) {
+            if (!m_apiShowing || !m_apiConfirmed || !m_hasProject || m_project.root().generic_string()!=m_apiRoot || !m_hasDocument || m_filePath!=m_apiFile || m_document.revision()!=m_apiRevision || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_apiModule) { setCommandStatus("Request context changed; start again",true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_apiModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"api-response-assertions-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c) { return c.action==(m_apiProfileMode ? "open-api-environment" : "open-api-requests"); }); })) { setCommandStatus("Module changed; start again",true); return; }
+            std::string path(m_searchBar.query()); if (path.empty() || m_project.resolve(path,error).empty()) { setCommandStatus(error.empty()?"Enter a project-relative assertion JSON file":error,true); return; }
+            if (m_apiAssertionFuture.valid()) { setCommandStatus("Previous check is still finishing",false); return; }
+            auto project=m_project; auto response=m_apiResponse; m_apiAssertionCancel=std::make_shared<std::atomic_bool>(false); m_apiAssertions={}; m_apiAssertionStage=2; m_modulePage=0; m_selectedSuggestion=-1;
+            m_searchBar.open(ui::PromptKind::ModuleCommands); m_apiAssertionGeneration=m_searchBar.generation(); m_apiAssertionResponseGeneration=m_apiGeneration;
+            m_apiAssertionFuture=std::async(std::launch::async,[project,path,response=std::move(response),cancel=m_apiAssertionCancel] { modules::ApiAssertionReport report; try { std::string input,error; std::vector<modules::ApiAssertion> assertions; if (!project.readFileBounded(path,input,error,256U*1024U,cancel.get())) report.error="Could not read assertion file"; else if (!modules::parseApiAssertions(input,assertions,error)) report.error=error; else report=modules::evaluateApiAssertions(response,assertions,cancel.get()); } catch (...) { report.error="Assertion evaluation failed"; } return report; });
+            refreshSuggestions(); setCommandStatus("Checking the received response locally… Escape cancels",false); return;
+        }
+        if (!m_apiShowing || !m_apiConfirmed || m_apiSaveStage!=1 || !m_hasProject || m_project.root().generic_string()!=m_apiRoot || !m_hasDocument || m_filePath!=m_apiFile || m_document.revision()!=m_apiRevision) { setCommandStatus("Request context changed; start again",true); return; }
+        const std::string path(m_searchBar.query()); std::string error;
+        if (path.empty() || path.size()>4096 || std::any_of(path.begin(),path.end(),[](unsigned char c) { return c<32 || c==127; }) || m_project.resolve(path,error).empty()) { setCommandStatus(error.empty() ? "Enter a project-relative file path" : error,true); return; }
+        m_apiSavePath=path; m_apiSaveStage=2; m_modulePage=0; m_selectedSuggestion=-1; m_searchBar.open(ui::PromptKind::ModuleCommands); refreshSuggestions(); setCommandStatus("Review the destination and confirm; no file has been written",false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleApiEnvironmentPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_apiRoot || !m_hasDocument || m_filePath != m_apiFile || m_document.revision() != m_apiRevision || !moduleStillEnabled(m_apiModule, "open-api-environment")) { setCommandStatus("Project, document or module changed; reopen the command", true); return; }
+        std::string contents, error; std::vector<modules::ApiEnvironment> environments;
+        if (!m_project.readFileBounded(m_searchBar.query(), contents, error, 1024U * 1024U) || !modules::parseApiEnvironments(contents, environments, error) || environments.empty()) { setCommandStatus(error.empty() ? "No environments in file" : error, true); return; }
+        m_apiEnvironments = std::move(environments); m_apiAssertionStage=0; m_apiAssertions={}; m_apiChoosingEnvironment = true; m_apiShowing = true; m_apiConfirmed = false; m_apiSelected.reset(); m_apiRequests.clear(); m_apiResponse = {};
+        m_modulePage = 0; m_selectedSuggestion = -1; m_searchBar.open(ui::PromptKind::ModuleCommands); refreshSuggestions(); setCommandStatus("Choose an environment; values are stored in plaintext", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleVisualPath) {
+        if (m_visualConfigStage==2) {
+            if (!m_visualShowing || !m_visualReview || m_visualReview!=m_visualConfigReview || !m_hasProject || m_project.root().generic_string()!=m_visualRoot || !m_hasDocument || m_filePath!=m_visualConfigFile || m_document.revision()!=m_visualConfigRevision || m_document.toUtf8()!=m_visualConfigOriginal || !visualConfigAuthorized()) { setCommandStatus("Review or document changed; start again",true); return; }
+            std::vector<std::size_t> numbers; std::string input(m_searchBar.query()); const char* p=input.data(); const char* end=p+input.size();
+            while(p<end) { while(p<end && (*p==' ' || *p=='\t')) ++p; if(p==end) break; std::size_t n=0; auto parsed=std::from_chars(p,end,n); if(parsed.ec!=std::errc{} || parsed.ptr==p || (parsed.ptr<end && *parsed.ptr!=' ' && *parsed.ptr!='\t')) { setCommandStatus("Enter nonnegative integers separated by spaces",true); return; } numbers.push_back(n); if(numbers.size()>4) {setCommandStatus("Too many values",true);return;} p=parsed.ptr; }
+            modules::VisualConfigChange change{};
+            if(m_visualConfigOperation==0 && numbers.size()==4) { change.operation=modules::VisualConfigOperation::AddMask; change.mask={numbers[0],numbers[1],numbers[2],numbers[3]}; }
+            else if(m_visualConfigOperation==1 && numbers.size()==1 && numbers[0]>0) { change.operation=modules::VisualConfigOperation::RemoveMask; change.index=numbers[0]-1; }
+            else if(m_visualConfigOperation==2 && numbers.size()==1 && numbers[0]<=255) { change.operation=modules::VisualConfigOperation::SetThreshold; change.threshold=static_cast<unsigned>(numbers[0]); }
+            else {setCommandStatus("Invalid mask or threshold values",true);return;}
+            if(m_visualConfigFuture.valid() || m_visualConfigApplyFuture.valid()) {setCommandStatus("Previous edit is still finishing",false);return;}
+            m_visualConfigChange=change; auto project=m_project; auto review=m_visualConfigReview; auto original=m_visualConfigOriginal; m_visualConfigCancel=std::make_shared<std::atomic_bool>(false); m_visualConfigStage=3; m_modulePage=0; m_selectedSuggestion=-1; m_searchBar.open(ui::PromptKind::ModuleCommands); m_visualConfigGeneration=m_searchBar.generation();
+            m_visualConfigFuture=std::async(std::launch::async,[project,review,original,change,cancel=m_visualConfigCancel] { VisualConfigResult result; if(review->screenshotsStillCurrent(project,result.error,cancel.get())) (void)modules::prepareVisualConfigDraft(original,review->baselineImage(),review->candidateImage(),change,result.draft,result.error,cancel.get()); return result; }); refreshSuggestions(); setCommandStatus("Preparing config draft… Escape cancels",false); return;
+        }
+        if (!m_hasProject || m_project.root().generic_string() != m_visualRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_visualModule) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        std::vector<modules::Module> fresh; std::string error;
+        const char* action = m_visualConfigured ? "compare-visual-configured" : "compare-visual-images";
+        if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this, action](const auto& m) { return m.id == m_visualModule && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(), m.commands.end(), [action](const auto& c) { return c.action == action; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative file path", true); return; }
+        if (m_visualConfigured && m_visualConfigPath.empty()) { m_visualConfigPath = path; m_searchBar.setQuery(""); setCommandStatus("Enter the baseline PNG path", false); return; }
+        if (m_visualBaseline.empty()) { m_visualBaseline = path; m_searchBar.setQuery(""); setCommandStatus("Enter the candidate PNG path", false); return; }
+        if (m_visualFuture.valid() || m_visualApprovalFuture.valid()) { setCommandStatus("Visual review is still finishing", false); return; }
+        const auto project = m_project; const auto baseline = m_visualBaseline;
+        m_visualReview.reset(); m_visualPreview = {}; m_visualCropMode=false; m_visualCropPreview={}; m_visualShowing = true; m_visualConfirm = false; m_visualCancel = std::make_shared<std::atomic_bool>(false);
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_visualGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1;
+        const auto configPath = m_visualConfigPath; const auto configured = m_visualConfigured;
+        m_visualFuture = std::async(std::launch::async, [project, baseline, path, configPath, configured, cancel = m_visualCancel] {
+            VisualResult result; result.review = std::make_shared<modules::VisualReview>();
+            const bool opened = configured ? result.review->openConfigured(project, baseline, path, configPath, result.error, cancel.get()) : result.review->open(project, baseline, path, 0, {}, result.error, cancel.get());
+            if (opened && !cancel->load())
+                (void)ui::makeVisualReviewPreview(result.review->baselineImage(), result.review->candidateImage(), result.review->comparison(), 1024, 1024, result.preview, result.error);
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Comparing PNG snapshots… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleSqlExportPath) {
+        if (m_sqlChangeMode) {
+            if (m_sqlChangeStage != 2 || !m_sqlShowing || !m_hasProject || m_project.root().generic_string()!=m_sqlRoot || !m_hasDocument || m_filePath!=m_sqlFile || m_document.revision()!=m_sqlRevision) { setCommandStatus("Context changed; preview again",true); return; }
+            std::string path(m_searchBar.query()), error;
+            if (path.empty() || m_project.resolve(path,error).empty()) { setCommandStatus(error.empty()?"Enter a new project-relative .db path":error,true); return; }
+            m_sqlCsvPath=normalizeRelative(path); m_sqlChangeStage=3; m_modulePage=0; m_selectedSuggestion=-1; m_searchBar.open(ui::PromptKind::ModuleCommands); refreshSuggestions(); setCommandStatus("Review the change and destination; no file has been written",false); return;
+        }
+        if (m_sqlCsvStage != 2 || !m_sqlShowing || !m_hasProject || m_project.root().generic_string() != m_sqlRoot || !m_hasDocument || m_filePath != m_sqlFile || m_document.revision() != m_sqlRevision) { setCommandStatus("Query context changed; run it again", true); return; }
+        const std::string path(m_searchBar.query()); std::string error;
+        if (path.empty() || m_project.resolve(path,error).empty()) { setCommandStatus(error.empty() ? "Enter a project-relative CSV path" : error, true); return; }
+        m_sqlCsvPath = normalizeRelative(path); m_sqlCsvStage = 3; m_modulePage = 0; m_selectedSuggestion = -1; m_searchBar.open(ui::PromptKind::ModuleCommands); refreshSuggestions(); setCommandStatus("Review destination and confirm; no file has been written", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleSqlPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_sqlRoot || !m_hasDocument || m_filePath != m_sqlFile || m_document.revision() != m_sqlRevision || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_sqlModule) { setCommandStatus("Project, document or module changed; reopen the command", true); return; }
+        std::vector<modules::Module> fresh; std::string error;
+        const char* action = m_sqlChangeMode ? (m_sqlBound ? "sql-change-bound" : "sql-change-preview") : (m_sqlBound ? (m_sqlExplain ? "sql-explain-bound" : "sql-query-bound") : (m_sqlExplain ? "sql-explain" : "sql-query"));
+        if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this, action](const auto& module) { return module.id == m_sqlModule && module.enabled && module.valid && std::any_of(module.commands.begin(), module.commands.end(), [action](const auto& command) { return command.action == action; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus(m_sqlBound && !m_sqlDatabase.empty() ? "Enter a project-relative bindings JSON path" : "Enter a project-relative SQLite database path", true); return; }
+        if (m_sqlFuture.valid()) { setCommandStatus("A query is still finishing", false); return; }
+        if (m_sqlBound && m_sqlDatabase.empty()) { m_sqlDatabase = path; m_searchBar.setQuery(""); setCommandStatus("Enter a project-relative typed bindings JSON file", false); return; }
+        const auto database = m_sqlBound ? m_sqlDatabase : path; const auto bindings = m_sqlBound ? path : std::string{};
+        m_sqlDatabase = database;
+        const auto project = m_project; const auto query = m_sqlQuery; const auto explain = m_sqlExplain;
+        if (m_sqlChangeMode) {
+            if (m_sqlChangeFuture.valid() || m_sqlChangeSaveFuture.valid()) { setCommandStatus("Previous database operation is still finishing",false); return; }
+            m_sqlChangeCancel=std::make_shared<std::atomic_bool>(false); m_sqlChange={}; m_sqlChangeStage=1; m_sqlShowing=true; m_modulePage=0; m_selectedSuggestion=-1; m_pagedScroll=0;
+            m_searchBar.open(ui::PromptKind::ModuleCommands); m_sqlGeneration=m_searchBar.generation();
+            m_sqlChangeBindingsPath=bindings.empty()?std::string{}:normalizeRelative(bindings); auto snapshot=std::make_shared<std::string>(); m_sqlChangeBindingsSnapshot=snapshot;
+            m_sqlChangeFuture=std::async(std::launch::async,[project,database,bindings,query,snapshot,cancel=m_sqlChangeCancel] { modules::SqlChangePreview result; try { std::string bytes; std::vector<modules::SqlParameter> parameters; if (!bindings.empty() && (!project.readFileBounded(bindings,*snapshot,result.error,2U*1024U*1024U,cancel.get()) || !modules::parseSqlParametersJson(*snapshot,parameters,result.error))) return result; if (project.readFileBounded(database,bytes,result.error,64U*1024U*1024U,cancel.get()) && !cancel->load()) result=modules::previewSqliteChangeBound(bytes,query,parameters,cancel.get()); } catch (...) { result.error="Could not preview database change"; } return result; });
+            refreshSuggestions(); setCommandStatus("Previewing on an isolated snapshot… Escape cancels",false); return;
+        }
+        if (m_sqlSchemaCancel) m_sqlSchemaCancel->store(true);
+        m_sqlSchemaShowing=false; m_sqlSchemaSelected.reset(); m_sqlSchema={};
+        m_sqlCancel = std::make_shared<std::atomic_bool>(false); m_sqlResult = {}; m_sqlCsvStage = 0; m_sqlCsv = {}; m_sqlShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_sqlGeneration = m_searchBar.generation();
+        auto snapshot=std::make_shared<std::string>(); m_sqlSnapshot=snapshot;
+        m_sqlFuture = std::async(std::launch::async, [project, database, bindings, query, explain, snapshot, cancel = m_sqlCancel] {
+            modules::SqlQueryResult result;
+            try {
+                std::vector<modules::SqlParameter> parameters; std::string json;
+                if ((!bindings.empty() && (!project.readFileBounded(bindings, json, result.error, 2U * 1024U * 1024U, cancel.get()) || !modules::parseSqlParametersJson(json, parameters, result.error))) || cancel->load()) return result;
+                if (project.readFileBounded(database, *snapshot, result.error, 64U * 1024U * 1024U, cancel.get()) && !cancel->load()) result = bindings.empty() ? modules::querySqliteSnapshot(*snapshot, query, explain, cancel.get()) : modules::querySqliteSnapshotBound(*snapshot, query, parameters, explain, cancel.get());
+            }
+            catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Querying a local SQLite snapshot… Escape cancels", false); return;
+    }
+    if(m_searchBar.kind()==ui::PromptKind::ModuleRustPath && m_rustRunStage==1) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_rustOwnershipRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_rustRunModule){setCommandStatus("Rust project or module changed",true);return;}
+        const std::string text(m_searchBar.query());const std::filesystem::path cargo(std::u8string(text.begin(),text.end()));auto plan=modules::prepareRustDiagnosticRun(m_project,cargo);if(!plan.error.empty()){setCommandStatus(plan.error,true);return;}
+        m_rustRunPlan=std::move(plan);m_rustRunStage=2;m_rustOwnershipShowing=true;m_rustOwnershipSelected.reset();m_searchBar.open(ui::PromptKind::ModuleCommands);m_rustRunGeneration=m_searchBar.generation();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Review Cargo executable and arguments before confirmation",false);return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleRustPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_rustOwnershipRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "review-rust-ownership"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_rustOwnershipFuture.valid()) { setCommandStatus("A Rust diagnostic read is still finishing", false); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative JSON diagnostics path", true); return; }
+        auto project = m_project; m_rustOwnershipDiagnostics.clear(); m_rustOwnershipSelected.reset(); m_rustOwnershipShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        m_rustOwnershipCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_rustOwnershipFuture = std::async(std::launch::async, [project, path, cancel = m_rustOwnershipCancel] {
+            RustOwnershipResult result; std::string contents;
+            try { if (project.readFileBounded(path, contents, result.error, 8U * 1024U * 1024U, cancel.get()) && !cancel->load()) (void)modules::parseRustOwnershipDiagnostics(contents, result.diagnostics, result.error); }
+            catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Reading Rust diagnostics locally… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleCrashPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_crashRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "crash-dump-reader"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_crashFuture.valid()) { setCommandStatus("A crash inspection is still finishing", false); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative path", true); return; }
+        if (m_crashMapInput) {
+            std::string text; if (!m_project.readFileBounded(path, text, error, 1024U * 1024U)) { setCommandStatus(error, true); return; }
+            modules::CrashSourceMap map; std::string identityLabel;
+            std::string ext = std::filesystem::path(path).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".sym") {
+                auto symbols = modules::parseBreakpadSymbols(text, 1024U * 1024U);
+                if (!symbols.error.empty() || symbols.incomplete) { setCommandStatus(symbols.error.empty() ? "Symbol file exceeds limits" : symbols.error, true); return; }
+                const modules::CrashModule* matching = nullptr;
+                for (const auto& module : m_crashDump.modules) {
+                    const auto separator = module.name.find_last_of("/\\");
+                    const auto name = separator == std::string::npos ? module.name : module.name.substr(separator + 1);
+                    if (name == symbols.module) { if (matching) { setCommandStatus("Symbol module name is ambiguous in the dump", true); return; } matching = &module; }
+                }
+                if (!matching) { setCommandStatus("Symbol module is not present in the dump", true); return; }
+                const auto identity = modules::compareBreakpadIdentity(symbols, *matching, m_crashDump.architecture);
+                if ((!matching->debugId.empty() && matching->debugId != symbols.debugId) || identity == modules::BreakpadIdentity::Mismatch) { setCommandStatus("Symbol metadata does not match this dump module", true); return; }
+                identityLabel = identity == modules::BreakpadIdentity::Match ? "Debug metadata matches; authenticity and source are unverified" : "Debug identity unavailable; source mapping is unverified";
+                map = std::move(symbols.sourceMap);
+                for (auto& range : map.ranges) range.module = matching->name;
+            } else { map = modules::parseCrashSourceMap(text); identityLabel = "TSV mapping is unverified"; }
+            if (!map.error.empty() || map.incomplete) { setCommandStatus(map.error.empty() ? "Source map exceeds limits" : map.error, true); return; }
+            m_crashSourceMap = std::move(map); m_crashMapIdentity = std::move(identityLabel); m_crashMapInput = false; m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_crashMapIdentity + "; frames are unverified", false); return;
+        }
+        auto project = m_project; const bool allowGdb=std::find(reviewed.requirements.begin(),reviewed.requirements.end(),"crash-gdb-text-v1")!=reviewed.requirements.end(); m_crashDump = {}; m_crashGdb={}; m_crashIsGdb=false; m_crashSourceMap = {}; m_crashMapIdentity.clear(); m_crashShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        m_crashCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_crashFuture = std::async(std::launch::async, [project, path, allowGdb, cancel = m_crashCancel] {
+            CrashInspectionResult result; std::string bytes;
+            try { if (project.readFileBounded(path, bytes, result.dump.error, 128U * 1024U * 1024U, cancel.get()) && !cancel->load()) { if(allowGdb && !std::string_view(bytes).starts_with("MDMP")){result.isGdb=true;result.gdb=modules::parseGdbBacktrace(bytes);} else result.dump=modules::readCrashDump(bytes,512,512); } }
+            catch (const std::exception& e) { result.dump.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Reading crash data locally… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleToolchainPath && m_usbBoardInput) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_usbBoardRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_usbBoardModule) {setCommandStatus("Project or module changed",true);return;}
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_usbBoardModule && m.enabled && m.valid && m.project && m.devices && std::find(m.requirements.begin(),m.requirements.end(),"usb-board-identification-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="identify-usb-boards";});})) {setCommandStatus("Module changed; reopen the command",true);return;}
+        const std::string path(m_searchBar.query()); std::string text; if (path.empty() || !m_project.readFileBounded(path,text,error,256U*1024U)) {setCommandStatus(error.empty()?"Enter a project-relative mapping JSON path":error,true);return;}
+        auto mapping=modules::parseBoardMappings(text); if(!mapping.error.empty()) {setCommandStatus(mapping.error,true);return;}
+        m_usbBoardMappings=std::move(mapping); m_usbBoardInput=false; m_usbBoardShowing=true; m_usbBoardConfirmed=false; m_usbBoardScan={}; m_searchBar.open(ui::PromptKind::ModuleCommands); m_usbBoardGeneration=m_searchBar.generation(); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus("Review before USB descriptor discovery",false); return;
+    }
+    if (m_searchBar.kind()==ui::PromptKind::ModuleToolchainPath && m_toolchainShowing && (m_targetConfigureStage==1 || m_targetConfigureStage==2)) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_toolchainRoot || !m_toolchainSelected || *m_toolchainSelected>=m_toolchainProfiles.size()){setCommandStatus("Target context changed",true);return;}
+        if(m_targetConfigureStage==1){m_targetConfigureBuild=std::string(m_searchBar.query());if(m_targetConfigureBuild.empty()){setCommandStatus("Enter an existing project-relative build directory",true);return;}m_targetConfigureStage=2;m_searchBar.setQuery("");setCommandStatus("Enter absolute CMake executable path",false);return;}
+        const auto raw=std::string(m_searchBar.query()); const std::filesystem::path exe(std::u8string(raw.begin(),raw.end()));
+        auto plan=modules::prepareTargetConfigure(m_project,m_toolchainProfiles[*m_toolchainSelected],m_targetConfigureBuild,exe);if(!plan.error.empty()){setCommandStatus(plan.error,true);return;}
+        m_targetConfigurePlan=std::move(plan);m_targetConfigureStage=3;m_searchBar.open(ui::PromptKind::ModuleCommands);m_toolchainGeneration=m_searchBar.generation();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Review CMake executable and arguments before confirmation",false);return;
+    }
+    if (m_searchBar.kind()==ui::PromptKind::ModuleToolchainPath && m_toolchainShowing && (m_toolchainEditMode==1 || m_toolchainEditMode==2)) {
+        std::vector<modules::ToolchainProfile> supplied; std::string error; if(!modules::parseToolchainProfiles(std::string(m_searchBar.query()),supplied,error) || supplied.size()!=1) {setCommandStatus(error.empty()?"Enter JSON with exactly one profile":error,true);return;}
+        if(!m_hasProject || m_project.root().generic_string()!=m_toolchainRoot || (m_toolchainEditMode==2 && (!m_toolchainSelected || *m_toolchainSelected>=m_toolchainProfiles.size()))) {setCommandStatus("Profile context changed",true);return;}
+        const auto kind=m_toolchainEditMode==1?modules::TargetEditKind::Add:modules::TargetEditKind::Replace; const auto oldName=kind==modules::TargetEditKind::Add?std::string{}:m_toolchainProfiles[*m_toolchainSelected].name;
+        auto draft=modules::prepareTargetEdit(m_toolchainSnapshot,kind,oldName,supplied[0]); if(!draft.error.empty()){setCommandStatus(draft.error,true);return;} m_toolchainEditProfile=std::move(supplied[0]);m_toolchainDraft=std::move(draft);m_toolchainEditMode+=3;m_searchBar.open(ui::PromptKind::ModuleCommands);m_toolchainGeneration=m_searchBar.generation();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Review target change and confirm save",false);return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleToolchainPath) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_toolchainRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_toolchainModule) { setCommandStatus("Project or module changed; reopen the command",true); return; }
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_toolchainModule && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action=="inspect-toolchain-profiles"; }); })) { setCommandStatus("Module changed; reopen the command",true); return; }
+        if (m_toolchainFuture.valid()) { setCommandStatus("Profile inspection is still finishing",false); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative profiles JSON path",true); return; }
+        auto project=m_project; m_toolchainFile=normalizeRelative(path); m_toolchainSnapshot.clear(); m_toolchainEditMode=0; m_toolchainProfiles.clear(); m_toolchainSelected.reset(); m_toolchainShowing=true; m_modulePage=0; m_selectedSuggestion=-1; m_pagedScroll=0; m_toolchainCancel=std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands); m_toolchainGeneration=m_searchBar.generation();
+        m_toolchainFuture=std::async(std::launch::async,[project,path,cancel=m_toolchainCancel] { ToolchainResult result; std::string text; try { if (project.readFileBounded(path,text,result.error,1024U*1024U,cancel.get()) && !cancel->load()) { if (modules::parseToolchainProfiles(text,result.profiles,result.error)) result.snapshot=std::move(text); } } catch (const std::exception&) { result.error="Could not inspect toolchain profiles"; } return result; });
+        refreshSuggestions(); setCommandStatus("Reading profiles; paths will not be executed",false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleLinkerPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_linkerRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [this](const auto& command) { return command.action == (m_svdInput ? "inspect-svd-registers" : "review-linker-map"); })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_svdInput) {
+            if (m_svdFuture.valid()) { setCommandStatus("An SVD read is still finishing",false); return; }
+            const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative SVD path",true); return; }
+            auto project=m_project; m_svdShowing=true; m_svdSelected.reset(); m_svdRegisters={}; m_svdCancel=std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage=0; m_selectedSuggestion=-1;
+            m_svdFuture=std::async(std::launch::async,[project,path,cancel=m_svdCancel] { modules::SvdRegisters result; std::string text; try { if (project.readFileBounded(path,text,result.error,4U*1024U*1024U,cancel.get()) && !cancel->load()) result=modules::parseSvdRegisters(text); } catch (const std::exception& e) {result.error=e.what();} return result; });
+            refreshSuggestions(); setCommandStatus("Reading SVD metadata locally… Escape cancels",false); return;
+        }
+        if (m_linkerFuture.valid()) { setCommandStatus("A linker-map read is still finishing", false); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative linker map path", true); return; }
+        auto project = m_project; m_linkerMap = {}; m_linkerShowing = true; m_linkerSectionOffset = 0; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        m_linkerCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_linkerFuture = std::async(std::launch::async, [project, path, cancel = m_linkerCancel] {
+            LinkerResult result; std::string contents;
+            try { if (project.readFileBounded(path, contents, result.error, 8U * 1024U * 1024U, cancel.get()) && !cancel->load()) (void)modules::parseGnuLinkerMap(contents, result.map, result.error); }
+            catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Reading GNU ld map… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleHexPath) {
+        std::string error; if (!hexModuleReady(error)) { setCommandStatus(error, true); return; }
+        if (m_hexFuture.valid()) { setCommandStatus("A binary operation is still running", false); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative file path", true); return; }
+        auto project = m_project; const auto root = m_hexRoot; m_hexShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_hexFuture = std::async(std::launch::async, [project, root, path] { HexOperation result; result.root = root; result.path = path; try { result.ok = result.file.open(project, path, result.error); } catch (const std::exception& e) { result.error = e.what(); } return result; });
+        refreshSuggestions(); setCommandStatus("Opening binary…", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleHexOffset || m_searchBar.kind() == ui::PromptKind::ModuleHexLength || m_searchBar.kind() == ui::PromptKind::ModuleHexBytes || m_searchBar.kind() == ui::PromptKind::ModuleHexSearch) {
+        std::string error; if (!hexModuleReady(error) || !m_hexFile || m_hexFuture.valid()) { setCommandStatus(error.empty() ? "Binary file is unavailable or busy" : error, true); return; }
+        const auto kind = m_searchBar.kind(); const std::string input(m_searchBar.query()); auto& buffer = m_hexFile->buffer();
+        if (kind == ui::PromptKind::ModuleHexOffset) {
+            std::size_t offset = 0; const bool canAppend = m_hexOffsetAction == HexOffsetAction::Insert;
+            if (!parseHexOffset(input, offset) || offset > buffer.bytes().size() || (!canAppend && offset == buffer.bytes().size())) { setCommandStatus(canAppend ? "Enter an offset at or before the end of the file" : "Enter an offset inside the file", true); return; }
+            m_hexViewOffset = (offset / 256) * 256; m_hexEditOffset = offset;
+            if (m_hexOffsetAction == HexOffsetAction::Select) { m_searchBar.open(ui::PromptKind::ModuleHexLength); setCommandStatus("Enter the number of bytes to select", false); return; }
+            if (m_hexOffsetAction == HexOffsetAction::Overwrite || canAppend) { m_hexBytesInsert = canAppend; m_hexReplaceSelection = false; m_searchBar.open(ui::PromptKind::ModuleHexBytes); setCommandStatus(canAppend ? "Enter hexadecimal byte pairs to insert" : "Enter hexadecimal byte pairs to overwrite", false); return; }
+        } else if (kind == ui::PromptKind::ModuleHexLength) {
+            std::size_t length = 0; if (!parseHexOffset(input, length) || !length || !buffer.select(m_hexEditOffset, length)) { setCommandStatus("Enter a nonzero length within the file", true); return; }
+            setStatus(std::to_string(length) + " bytes selected", false);
+        } else {
+            std::string bytes; if (!parseHexBytes(input, bytes)) { setCommandStatus("Enter 1 to 4096 hexadecimal byte pairs", true); return; }
+            if (kind == ui::PromptKind::ModuleHexBytes) {
+                if (m_hexReplaceSelection && bytes.size() != buffer.selectionLength()) { setCommandStatus("Enter exactly " + std::to_string(buffer.selectionLength()) + " bytes to overwrite this selection", true); return; }
+                const bool changed = m_hexBytesInsert ? buffer.insert(m_hexEditOffset, bytes) : buffer.overwrite(m_hexEditOffset, bytes);
+                if (!changed) { setCommandStatus("Edit exceeds the file or undo limit", true); return; }
+                m_hexLastNeedle.clear(); setStatus("Binary edits are unsaved", false);
+            } else {
+                const auto start = bytes == m_hexLastNeedle ? m_hexNextSearch : 0; auto found = buffer.find(bytes, start); bool wrapped = false;
+                if (found == modules::HexBuffer::notFound && start != 0) { found = buffer.find(bytes, 0); wrapped = true; }
+                if (found == modules::HexBuffer::notFound) { setCommandStatus("Byte sequence not found", true); return; }
+                m_hexLastNeedle = bytes; m_hexNextSearch = found + 1; m_hexViewOffset = (found / 256) * 256; m_hexEditOffset = found; (void)buffer.select(found, bytes.size());
+                setStatus("Found at byte " + std::to_string(found) + (wrapped ? " (wrapped)" : ""), false);
+            }
+        }
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; refreshSuggestions(); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleCTestInput) {
+        std::string error; if (!ctestModuleReady(error)) { setCommandStatus(error, true); return; }
+        if (m_ctestDiscoveryFuture.valid() || m_ctestRunFuture.valid()) { setCommandStatus("A CTest operation is still running", false); return; }
+        const std::string input(m_searchBar.query());
+        if (m_ctestInputStage == 0) {
+            m_ctestBuild = input == "." ? m_project.root() : m_project.resolve(input, error); std::error_code ec;
+            if (!error.empty() || !std::filesystem::is_directory(m_ctestBuild, ec) || ec) { setCommandStatus(error.empty() ? "Choose an existing project-local build directory" : error, true); return; }
+            m_ctestInputStage = 1; m_searchBar.setQuery("");
+            const char* path = std::getenv("PATH"); const auto candidates = modules::findCTestOnPath(path ? path : "");
+            if (!candidates.empty()) m_searchBar.setQuery(candidates.front().generic_string());
+            setCommandStatus("Review the absolute CTest executable path; Enter runs discovery", false); return;
+        }
+        m_ctestExecutable = std::filesystem::path(std::u8string(input.begin(), input.end()));
+        if (!m_ctestExecutable.is_absolute()) { setCommandStatus("Enter an absolute CTest executable path", true); return; }
+        m_ctestDiscovery = {}; m_ctestLast.clear(); m_ctestPrevious.clear(); m_ctestHistory = {}; m_ctestSummaries.clear(); m_ctestHistoryError.clear();
+        m_ctestHistoryReady = modules::loadCTestHistory(m_settingsRoot, m_project.root(), m_ctestBuild, m_ctestHistory, m_ctestHistoryError);
+        if (m_ctestHistoryReady) for (const auto& run : m_ctestHistory.runs) for (const auto& test : run.tests) {
+            const auto prior = m_ctestLast.find(test.name); if (prior != m_ctestLast.end()) m_ctestPrevious[test.name] = prior->second;
+            m_ctestLast[test.name] = test;
+        }
+        if (m_ctestHistoryReady) m_ctestSummaries = modules::summarizeCTestHistory(m_ctestHistory.runs);
+        m_ctestSelected.reset(); m_ctestRerunSelected.reset(); m_ctestRerunShowing = false; m_ctestRerunCandidates.clear(); m_ctestShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        const auto executable = m_ctestExecutable, build = m_ctestBuild; m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_ctestCancel = std::make_shared<std::atomic_bool>(false);
+        m_ctestDiscoveryFuture = std::async(std::launch::async, [executable, build, cancel = m_ctestCancel] { return modules::discoverCTest(executable, build, cancel.get()); });
+        refreshSuggestions(); setCommandStatus("Running CTest discovery; Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModulePythonInterpreterPath) {
+        std::string error;
+        if (!pythonModuleReady(error) || m_pythonRuntimeFuture.valid() || m_pythonProvisionFuture.valid()) { setCommandStatus(error.empty() ? "Wait for the Python operation to finish" : error, true); return; }
+        const std::string input(m_searchBar.query());
+        if (input.empty() || input.size() > 4096 || std::any_of(input.begin(), input.end(), [](unsigned char c) { return c < 32 || c == 127; }) || !editor::Document::canEditLosslessly(input, error)) { setCommandStatus("Enter a valid absolute interpreter path", true); return; }
+        std::filesystem::path path;
+        try { path = std::filesystem::u8path(input).lexically_normal(); } catch (const std::exception&) { setCommandStatus("Invalid interpreter path", true); return; }
+        if (!path.is_absolute()) { setCommandStatus("Enter an absolute interpreter path", true); return; }
+        auto it = std::find_if(m_pythonEnvironments.begin(), m_pythonEnvironments.end(), [&path](const auto& item) { return item.interpreter == path; });
+        if (it == m_pythonEnvironments.end()) { m_pythonEnvironments.push_back({path, {}, {}, false}); it = std::prev(m_pythonEnvironments.end()); }
+        m_pythonSelected = static_cast<std::size_t>(it - m_pythonEnvironments.begin());
+        m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        setCommandStatus("Path added without running it; validate only if you trust the executable", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModulePythonCreatePath) {
+        std::string error;
+        if (!pythonModuleReady(error)) { setCommandStatus(error, true); return; }
+        if (m_pythonRuntimeFuture.valid() || !m_pythonSelected || *m_pythonSelected >= m_pythonEnvironments.size()) { setCommandStatus("Choose an interpreter after the current operation finishes", true); return; }
+        const std::string path(m_searchBar.query()); const auto destination = m_project.resolve(path, error);
+        if (!error.empty()) { setCommandStatus(error, true); return; }
+        const auto root = m_project.root(), interpreter = m_pythonEnvironments[*m_pythonSelected].interpreter;
+        m_pythonCreating = true; m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_pythonRuntimeFuture = std::async(std::launch::async, [root, interpreter, destination] { return modules::createAndValidatePythonRuntime(root, interpreter, destination); });
+        refreshSuggestions(); setCommandStatus("Creating environment with the chosen interpreter; it continues if you leave", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleLogsInput) {
+        if (!m_hasProject || m_project.root().generic_string() != m_logRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_logModule) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const std::string input(m_searchBar.query());
+        if (m_logInputStage == 0) {
+            if (!input.empty()) {
+                if (std::any_of(input.begin(), input.end(), [](unsigned char c) { return c < 32 || c == 127; })) { setCommandStatus("Log paths cannot contain control characters", true); return; }
+                std::string error; (void)m_project.resolve(input, error);
+                if (!error.empty()) { setCommandStatus(error, true); return; }
+                if (m_logPaths.size() >= 8 || std::find(m_logPaths.begin(), m_logPaths.end(), input) != m_logPaths.end()) { setCommandStatus("Choose up to 8 distinct log files", true); return; }
+                m_logPaths.push_back(input); m_searchBar.setQuery(""); setCommandStatus(std::to_string(m_logPaths.size()) + " logs selected; add another or press Enter to continue", false); return;
+            }
+            if (m_logPaths.empty()) { setCommandStatus("Enter at least one log file", true); return; }
+            m_logInputStage = 1; m_searchBar.setQuery(""); setCommandStatus("Enter a case-sensitive search, or leave empty for all records", false); return;
+        }
+        if (m_logInputStage == 1) { m_logQuery = input; m_logInputStage = 2; m_searchBar.setQuery(""); setCommandStatus("Enter for ISO timestamps; for syslog enter YYYY +HH:MM or YYYY -HH:MM", false); return; }
+        modules::LogCorrelationOptions options; options.enableJsonLines=m_logJson;
+        if (!input.empty()) {
+            int year = 0, hours = 0, minutes = 0;
+            if (input.size() != 11 || input[4] != ' ' || (input[5] != '+' && input[5] != '-') || input[8] != ':' ||
+                std::from_chars(input.data(), input.data() + 4, year).ptr != input.data() + 4 ||
+                std::from_chars(input.data() + 6, input.data() + 8, hours).ptr != input.data() + 8 ||
+                std::from_chars(input.data() + 9, input.data() + 11, minutes).ptr != input.data() + 11 ||
+                year < 1 || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) { setCommandStatus("Use YYYY +HH:MM or YYYY -HH:MM, or leave empty", true); return; }
+            options.enableSyslog = true; options.syslogYear = year; options.syslogUtcOffsetMinutes = (input[5] == '-' ? -1 : 1) * (hours * 60 + minutes);
+        }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [this](const auto& command) { return command.action == (m_logJson ? "log-correlation-json" : "log-correlation"); })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_logFuture.valid()) { setCommandStatus("A log comparison is still finishing", false); return; }
+        auto project = m_project; const auto paths = m_logPaths; const auto query = m_logQuery; m_logReport = {}; m_logSnapshots.clear(); m_logSelected.reset(); m_logShowing = true;
+        m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; m_logCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands); m_logGeneration=m_searchBar.generation();
+        m_logFuture = std::async(std::launch::async, [project, paths, query, options, cancel = m_logCancel] {
+            LogResult result; std::vector<std::string> contents; contents.reserve(paths.size()); std::size_t remaining = 16U * 1024U * 1024U;
+            try {
+                for (const auto& path : paths) { std::string text; if (!project.readFileBounded(path, text, result.error, remaining, cancel.get())) return result; remaining -= text.size(); contents.push_back(std::move(text)); }
+                std::vector<modules::LogInput> inputs; for (std::size_t i = 0; i < paths.size(); ++i) inputs.push_back({paths[i], contents[i]});
+                if (!cancel->load()) { result.report = modules::correlateLogs(inputs, query, 16U * 1024U * 1024U, 100000, 10000, options, cancel.get()); for (std::size_t i=0; i<paths.size(); ++i) result.snapshots.emplace(paths[i],std::move(contents[i])); }
+            } catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Correlating saved logs… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleDesignTokensPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_designTokenRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id!=m_designTokenModule) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "design-token-explorer"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_designTokenFuture.valid()) { setCommandStatus("A token inspection is still finishing", false); return; }
+        const std::string path(m_searchBar.query()); auto extension = std::filesystem::path(path).extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".css" && extension != ".json") { setCommandStatus("Enter a project-relative .css or .json file", true); return; }
+        const bool aliases=extension==".json" && std::find(found->requirements.begin(),found->requirements.end(),"design-token-aliases-v1")!=found->requirements.end();
+        auto project = m_project; m_designTokenFile = path; m_designTokenSnapshot.clear(); m_designTokenSelected.reset(); m_designTokenReport = {}; m_designTokenAliases.clear(); m_designTokenAliasEnabled=aliases; m_designTokenShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        m_designTokenCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands); m_designTokenGeneration=m_searchBar.generation();
+        m_designTokenFuture = std::async(std::launch::async, [project, path, extension, aliases, cancel = m_designTokenCancel] {
+            DesignTokenResult result; std::string contents;
+            try { if (project.readFileBounded(path, contents, result.error, 4U * 1024U * 1024U, cancel.get()) && !cancel->load()) {
+                if (extension == ".css") (void)modules::extractCssDesignTokens(contents, result.report, result.error);
+                else (void)modules::extractJsonDesignTokens(contents, result.report, result.error);
+                if(result.error.empty() && aliases) (void)modules::resolveDesignTokenAliases(result.report.tokens,result.aliases,result.error,cancel.get());
+                if (result.error.empty()) result.snapshot = std::move(contents);
+            } } catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Reading design tokens… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleLocalizationPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_localizationRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative JSON path", true); return; }
+        if (!m_localizationSelectingTranslation) { m_localizationSource = path; m_localizationSelectingTranslation = true; m_searchBar.setQuery(""); setCommandStatus("Enter the translation JSON path", false); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "compare-localization"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_localizationFuture.valid()) { setCommandStatus("A comparison is still finishing", false); return; }
+        auto project = m_project; const auto source = m_localizationSource; m_localizationTranslation = path; m_localizationSourceSnapshot.clear(); m_localizationTranslationSnapshot.clear(); m_localizationEditPreview = false; m_localizationEditPlan = {}; m_localizationEntries.clear(); m_localizationSelected.reset(); m_localizationShowing = true;
+        m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; m_localizationCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_localizationFuture = std::async(std::launch::async, [project, source, path, cancel = m_localizationCancel] {
+            LocalizationResult result; std::string a, b;
+            try { if (project.readFileBounded(source, a, result.error, 1024U * 1024U, cancel.get()) && project.readFileBounded(path, b, result.error, 1024U * 1024U, cancel.get()) && !cancel->load() && modules::compareLocalizationText(a, b, result.entries, result.error)) { result.sourceSnapshot = std::move(a); result.translationSnapshot = std::move(b); } }
+            catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Comparing saved translation files… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleBinaryPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_binaryRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "binary-inspector"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_binaryFuture.valid()) { setCommandStatus("An inspection is still finishing", false); return; }
+        const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative binary path", true); return; }
+        auto project = m_project; m_binaryInspection = {}; m_binarySnapshot.reset(); m_binarySlice = 0; m_binaryShowing = true; m_binaryCategory.reset(); m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        m_binaryCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_binaryFuture = std::async(std::launch::async, [project, path, cancel = m_binaryCancel] {
+            BinaryResult result; std::string bytes;
+            try { if (project.readFileBounded(path, bytes, result.inspection.error, 128U * 1024U * 1024U, cancel.get()) && !cancel->load()) { result.inspection = modules::inspectBinary(bytes, 2000); if (!result.inspection.slices.empty()) result.snapshot = std::make_shared<const std::string>(std::move(bytes)); } }
+            catch (const std::exception& e) { result.inspection.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Inspecting binary without running it… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleBenchmarkPath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_benchmarkRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const std::string path(m_searchBar.query());
+        if (path.empty()) { setCommandStatus("Enter a project-relative report path", true); return; }
+        if (!m_benchmarkSelectingCandidate) { m_benchmarkBaseline = path; m_benchmarkSelectingCandidate = true; m_searchBar.setQuery(""); setCommandStatus("Enter the candidate report path", false); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "benchmark-comparison"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_benchmarkFuture.valid()) { setCommandStatus("A comparison is still finishing", false); return; }
+        auto project = m_project; const auto baseline = m_benchmarkBaseline; m_benchmarkComparison = {}; m_benchmarkSelected.reset(); m_benchmarkFilter = 0; m_benchmarkShowing = true;
+        m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; m_benchmarkCancel = std::make_shared<std::atomic_bool>(false);
+        m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_benchmarkFuture = std::async(std::launch::async, [project, baseline, path, cancel = m_benchmarkCancel] {
+            BenchmarkResult result; std::string before, after; modules::BenchmarkRun a, b;
+            try {
+                if (project.readFile(baseline, before, result.error, cancel.get()) && project.readFile(path, after, result.error, cancel.get()) &&
+                    modules::parseBenchmarkRun(before, a, result.error) && modules::parseBenchmarkRun(after, b, result.error)) result.comparison = modules::compareBenchmarkRuns(a, b);
+            } catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Comparing saved reports… Escape cancels", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleCoveragePath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_coverageRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [this](const auto& command) { return command.action == (m_coverageCobertura ? "coverage-cobertura" : "coverage-lcov"); })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        if (m_coverageFuture.valid()) { setCommandStatus("Coverage import is still finishing", false); return; }
+        const std::string path(m_searchBar.query());
+        if (path.empty()) { setCommandStatus("Enter a project-relative coverage report path", true); return; }
+        const bool comparing = m_coverageChoosingBaseline; m_coverageChoosingBaseline = false;
+        auto project = m_project; auto current = comparing ? m_coverageReport : modules::CoverageReport{};
+        if (!comparing) { m_coverageReport = {}; m_coverageSummary = {}; m_coverageFile.clear(); m_coverageFilesMode = false; m_coverageBaselines.clear(); m_coverageComparing = false; m_coverageComparison = {}; m_coverageFilter = 0; }
+        m_coverageShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        m_coverageCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_coverageFuture = std::async(std::launch::async, [project, path, cobertura = m_coverageCobertura, comparing, current = std::move(current), cancel = m_coverageCancel] {
+            CoverageResult result; result.comparing = comparing; std::string contents;
+            try {
+                if (project.readFile(path, contents, result.error, cancel.get())) {
+                    result.report = cobertura ? modules::parseCobertura(project, contents, cancel.get(), 10000) : modules::parseLcov(project, contents, cancel.get(), 10000);
+                    if (comparing) { (void)modules::compareCoverage(result.report, current, result.comparison, result.error); return result; }
+                    std::size_t bytes = 0; std::set<std::string> attempted;
+                    for (const auto& line : result.report.lines) {
+                        if (cancel->load()) { result.report.incomplete = true; break; }
+                        if (!attempted.insert(line.path).second) continue;
+                        std::string source, readError;
+                        if (!project.readFile(line.path, source, readError, cancel.get()) || source.size() > 64U * 1024U * 1024U - bytes) { result.report.incomplete = true; continue; }
+                        bytes += source.size(); result.baselines.emplace(line.path, std::move(source));
+                    }
+                }
+            }
+            catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Reading LCOV report… Escape cancels", false); return;
+    }
+    if(m_searchBar.kind()==ui::PromptKind::ModuleCMakePath && m_cmakeBuildStage==1) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_moduleCMakeRoot || !m_moduleCMakeTarget || *m_moduleCMakeTarget>=m_moduleCMakeModel.targets.size()){setCommandStatus("CMake target context changed",true);return;}
+        const auto raw=std::string(m_searchBar.query());const std::filesystem::path exe(std::u8string(raw.begin(),raw.end()));auto project=m_project;auto build=m_moduleCMakeBuild;auto target=m_moduleCMakeModel.targets[*m_moduleCMakeTarget];m_cmakeBuildStage=2;m_searchBar.open(ui::PromptKind::ModuleCommands);m_cmakeBuildGeneration=m_searchBar.generation();m_modulePage=0;m_selectedSuggestion=-1;
+        m_cmakeBuildPrepareFuture=std::async(std::launch::async,[project,build,target,exe]{return modules::prepareCMakeBuild(project,build,target.name,target.configuration,exe);});refreshSuggestions();setCommandStatus("Checking selected build target; no process started",false);return;
+    }
+    if (m_searchBar.kind()==ui::PromptKind::ModuleCMakePath && m_cmakeValueInput) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_moduleCMakeRoot || !m_cmakeValueSelected || *m_cmakeValueSelected>=m_cmakeValues.size()) {setCommandStatus("Cache context changed",true);return;}
+        const auto option=m_cmakeValues[*m_cmakeValueSelected]; const auto value=std::string(m_searchBar.query()); const auto path=m_moduleCMakeBuild+"/CMakeCache.txt"; auto project=m_project;m_cmakeValueInput=false;m_cmakeCacheTarget=value;m_cmakeCacheUpdate={};m_searchBar.open(ui::PromptKind::ModuleCommands);m_modulePage=0;m_selectedSuggestion=-1;
+        m_cmakeCachePrepareFuture=std::async(std::launch::async,[project,path,option,value]{CMakeCachePrepareResult result;(void)modules::prepareCMakeCacheValueUpdate(project,path,option.name,option.type,option.value,value,result.update,result.error);return result;});refreshSuggestions();setCommandStatus("Checking saved cache value…",false);return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleCMakePath) {
+        if (!m_hasProject || m_project.root().generic_string() != m_moduleCMakeRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+        const auto& reviewedModule = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
+        const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewedModule](const auto& module) { return module.id == reviewedModule.id; });
+        const std::string action = m_moduleCMakePrepare ? "prepare-cmake-query" : m_moduleCMakeEditing ? "edit-cmake-options" : "browse-cmake";
+        if (found == fresh.end() || !found->enabled || found->requirements != reviewedModule.requirements ||
+            std::none_of(found->commands.begin(), found->commands.end(), [&action](const auto& command) { return command.action == action; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
+        const std::string relative(m_searchBar.query());
+        const auto build = m_project.resolve(relative, error);
+        if (build.empty() || !m_project.isDirectory(relative)) { setCommandStatus("Choose an existing build directory inside the project", true); return; }
+        m_moduleCMakeBuild = relative;
+        if (m_moduleCMakePrepare) {
+            for (const auto* name : {"codemodel-v2", "cache-v2"}) {
+                const auto query = (std::filesystem::path(relative) / ".cmake/api/v1/query" / name).generic_string();
+                if (!m_project.createFile(query, error, true)) { setCommandStatus("Could not prepare all CMake queries: " + error, true); return; }
+            }
+            m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus("CMake query ready; reconfigure the build, then browse targets", false); return;
+        }
+        if (m_moduleCMakeFuture.valid()) { setCommandStatus("CMake metadata is still loading", false); return; }
+        const auto root = m_project.root(); m_moduleCMakeModel = {}; m_moduleCMakeShowing = true; m_cmakeBuildStage=0; m_moduleCMakeOptions = false; m_cmakeValueMode=false; m_cmakeValueSelected.reset(); m_cmakeValueInput=false; m_moduleCMakeOption.reset(); m_moduleCMakeStale = false; m_cmakeCacheUpdate = {}; m_moduleCMakeTarget.reset();
+        m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; m_searchBar.open(ui::PromptKind::ModuleCommands);
+        m_moduleCMakeFuture = std::async(std::launch::async, [root, build] {
+            CMakeModelResult result;
+            try {
+                if (modules::readCMakeModel(build, result.model, result.error)) {
+                    std::error_code ec; const auto source = std::filesystem::weakly_canonical(result.model.sourceDirectory, ec);
+                    if (ec) result.error = "Cannot resolve CMake source directory";
+                    else { const auto project = std::filesystem::weakly_canonical(root, ec); if (ec || source != project) result.error = "CMake metadata belongs to another project"; }
+                    if (!result.error.empty()) result.model = {};
+                }
+            } catch (const std::exception& e) { result.error = e.what(); }
+            return result;
+        });
+        refreshSuggestions(); setCommandStatus("Loading CMake build metadata…", false); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleSnippetName) {
+        const std::string name(m_searchBar.query());
+        if (name.empty() || name.size() > 128 || name.find_first_not_of(" \t") == std::string::npos || m_personalSnippetDraft.empty()) { setCommandStatus("Enter a snippet name of up to 128 bytes", true); return; }
+        const auto id = "personal-snippet-" + workspace::newTaskId();
+        const auto manifest = "{\"name\":" + debug::jsonString(name) + ",\"version\":\"1.0.0\",\"description\":\"Personal snippet\"," + (m_personalSnippetTemplate ? "\"requires\":[\"snippet-v1\",\"snippet-placeholders-v2\"]," : "") + "\"permissions\":{\"project\":false,\"network\":false,\"processes\":false,\"settings\":false},\"commands\":[{\"title\":" + debug::jsonString(name) + ",\"insert\":" + debug::jsonString(m_personalSnippetDraft) + (m_personalSnippetTemplate ? ",\"snippet\":true" : "") + "}]}";
+        std::string error;
+        if (!modules::install(m_moduleRoot, id, manifest, error)) { setCommandStatus("Could not save snippet: " + error, true); return; }
+        const bool enabled = modules::setEnabled(m_moduleRoot, id, true, error);
+        m_personalSnippetDraft.clear();
+        if (!modules::list(m_moduleRoot, m_modules, error)) { setCommandStatus("Snippet saved but the list could not refresh: " + error, true); return; }
+        m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); clearCommandFeedback(); refreshSuggestions();
+        setCommandStatus(enabled ? "Personal snippet saved and enabled" : "Snippet saved disabled; enable it from Modules", !enabled); return;
+    }
     if (m_searchBar.kind() == ui::PromptKind::ModuleImport) {
         const std::string source(m_searchBar.query());
         if (source.starts_with("ghcr.io/")) {
@@ -2463,6 +4688,40 @@ void Application::applyModuleCommand() {
     refreshSuggestions(); if (m_moduleChoices.empty()) return;
     const auto index = m_selectedSuggestion >= 0 && m_selectedSuggestion < static_cast<int>(m_moduleChoices.size()) ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
     const int choice = m_moduleChoices[index];
+    if (m_visualShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (choice == -90) { if (m_visualConfigCancel) m_visualConfigCancel->store(true); if (m_visualCropCancel) m_visualCropCancel->store(true); if (m_visualCancel) m_visualCancel->store(true); m_visualShowing = false; m_visualReview.reset(); m_visualConfigStage=0; m_visualConfigDraft={}; m_visualConfigOriginal.clear(); m_visualConfigReview.reset(); m_visualCropMode=false; m_visualCropPreview={}; m_visualConfirm = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -311 && m_visualConfigStage) { if(m_visualConfigCancel) m_visualConfigCancel->store(true); m_visualConfigStage=0; m_visualConfigDraft={}; m_visualConfigOriginal.clear(); m_visualConfigReview.reset(); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+        if (choice == -306 && m_visualReview && m_visualConfigured && !m_visualConfigFuture.valid() && !m_visualConfigApplyFuture.valid()) {
+            if (!m_hasProject || m_project.root().generic_string()!=m_visualRoot || !m_hasDocument || normalizeRelative(m_filePath)!=normalizeRelative(m_visualConfigPath) || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_visualModule) { setCommandStatus("Open the reviewed configuration document first",true); return; }
+            std::vector<modules::Module> fresh; std::string error; if(!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-config-edit-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="compare-visual-configured";});})) {setCommandStatus("Module changed; reopen review",true);return;}
+            m_visualConfigReview=m_visualReview; m_visualConfigOriginal=m_document.toUtf8(); m_visualConfigFile=m_filePath; m_visualConfigRevision=m_document.revision(); m_visualConfigDraft={}; m_visualConfigStage=1; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return;
+        }
+        if (m_visualConfigStage==1 && (choice==-307 || choice==-308 || choice==-309)) { m_visualConfigOperation=choice==-307?0:choice==-308?1:2; m_visualConfigStage=2; m_searchBar.open(ui::PromptKind::ModuleVisualPath); setCommandStatus(choice==-307?"Enter x y width height":choice==-308?"Enter one-based mask number":"Enter threshold 0–255",false); return; }
+        if (choice==-310 && m_visualConfigStage==4) {
+            if(!m_hasProject || m_project.root().generic_string()!=m_visualRoot || !m_hasDocument || m_filePath!=m_visualConfigFile || m_document.revision()!=m_visualConfigRevision || m_document.toUtf8()!=m_visualConfigOriginal || m_visualReview!=m_visualConfigReview || !visualConfigAuthorized()) {setCommandStatus("Review or document changed; start again",true);return;}
+            auto project=m_project; auto review=m_visualConfigReview; m_visualConfigCancel=std::make_shared<std::atomic_bool>(false); m_visualConfigStage=5; m_visualConfigApplyFuture=std::async(std::launch::async,[project,review,cancel=m_visualConfigCancel] {std::string error; (void)review->screenshotsStillCurrent(project,error,cancel.get());return error;}); refreshSuggestions(); setCommandStatus("Checking reviewed screenshots…",false); return;
+        }
+        if (choice == -91 && m_visualReview && !m_visualFuture.valid() && !m_visualApprovalFuture.valid()) { m_visualVisible = true; return; }
+        if (choice == -305 && m_visualReview && !m_visualCropFuture.valid() && !m_visualApprovalFuture.valid()) { requestVisualCrop(0,0); return; }
+        if (choice == -92 && m_visualReview) { m_visualConfirm = true; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Confirm to replace the baseline", false); return; }
+        if (choice == -94 && m_visualReview && m_visualConfirm && !m_visualApprovalFuture.valid() && !m_visualCropFuture.valid()) {
+            if (!m_hasProject || m_project.root().generic_string() != m_visualRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_visualModule) { setCommandStatus("Project or module changed; reopen the review", true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            const char* action = m_visualConfigured ? "compare-visual-configured" : "compare-visual-images";
+            if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this, action](const auto& m) { return m.id == m_visualModule && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(), m.commands.end(), [action](const auto& c) { return c.action == action; }); })) { setCommandStatus("Module changed or disabled; reopen the review", true); return; }
+            auto project = m_project; auto review = m_visualReview; m_visualCancel = std::make_shared<std::atomic_bool>(false);
+            m_visualApprovalFuture = std::async(std::launch::async, [project, review, cancel = m_visualCancel]() mutable { std::string error; (void)review->approve(project, error, cancel.get()); return error; });
+            m_visualConfirm = false; refreshSuggestions(); setCommandStatus("Replacing baseline…", false); return;
+        }
+        return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleList && (choice == -8 || choice == -61)) {
+        if (!m_hasDocument || !m_document.hasSelection()) { setCommandStatus("Select text in an open file first", true); return; }
+        const auto selected = m_document.selectionUtf8();
+        if (selected.empty() || selected.size() > 4096) { setCommandStatus("Select up to 4096 bytes for a snippet", true); return; }
+        m_personalSnippetDraft = selected; m_personalSnippetTemplate = choice == -61; m_searchBar.open(ui::PromptKind::ModuleSnippetName); clearCommandFeedback();
+        setCommandStatus(m_personalSnippetTemplate ? "Name this template; markers will become editable fields" : "Name this personal snippet; it inserts text literally", false); return;
+    }
     if (m_searchBar.kind() == ui::PromptKind::ModuleList && choice == -3) {
         m_searchBar.open(ui::PromptKind::ModuleImport); clearCommandFeedback();
         setCommandStatus("Enter a module.json path or ghcr.io/owner/package:version", false); return;
@@ -2470,6 +4729,759 @@ void Application::applyModuleCommand() {
     if ((m_searchBar.kind() == ui::PromptKind::ModuleList && choice == -4) ||
         (m_searchBar.kind() == ui::PromptKind::ModuleCatalog && choice == -5)) {
         refreshModuleCatalog(); return;
+    }
+    if (choice == -7 && m_moduleScanShowingResults) { if (m_moduleScanCancel) m_moduleScanCancel->store(true); m_moduleScanShowingResults = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_moduleScanShowingResults && (choice==-189 || choice==-190 || choice==-191 || choice==-192)) { m_moduleScanFilter=choice==-189 ? 0 : choice==-190 ? 1 : choice==-191 ? 2 : 3; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+    if (choice == -12 && m_moduleMarkdownShowing) { m_moduleMarkdownShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_pullRequestShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (choice == -212 && m_pullReviewMode && m_pullCommentConfirm) { m_pullReviewMode = 0; m_pullCommentConfirm = false; m_pullCommentBody.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if ((choice == -208 || choice == -209 || choice == -210) && m_pullRequestFetched && !m_pullPatchSelected && !m_pullCommentFuture.valid() && !m_pullRequestData.partial && m_pullRequestData.state == "open" && !m_pullRequestData.headSha.empty() && m_moduleSelected < m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(), m_modules[m_moduleSelected].requirements.end(), "pull-request-review-v1") != m_modules[m_moduleSelected].requirements.end()) {
+            m_pullReviewMode = choice == -208 ? 1 : choice == -209 ? 2 : 3; m_pullCommentBody.clear(); m_searchBar.open(ui::PromptKind::ModulePullRequestComment); clearCommandFeedback();
+            setCommandStatus(m_pullReviewMode == 1 ? "Write an optional approval message; confirm before sending" : "Write a review message; confirm before sending", false); return;
+        }
+        if (choice == -106 && m_pullCommentConfirm) { m_pullCommentConfirm = false; m_pullCommentBody.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -101) { if (m_pullRequestCancel) m_pullRequestCancel->store(true); m_pullCommentConfirm = false; m_pullReviewMode = 0; m_pullCommentBody.clear(); if (m_pullPatchSelected) { m_pullPatchSelected.reset(); m_pullPatchHunks.clear(); m_pullPatchError.clear(); } else { m_pullRequestShowing = false; m_pullRequestData = {}; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (m_pullCommentFuture.valid()) { setCommandStatus("GitHub submission is still finishing; refresh before retrying", true); return; }
+        if (choice == -211 && m_pullReviewMode && m_pullCommentConfirm && !m_pullPatchSelected) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (!m_pullRequestFetched || m_pullRequestData.partial || m_pullRequestData.state != "open" || m_pullRequestData.headSha.empty() || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_pullRequestModule || !modules::list(m_moduleRoot, fresh, error) ||
+                std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_pullRequestModule && m.enabled && m.valid && m.network && std::find(m.requirements.begin(), m.requirements.end(), "pull-request-review-v1") != m.requirements.end() && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "fetch-pull-request"; }); })) { setCommandStatus("Module or pull request changed; reload before submitting", true); return; }
+            const char* value = std::getenv("GH_TOKEN"); if (!value || !*value) { setCommandStatus("GH_TOKEN is unavailable", true); return; }
+            std::string token(value); auto body = m_pullCommentBody; const auto sha = m_pullRequestData.headSha, url = m_pullRequestUrl;
+            const auto event = m_pullReviewMode == 1 ? modules::GitHubReviewEvent::Approve : m_pullReviewMode == 2 ? modules::GitHubReviewEvent::RequestChanges : modules::GitHubReviewEvent::Comment;
+            m_pullCommentConfirm = false; m_pullCommentBody.clear(); m_pullReviewMode = 0; m_pullReviewPosting = true; m_pullRequestCancel = std::make_shared<std::atomic_bool>(false);
+            m_pullCommentFuture = std::async(std::launch::async, [url, sha, event, body = std::move(body), token = std::move(token), cancel = m_pullRequestCancel]() mutable { std::string error; const bool ok = modules::submitGitHubReview(url, token, sha, event, body, true, modules::requestGitHubPullRequest, modules::requestGitHubReview, error, cancel.get()); std::fill(token.begin(), token.end(), '\0'); if (!ok && error.empty()) error = "Review result unknown; refresh before retrying"; return error; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Submitting review…", false); return;
+        }
+        if (m_pullPatchSelected && !m_pullCommentConfirm && !m_pullCommentFuture.valid() && choice >= 0) {
+            std::size_t index = 0;
+            for (const auto& hunk : m_pullPatchHunks) for (const auto& line : hunk.lines) {
+                if (index++ != static_cast<std::size_t>(choice)) continue;
+                if (!line.newLine || m_pullRequestData.partial || m_pullRequestData.headSha.empty() || m_moduleSelected >= m_modules.size() || std::find(m_modules[m_moduleSelected].requirements.begin(), m_modules[m_moduleSelected].requirements.end(), "pull-request-comment-v1") == m_modules[m_moduleSelected].requirements.end()) return;
+                m_pullCommentLine = line.newLine; m_pullCommentBody.clear(); m_searchBar.open(ui::PromptKind::ModulePullRequestComment); clearCommandFeedback(); setCommandStatus("Write a comment; you will confirm before sending", false); return;
+            }
+            return;
+        }
+        if (choice == -105 && m_pullCommentConfirm && m_pullPatchSelected && !m_pullCommentFuture.valid()) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (m_pullRequestData.partial || *m_pullPatchSelected >= m_pullRequestData.files.size() || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_pullRequestModule || !modules::list(m_moduleRoot, fresh, error) ||
+                std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_pullRequestModule && m.enabled && m.valid && m.network && std::find(m.requirements.begin(), m.requirements.end(), "pull-request-comment-v1") != m.requirements.end() && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "fetch-pull-request"; }); })) { setCommandStatus("Module or pull request changed; reload before posting", true); return; }
+            const char* value = std::getenv("GH_TOKEN"); if (!value || !*value) { setCommandStatus("GH_TOKEN is unavailable", true); return; }
+            std::string token(value); auto body = m_pullCommentBody; auto path = m_pullRequestData.files[*m_pullPatchSelected].path; auto sha = m_pullRequestData.headSha; auto url = m_pullRequestUrl; auto line = m_pullCommentLine;
+            m_pullCommentConfirm = false; m_pullCommentBody.clear(); m_pullRequestCancel = std::make_shared<std::atomic_bool>(false);
+            m_pullCommentFuture = std::async(std::launch::async, [url, path, sha, line, body = std::move(body), token = std::move(token), cancel = m_pullRequestCancel]() mutable { std::string error; (void)modules::postGitHubReviewComment(url, token, sha, path, line, body, modules::requestGitHubReviewComment, error, cancel.get()); std::fill(token.begin(), token.end(), '\0'); return error; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Posting comment…", false); return;
+        }
+        if (choice >= 0 && m_pullRequestFetched && !m_pullPatchSelected && static_cast<std::size_t>(choice) < m_pullRequestData.files.size()) {
+            const auto index = static_cast<std::size_t>(choice); const auto& file = m_pullRequestData.files[index];
+            if (m_pullPatchFuture.valid()) { setCommandStatus("Previous patch is still loading", false); return; }
+            m_pullPatchSelected = index; m_pullPatchPending = index; m_pullPatchGeneration = m_searchBar.generation(); m_pullPatchHunks.clear(); m_pullPatchError.clear();
+            if (!file.hasPatch) m_pullPatchError = "GitHub did not provide a patch for this file";
+            else { auto patch = file.patch; m_pullPatchFuture = std::async(std::launch::async, [patch = std::move(patch)] { PullPatchResult result; (void)modules::parsePullRequestPatch(patch, result.hunks, result.error); return result; }); }
+            m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        if ((choice == -102 || choice == -103) && !m_pullRequestFetched && !m_pullRequestFuture.valid()) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_pullRequestModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_pullRequestModule && m.enabled && m.valid && m.network && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "fetch-pull-request"; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
+            std::string token; if (choice == -103) { const char* value = std::getenv("GH_TOKEN"); if (!value || !*value) { setCommandStatus("GH_TOKEN is unavailable", true); return; } token = value; }
+            m_pullRequestCancel = std::make_shared<std::atomic_bool>(false); m_pullRequestError.clear();
+            m_pullRequestFuture = std::async(std::launch::async, [url = m_pullRequestUrl, token = std::move(token), cancel = m_pullRequestCancel]() mutable { PullRequestResult result; (void)modules::fetchGitHubPullRequest(url, token, modules::requestGitHubPullRequest, result.data, result.error, cancel.get()); std::fill(token.begin(), token.end(), '\0'); return result; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Fetching GitHub data… Escape cancels", false); return;
+        }
+        return;
+    }
+    if (m_serialShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (choice == -110) {
+            if (m_serialStage==10 && m_serialFuture.valid()) {if(m_serialCancel) m_serialCancel->store(true);setCommandStatus("Stopping monitor and restoring port settings…",false);return;}
+            if (m_flashFuture.valid()) { if (m_flashCancel) m_flashCancel->store(true); setCommandStatus("Cancelling flash; hardware may be partially written", true); return; }
+            if (m_flashCancel) m_flashCancel->store(true);
+            if (m_serialCancel) m_serialCancel->store(true);
+            m_serialShowing = false; m_serialResult = {}; m_flashSnapshot = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        if (choice == -170 && m_serialStage == 7 && !m_flashFuture.valid()) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (!m_hasProject || !m_hasDocument || m_project.root().generic_string() != m_flashRoot || m_filePath != m_flashFile || m_document.revision() != m_flashRevision || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_serialModule || !modules::list(m_moduleRoot, fresh, error) ||
+                std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_serialModule && m.enabled && m.valid && m.devices && m.project && m.processes && std::find(m.requirements.begin(), m.requirements.end(), "openocd-flash-v1") != m.requirements.end() && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "flash-firmware"; }); })) { setCommandStatus("Project, profile or flash permission changed; start again", true); return; }
+            if (m_flashSnapshot.binaryAddress && std::none_of(fresh.begin(),fresh.end(),[this](const auto& m){return m.id==m_serialModule && std::find(m.requirements.begin(),m.requirements.end(),"openocd-bin-v1")!=m.requirements.end();})) {setCommandStatus("BIN flash capability changed; start again",true);return;}
+            const auto executable = m_flashExecutable; const auto snapshot = m_flashSnapshot;
+            m_flashCancel = std::make_shared<std::atomic_bool>(false); m_serialStage = 8;
+            m_flashFuture = std::async(std::launch::async, [executable, snapshot, cancel = m_flashCancel] { return modules::flashFirmware(executable, snapshot, cancel.get()); });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Flashing firmware; Escape requests cancellation", false); return;
+        }
+        if (m_serialStage == 0 && choice >= 0 && static_cast<std::size_t>(choice) < m_serialScan.devices.size()) { m_serialSelected = static_cast<std::size_t>(choice); m_serialStage = 1; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Opening a serial port may reset hardware; choose a baud to confirm", false); return; }
+        if (m_serialStage==10 && choice==-231 && m_serialFuture.valid()) {if(m_serialCancel) m_serialCancel->store(true);setCommandStatus("Stopping monitor and restoring port settings…",false);return;}
+        if (m_serialStage==1 && choice==-230 && !m_serialFuture.valid() && m_serialSelected<m_serialScan.devices.size()) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_serialModule || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[this](const auto& module){return module.id==m_serialModule && module.enabled && module.valid && module.devices && std::find(module.requirements.begin(),module.requirements.end(),"serial-continuous-v1")!=module.requirements.end() && std::any_of(module.commands.begin(),module.commands.end(),[](const auto& c){return c.action=="serial-monitor";});})) {setCommandStatus("Module changed or disabled; reopen the command",true);return;}
+            auto device=m_serialScan.devices[m_serialSelected].path; m_serialCancel=std::make_shared<std::atomic_bool>(false); m_serialMonitor=std::make_shared<modules::SerialMonitorBuffer>(1024U*1024U); auto buffer=m_serialMonitor; auto cancel=m_serialCancel; m_serialStage=10; m_serialResult={};
+            m_serialFuture=std::async(std::launch::async,[device,buffer,cancel]{return modules::monitorSerial(device,115200,std::chrono::hours(24),*buffer,cancel.get());}); m_serialMonitorRefresh=std::chrono::steady_clock::now();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Monitoring serial output; stop requests restoration",false);return;
+        }
+        if (m_serialStage == 1 && (choice == -111 || choice == -112) && !m_serialFuture.valid()) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_serialModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_serialModule && m.enabled && m.valid && m.devices && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "serial-monitor"; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
+            const auto device = m_serialScan.devices[m_serialSelected].path; m_serialBaud = choice == -111 ? 115200 : 9600; const auto baud = m_serialBaud;
+            m_serialCancel = std::make_shared<std::atomic_bool>(false); m_serialStage = 2; m_serialResult = {};
+            m_serialFuture = std::async(std::launch::async, [device, baud, cancel = m_serialCancel] { return modules::captureSerial(device, baud, std::chrono::seconds(5), 1024U * 1024U, cancel.get()); });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Capturing serial output… Escape cancels", false); return;
+        }
+        return;
+    }
+    if (m_webShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (choice == -120) {
+#if defined(__APPLE__)
+            if (m_webRenderer) m_webRenderer->cancel();
+#elif defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+            if (m_windowsWebPresentation) { m_windowsWebPresentation->cancel(); }
+                m_webPresentationActive = false;
+#endif
+            m_webShowing = false; m_webReady = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        if (choice == -122 && m_webReady) { m_webViewActive = true; m_visualVisible = true; return; }
+        if (choice == -121 && !m_webStarted && !m_webBundleFuture.valid()) {
+#if defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+            const char* testOptIn=std::getenv("LUCID_WEBVIEW2_UI_TEST");
+            if (!testOptIn || std::string_view(testOptIn)!="1") { setCommandStatus("Windows WebView2 UI testing is not opted in", true); return; }
+#endif
+            if (!m_hasProject || m_project.root().generic_string() != m_webRoot || !m_hasDocument || m_filePath != m_webFile || m_document.revision() != m_webRevision || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_webModule) { setCommandStatus("Project or preview configuration changed", true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_webModule && m.enabled && m.valid && m.project && m.network && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "web-preview"; }); })) { setCommandStatus("Module changed or disabled; reopen it", true); return; }
+            auto project = m_project; auto config = m_document.toUtf8(); m_webStarted = true; m_webError.clear(); m_webGeneration = m_searchBar.generation();
+            m_webBundleFuture = std::async(std::launch::async, [project, config] { WebBundleResult result; (void)modules::loadWebPreviewBundle(project, config, result.bundle, result.error); return result; });
+            refreshSuggestions(); setCommandStatus("Reading selected preview assets…", false); return;
+        }
+        return;
+    }
+    if (m_shaderShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (choice == -105) { if (m_shaderCancel) m_shaderCancel->store(true); if (m_shaderPreviewCancel) m_shaderPreviewCancel->store(true); if (m_spirvCancel) m_spirvCancel->store(true); if (m_shaderIncludesCancel) m_shaderIncludesCancel->store(true); m_shaderPreviewStage = 0; m_shaderPreviewBytes.clear(); m_spirvShowing = false; m_shaderIncludesShowing = false; m_shaderShowing = false; m_shaderResult = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -225 && m_shaderPreviewStage) { if (m_shaderPreviewCancel) m_shaderPreviewCancel->store(true); m_shaderPreviewStage = 0; m_shaderPreviewBytes.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -224 && m_shaderPreviewStage == 3) { m_shaderPreviewViewActive = true; m_visualVisible = true; return; }
+        if (choice == -222 && m_shaderCompleted && m_shaderResult.succeeded && m_shaderArtifact && !m_shaderPreviewFuture.valid()) {
+            if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_shaderModule) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+            std::string bytes, error; if (!m_project.readFileBounded(m_shaderOutput, bytes, error, 1024U*1024U) || !modules::validatePreviewFragmentInterface(bytes, error)) { setCommandStatus("Cannot preview artifact: " + error, true); return; }
+            m_shaderPreviewBytes = std::move(bytes); m_shaderPreviewStage = 1; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Review the GPU execution warning before confirming", false); return;
+        }
+        if (choice == -223 && m_shaderPreviewStage == 1 && !m_shaderPreviewFuture.valid()) {
+            std::vector<modules::Module> fresh; std::string error, current;
+            if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_shaderModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_shaderModule && m.enabled && m.valid && m.project && m.processes && std::find(m.requirements.begin(), m.requirements.end(), "shader-render-preview-v1") != m.requirements.end() && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "compile-shader"; }); }) || !m_project.readFileBounded(m_shaderOutput, current, error, 1024U*1024U) || current != m_shaderPreviewBytes) { setCommandStatus("Artifact or module changed; review again", true); return; }
+            auto helper = text::applicationExecutablePath().parent_path() / "lucid-shader-preview-helper";
+#if defined(_WIN32)
+            helper += ".exe";
+#endif
+            if (!helper.is_absolute()) { setCommandStatus("Packaged shader preview helper is unavailable", true); return; }
+            auto bytes = m_shaderPreviewBytes; m_shaderPreviewCancel = std::make_shared<std::atomic_bool>(false); m_shaderPreviewStage = 2;
+            m_shaderPreviewFuture = std::async(std::launch::async, [helper, bytes = std::move(bytes), cancel = m_shaderPreviewCancel] { ShaderPreviewResult result; (void)modules::runStagedShaderPreview(helper, bytes, 256, 256, true, result.image, result.error, std::chrono::seconds(15), cancel.get()); return result; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Running confirmed GPU preview; Escape requests cancellation", false); return;
+        }
+        if (choice == -221 && m_spirvShowing) { if (m_spirvCancel) m_spirvCancel->store(true); m_spirvShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -220 && m_shaderCompleted && m_shaderResult.succeeded && m_shaderArtifact && !m_spirvFuture.valid()) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_shaderModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_shaderModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(), m.requirements.end(), "shader-spirv-inspection-v1") != m.requirements.end() && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "compile-shader"; }); })) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+            const auto project = m_project; const auto path = m_shaderOutput; m_spirvCancel = std::make_shared<std::atomic_bool>(false); m_spirvResult = {}; m_spirvShowing = true;
+            m_spirvFuture = std::async(std::launch::async, [project, path, cancel = m_spirvCancel] { SpirvResult result; std::string bytes; try { if (project.readFileBounded(path, bytes, result.error, 16U * 1024U * 1024U, cancel.get())) (void)modules::inspectSpirv(bytes, result.inspection, result.error, cancel.get()); } catch (const std::exception&) { result.error = "Artifact could not be inspected"; } return result; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Reading saved artifact metadata…", false); return;
+        }
+        if (choice == -219 && m_shaderIncludesShowing) { if (m_shaderIncludesCancel) m_shaderIncludesCancel->store(true); m_shaderIncludesShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -218 && !m_shaderCompleted && !m_shaderArtifact && !m_shaderIncludesShowing && !m_shaderFuture.valid() && !m_shaderIncludesFuture.valid()) {
+            if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot || !m_hasDocument || m_filePath != m_shaderFile || m_document.revision() != m_shaderRevision || m_document.dirty() || m_document.toUtf8() != m_diskContents || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_shaderModule) { setCommandStatus("Save the shader and reopen the command", true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_shaderModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(), m.requirements.end(), "shader-includes-v1") != m.requirements.end() && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "compile-shader"; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
+            const auto project = m_project; const auto file = m_shaderFile; m_shaderIncludesCancel = std::make_shared<std::atomic_bool>(false); m_shaderIncludes = {}; m_shaderIncludesShowing = true;
+            m_shaderIncludesFuture = std::async(std::launch::async, [project, file, cancel = m_shaderIncludesCancel] { return modules::inspectShaderIncludes(project, file, cancel.get()); });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Inspecting project includes…", false); return;
+        }
+        if (m_shaderIncludesShowing && choice >= 0 && !m_shaderIncludesFuture.valid() && static_cast<std::size_t>(choice) < m_shaderIncludes.edges.size()) {
+            if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot) { setCommandStatus("Project changed; inspect includes again", true); return; }
+            const auto& edge = m_shaderIncludes.edges[static_cast<std::size_t>(choice)]; const auto snapshot = m_shaderIncludes.snapshots.find(edge.source);
+            const auto cached = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [&edge](const auto& entry) { return entry.path == edge.source; });
+            std::string current, error;
+            if (snapshot == m_shaderIncludes.snapshots.end() || (m_hasDocument && m_document.dirty()) || (cached != m_inactiveDocuments.end() && cached->document.dirty()) || !m_project.readFile(edge.source, current, error) || current != snapshot->second) { setCommandStatus("Source changed or has unsaved edits; inspect includes again", true); return; }
+            openFile(edge.source, false);
+            if (m_hasDocument && m_filePath == edge.source && !m_document.dirty() && m_document.toUtf8() == snapshot->second && edge.line > 0 && edge.line <= m_document.lineCount()) { m_document.setCursor(edge.line - 1, 0); m_followCursor = true; m_shaderIncludesShowing = false; m_shaderShowing = false; m_searchBar.close(); setStatus("Include directive · advisory graph", false); }
+            else setCommandStatus("Source changed; inspect includes again", true);
+            return;
+        }
+        if (choice == -124 && !m_shaderCompleted && !m_shaderFuture.valid()) {
+            m_searchBar.open(ui::PromptKind::ModuleShaderOutput); m_searchBar.setQuery(m_shaderFile + ".spv"); clearCommandFeedback(); setCommandStatus("Enter a project-relative output path", false); return;
+        }
+        if (choice == -106 && !m_shaderCompleted && !m_shaderFuture.valid()) {
+            if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot || !m_hasDocument || m_filePath != m_shaderFile || m_document.revision() != m_shaderRevision || m_document.toUtf8() != m_diskContents || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_shaderModule) { setCommandStatus("Project, shader or module changed; save and reopen the command", true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_shaderModule && m.enabled && m.valid && m.project && m.processes && (!m_shaderArtifact || std::find(m.requirements.begin(), m.requirements.end(), "shader-artifact-v1") != m.requirements.end()) && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "compile-shader"; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
+            auto project = m_project; const auto compiler = m_shaderCompiler; const auto file = m_shaderFile; const auto stage = m_shaderStage; const auto source = m_diskContents;
+            m_shaderCancel = std::make_shared<std::atomic_bool>(false);
+            const auto output = m_shaderOutput; const auto expectedOutput = m_shaderExpectedOutput; const bool artifact = m_shaderArtifact;
+            m_shaderFuture = std::async(std::launch::async, [project, compiler, file, stage, source, output, expectedOutput, artifact, cancel = m_shaderCancel]() mutable {
+                if (artifact) return modules::compileGlslArtifact(project, compiler, file, stage, output, expectedOutput ? std::optional<std::string_view>(*expectedOutput) : std::nullopt, std::chrono::seconds(30), cancel.get(), source);
+                return modules::compileGlsl(project, compiler, file, stage, std::chrono::seconds(30), cancel.get(), source);
+            });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Compiling shader… Escape cancels", false); return;
+        }
+        if (choice >= 0 && m_shaderCompleted && static_cast<std::size_t>(choice) < m_shaderResult.diagnostics.diagnostics.size()) {
+            if (!m_hasProject || m_project.root().generic_string() != m_shaderRoot || !m_hasDocument || m_filePath != m_shaderFile || m_document.revision() != m_shaderRevision || m_document.toUtf8() != m_diskContents) { setCommandStatus("Shader changed; compile it again", true); return; }
+            const auto& d = m_shaderResult.diagnostics.diagnostics[static_cast<std::size_t>(choice)];
+            std::error_code ec; const auto expected = std::filesystem::weakly_canonical(m_project.root() / std::filesystem::path(m_shaderFile), ec); if (ec) { setCommandStatus("Shader is unavailable", true); return; }
+            const auto diagnosticPath = std::filesystem::path(std::u8string(d.path.begin(), d.path.end()));
+            const auto actual = std::filesystem::weakly_canonical(diagnosticPath.is_absolute() ? diagnosticPath : m_project.root() / diagnosticPath, ec);
+            if (ec || actual != expected || d.line == 0 || d.line > m_document.lineCount()) { setCommandStatus("Diagnostic is not in the open shader", true); return; }
+            m_document.setCursor(d.line - 1, 0); m_followCursor = true; m_shaderShowing = false; m_searchBar.close(); setStatus("Shader diagnostic · verify source", false); return;
+        }
+        return;
+    }
+    if (m_containerShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (choice == -96) { if (m_containerCancel) m_containerCancel->store(true); m_containerShowing = false; m_containerListing = {}; m_containerOutput.clear(); m_containerActionReview = {}; m_containerActionConfigSnapshot.clear(); m_containerProjectActions.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (m_containerActionMode) {
+            if (!m_hasProject || m_project.root().generic_string() != m_containerProjectRoot || !moduleStillEnabled(m_containerModule, "configured-container-actions")) { setCommandStatus("Project or module changed; reopen the command", true); return; }
+            if (choice == -262 && (m_containerStage == 6 || m_containerStage == 8)) { m_containerStage = 5; m_containerActionReview = {}; m_containerOutput.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (choice >= 0 && m_containerStage == 5 && static_cast<std::size_t>(choice) < m_containerProjectActions.size()) {
+                if (m_containerActionPrepareFuture.valid() || m_containerFuture.valid()) { setCommandStatus("A container operation is still finishing", false); return; }
+                const auto project = m_project; const auto path = m_containerActionConfigPath; const auto runtime = m_containerRuntime; const auto index = static_cast<std::size_t>(choice);
+                m_containerCancel = std::make_shared<std::atomic_bool>(false); m_containerActionPrepareFuture = std::async(std::launch::async, [project, path, runtime, index, cancel = m_containerCancel] { ContainerActionPrepareResult result; (void)modules::prepareContainerProjectAction(project, path, index, runtime, result.review, result.error, cancel.get()); return result; });
+                m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Preparing action review… Escape cancels", false); return;
+            }
+            if (choice == -261 && m_containerStage == 6 && !m_containerFuture.valid()) {
+                const auto project = m_project; const auto review = m_containerActionReview; m_containerCancel = std::make_shared<std::atomic_bool>(false); m_containerStage = 7;
+                m_containerFuture = std::async(std::launch::async, [project, review, cancel = m_containerCancel] { ContainerResult result; result.process = modules::runBoundedContainerProjectAction(project, review, true, cancel.get()); if (!result.process.error.empty()) result.error = result.process.error; else if (result.process.cancelled || result.process.timedOut || result.process.exitCode != 0) result.error = "Action failed, timed out or was cancelled"; return result; });
+                m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Running reviewed action… Escape requests cancellation", false); return;
+            }
+            return;
+        }
+        if (choice == -95) { m_containerStage = 1; m_containerSelected.reset(); m_containerOperation.clear(); m_containerOutput.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -134 && m_containerStage == 4) { m_containerOperation.clear(); m_containerStage = 2; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (!m_containerProjectRoot.empty() && (!m_hasProject || m_project.root().generic_string() != m_containerProjectRoot)) { m_containerShowing = false; m_containerListing = {}; m_containerSelected.reset(); m_containerProjectRoot.clear(); refreshSuggestions(); setCommandStatus("Project changed; reopen container tools", true); return; }
+        if (choice >= 0 && m_containerStage == 1 && static_cast<std::size_t>(choice) < m_containerListing.containers.size()) { m_containerSelected = static_cast<std::size_t>(choice); m_containerStage = 2; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if ((choice == -130 || choice == -131 || choice == -132) && m_containerStage == 2 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size() && m_moduleSelected < m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(), m_modules[m_moduleSelected].requirements.end(), "container-lifecycle-v1") != m_modules[m_moduleSelected].requirements.end()) {
+            const auto& id = m_containerListing.containers[*m_containerSelected].id;
+            if (id.empty() || id.size() > 64 || !std::all_of(id.begin(), id.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); })) { setCommandStatus("Runtime returned an unsupported container ID", true); return; }
+            m_containerOperation = choice == -130 ? "start" : choice == -131 ? "stop" : "restart";
+            m_containerStage = 4; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        if (((choice == -97 || choice == -135) && m_containerStage == 0) || (choice == -98 && m_containerStage == 2 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size()) || (choice == -133 && m_containerStage == 4 && m_containerSelected && *m_containerSelected < m_containerListing.containers.size())) {
+            std::vector<modules::Module> fresh; std::string error;
+            if (m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_containerModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_containerModule && m.enabled && m.valid && m.processes && m.network && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "inspect-containers"; }); })) { setCommandStatus("Module changed or disabled; reopen the command", true); return; }
+            if (m_containerFuture.valid()) { setCommandStatus("A container operation is still finishing", false); return; }
+            if (choice == -133 && std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_containerModule && std::find(m.requirements.begin(), m.requirements.end(), "container-lifecycle-v1") != m.requirements.end(); })) { setCommandStatus("Module no longer permits container actions", true); return; }
+            m_containerRunningLogs = choice == -98;
+            std::vector<std::string> args;
+            if (m_containerRunningLogs || choice == -133) {
+                const auto& id = m_containerListing.containers[*m_containerSelected].id;
+                if (id.empty() || id.size() > 64 || !std::all_of(id.begin(), id.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); })) { setCommandStatus("Runtime returned an unsupported container ID", true); return; }
+                if (m_containerRunningLogs) args = {"logs", "--tail", "200", id};
+                else {
+                    if (m_containerOperation != "start" && m_containerOperation != "stop" && m_containerOperation != "restart") { setCommandStatus("Invalid container action", true); return; }
+                    args = {m_containerOperation, id};
+                }
+            } else {
+                m_containerProjectRoot.clear();
+                args = {"ps", "--all", "--format", "json"};
+                if (choice == -135) {
+                    if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+                    m_containerProjectRoot = m_project.root().generic_string();
+                    const auto native = m_project.root().u8string();
+                    args.push_back("--filter");
+                    args.push_back("label=com.docker.compose.project.working_dir=" + std::string(native.begin(), native.end()));
+                }
+            }
+            const auto runtime = m_containerRuntime; const bool logs = m_containerRunningLogs, lifecycle = choice == -133;
+            m_containerCancel = std::make_shared<std::atomic_bool>(false);
+            m_containerFuture = std::async(std::launch::async, [runtime, args, logs, lifecycle, cancel = m_containerCancel] { ContainerResult result; result.process = modules::runModuleProcess(runtime, args, std::chrono::seconds(30), 1024U * 1024U, cancel.get()); if (!result.process.error.empty() || result.process.exitCode != 0 || result.process.timedOut || result.process.cancelled) result.error = "Container runtime failed, timed out or was cancelled"; else if (!logs && !lifecycle && result.process.outputTruncated) result.error = "Container listing exceeded the output limit"; else if (!logs && !lifecycle) (void)modules::parseContainerListing(result.process.output, result.listing, result.error); return result; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Running container command… Escape cancels", false); return;
+        }
+        return;
+    }
+    if (m_dependencyShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (choice == -84) { if (m_dependencyArtifactCancel) m_dependencyArtifactCancel->store(true); m_dependencyArtifactStage = 0; if (m_dependencyCancel) m_dependencyCancel->store(true); m_dependencyShowing = false; m_dependencyReport = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -275 && m_dependencyProvenanceShowing && m_dependencyProvenanceSelected && m_dependencyArtifactStage == 0) {
+            if (m_dependencyArtifactFuture.valid() || !m_hasProject) { setCommandStatus("Open a project and wait for any verification to finish", true); return; }
+            m_dependencyArtifactIndex = *m_dependencyProvenanceSelected; m_dependencyArtifactRoot = m_project.root().generic_string(); std::string error;
+            if (!dependencyArtifactReady(error)) { setCommandStatus(error, true); return; }
+            m_searchBar.open(ui::PromptKind::ModuleDependencyArtifactPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative local artifact path", false); return;
+        }
+        if (choice == -277 && m_dependencyArtifactStage) { if (m_dependencyArtifactCancel) m_dependencyArtifactCancel->store(true); m_dependencyArtifactStage = 0; m_dependencyArtifactResult = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -276 && m_dependencyArtifactStage == 1 && !m_dependencyArtifactFuture.valid()) {
+            std::string error; if (!dependencyArtifactReady(error)) { setCommandStatus(error, true); return; }
+            const auto project = m_project; const auto package = m_dependencyReport.packages[m_dependencyArtifactIndex]; const auto path = m_dependencyArtifactPath;
+            m_dependencyArtifactCancel = std::make_shared<std::atomic_bool>(false); m_dependencyArtifactStage = 2;
+            m_dependencyArtifactFuture = std::async(std::launch::async, [project, package, path, cancel = m_dependencyArtifactCancel] { return modules::verifyDependencyArtifact(project, package, path, cancel.get()); });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Hashing selected artifact… Escape requests cancellation", false); return;
+        }
+        if (m_dependencyArtifactStage) return;
+        if (choice == -230 && m_dependencyReady && !m_dependencyFuture.valid() && m_moduleSelected < m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(), m_modules[m_moduleSelected].requirements.end(), "dependency-provenance-v1") != m_modules[m_moduleSelected].requirements.end()) { m_dependencyProvenanceShowing = true; m_dependencyProvenanceSelected.reset(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -231 && m_dependencyProvenanceShowing) { if (m_dependencyProvenanceSelected) m_dependencyProvenanceSelected.reset(); else m_dependencyProvenanceShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (m_dependencyProvenanceShowing) { if (!m_dependencyProvenanceSelected && choice >= 0 && static_cast<std::size_t>(choice) < std::min<std::size_t>(m_dependencyReport.packages.size(), 1000)) { m_dependencyProvenanceSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); } return; }
+        if (choice == -88 && !m_dependencyDetailFuture.valid()) { m_dependencySelectedId.clear(); m_dependencyDetail = {}; m_dependencyDetailReady = false; m_dependencyError.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice >= 0 && m_dependencyQueried && m_dependencySelectedId.empty() && static_cast<std::size_t>(choice) < m_dependencyIds.size()) { m_dependencySelectedId = m_dependencyIds[static_cast<std::size_t>(choice)]; m_dependencyDetailReady = false; m_dependencyDetail = {}; m_dependencyError.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -87 && !m_dependencySelectedId.empty() && !m_dependencyDetailReady && !m_dependencyDetailFuture.valid()) {
+            if (!m_hasDocument || m_filePath != m_dependencyFile || m_document.revision() != m_dependencyRevision || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_dependencyModule) { setCommandStatus("Lockfile or module changed; reopen the review", true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) { return module.id == m_dependencyModule && module.enabled && module.valid && module.network && std::any_of(module.commands.begin(), module.commands.end(), [](const auto& command) { return command.action == "review-dependency-risk"; }); })) { setCommandStatus("Module changed or disabled; reopen the review", true); return; }
+            m_dependencyCancel = std::make_shared<std::atomic_bool>(false); m_dependencyError.clear();
+            m_dependencyDetailFuture = std::async(std::launch::async, [id = m_dependencySelectedId, cancel = m_dependencyCancel] {
+                DependencyDetailResult result; auto response = modules::requestOsvDetail(id, cancel.get());
+                if (!response.error.empty() || response.status != 200) result.error = "Advisory request failed (HTTP " + std::to_string(response.status) + ")";
+                else (void)modules::parseOsvDetail(response.body, id, result.detail, result.error);
+                return result;
+            });
+            m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Loading OSV advisory… Escape cancels", false); return;
+        }
+        if (choice == -85 && m_dependencyReady && !m_dependencyQueried && !m_dependencyFuture.valid()) {
+            if (!m_hasDocument || m_filePath != m_dependencyFile || m_document.revision() != m_dependencyRevision || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_dependencyModule) { setCommandStatus("Lockfile or module changed; reopen the review", true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) { return module.id == m_dependencyModule && module.enabled && module.valid && module.network && std::any_of(module.commands.begin(), module.commands.end(), [](const auto& command) { return command.action == "review-dependency-risk"; }); })) { setCommandStatus("Module changed or disabled; reopen the review", true); return; }
+            m_dependencyCancel = std::make_shared<std::atomic_bool>(false); m_dependencyQuerying = true; m_dependencyError.clear();
+            m_dependencyFuture = std::async(std::launch::async, [report = m_dependencyReport, cancel = m_dependencyCancel]() mutable { DependencyResult result; result.report = std::move(report); (void)modules::queryOsvAdvisories(result.report, modules::requestOsvBatch, result.error, cancel.get()); return result; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Checking OSV… Escape cancels", false); return;
+        }
+        return;
+    }
+    if (m_apiShowing && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (m_apiEditMode) {
+            if (choice == -81) { m_apiShowing = false; m_apiEditMode = false; m_apiEditNames.clear(); m_apiEditBaseline.clear(); m_apiEditSelected.reset(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (choice == -249) { if (m_apiEditConfirm) m_apiEditConfirm = false; else m_apiEditSelected.reset(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (choice == -245 || (choice == -246 && m_apiEditSelected)) { m_apiEditAdding = choice == -245; m_searchBar.open(ui::PromptKind::ModuleApiTemplateName); if (!m_apiEditAdding) m_searchBar.setQuery(m_apiEditNames[*m_apiEditSelected]); clearCommandFeedback(); setCommandStatus("Enter a template name", false); return; }
+            if (choice == -247 && m_apiEditSelected) { m_apiEditConfirm = true; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (choice == -248 && m_apiEditConfirm && m_apiEditSelected) { modules::ApiCollectionEdit edit; std::string error; if (!modules::removeApiRequest(m_apiEditBaseline, *m_apiEditSelected, edit, error) || !applyApiTemplateEdit(edit, error)) { setCommandStatus(error, true); return; } setCommandStatus("Template removed from the document; Undo restores it", false); return; }
+            if (!m_apiEditSelected && choice >= 0 && static_cast<std::size_t>(choice) < m_apiEditNames.size()) { m_apiEditSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            return;
+        }
+        if (choice == -81) { if (m_apiSaveFuture.valid()) { if (m_apiSaveCancel) m_apiSaveCancel->store(true); setCommandStatus("Cancelling save; a file may already have been created",true); return; } if (m_apiAssertionCancel) m_apiAssertionCancel->store(true); if (m_apiCancel) m_apiCancel->store(true); m_apiShowing = false; m_apiAssertionStage=0; m_apiAssertions={}; m_apiSaveStage=0; m_apiChoosingEnvironment = false; m_apiEnvironments.clear(); m_apiRequests.clear(); m_apiResponse = {}; m_apiSelected.reset(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (choice == -303 && m_apiConfirmed && !m_apiFuture.valid() && !m_apiAssertionFuture.valid() && m_apiSaveStage==0 && m_hasProject && m_project.root().generic_string()==m_apiRoot && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].project && std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"api-response-assertions-v1")!=m_modules[m_moduleSelected].requirements.end() && m_apiResponse.error.empty() && m_apiResponse.status>=100 && m_apiResponse.status<=599) { m_apiAssertionStage=1; m_apiAssertions={}; m_searchBar.open(ui::PromptKind::ModuleApiSavePath); clearCommandFeedback(); setCommandStatus("Choose a project-relative assertion JSON file; no request will be sent",false); return; }
+        if (choice == -202 && m_apiConfirmed && !m_apiFuture.valid() && m_apiSaveStage==0 && m_hasProject && m_project.root().generic_string()==m_apiRoot && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].project && std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"api-response-save-v1")!=m_modules[m_moduleSelected].requirements.end() && m_apiResponse.error.empty() && m_apiResponse.status>=100 && m_apiResponse.status<=599) { m_apiSaveStage=1; m_searchBar.open(ui::PromptKind::ModuleApiSavePath); clearCommandFeedback(); setCommandStatus("Choose a new project file; the response may contain secrets",false); return; }
+        if (choice == -203 && m_apiSaveStage==2) { m_apiSaveStage=0; m_apiSavePath.clear(); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+        if (choice == -201 && m_apiSaveStage==2) {
+            if (!m_hasProject || m_project.root().generic_string()!=m_apiRoot || !m_hasDocument || m_filePath!=m_apiFile || m_document.revision()!=m_apiRevision || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_apiModule) { setCommandStatus("Request context changed; start again",true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_apiModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"api-response-save-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c) { return c.action==(m_apiProfileMode ? "open-api-environment" : "open-api-requests"); }); })) { setCommandStatus("Module changed; start again",true); return; }
+            const auto path=normalizeRelative(m_apiSavePath);
+            if ((m_hasDocument && m_filePath==path) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path==path; })) { setCommandStatus("Destination is open; choose a new path",true); return; }
+            auto project=m_project; auto response=m_apiResponse; const auto destination=m_apiSavePath; m_apiSaveCancel=std::make_shared<std::atomic_bool>(false); m_apiSaveStage=3; m_apiSaveGeneration=m_searchBar.generation(); m_modulePage=0; m_selectedSuggestion=-1;
+            m_apiSaveFuture=std::async(std::launch::async,[project=std::move(project),destination,response=std::move(response),cancel=m_apiSaveCancel]() mutable { std::string error; (void)modules::saveApiResponseBody(project,destination,response,error,cancel.get()); return error; });
+            refreshSuggestions(); setCommandStatus("Saving response body…",false); return;
+        }
+        if (m_apiConfirmed && !m_apiFuture.valid() && (choice==-198 || choice==-199 || choice==-200)) { m_apiResponseView=choice==-198 ? 0 : choice==-199 ? 1 : 2; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+        if (m_apiChoosingEnvironment && choice >= 0 && static_cast<std::size_t>(choice) < m_apiEnvironments.size()) {
+            if (!m_hasProject || m_project.root().generic_string() != m_apiRoot || !m_hasDocument || m_filePath != m_apiFile || m_document.revision() != m_apiRevision || !moduleStillEnabled(m_apiModule, "open-api-environment")) { m_apiEnvironments.clear(); m_apiShowing = false; setCommandStatus("Project, document or module changed; reopen the command", true); refreshSuggestions(); return; }
+            modules::ApiEnvironment merged; editor::JsonError parseError; auto root = editor::parseJson(m_document.toUtf8(), parseError);
+            if (root && root->type == editor::JsonType::Object) if (const auto* values = root->find("variables")) {
+                if (values->type != editor::JsonType::Object || values->children.size() > 100) { setCommandStatus("Variables must be a JSON object with at most 100 string values", true); return; }
+                for (const auto& item : values->children) if (item.type != editor::JsonType::String || !merged.variables.emplace(item.key, modules::ApiEnvironmentVariable{item.stringValue, false}).second) { setCommandStatus("Variables must have unique names and string values", true); return; }
+            }
+            const auto& environment = m_apiEnvironments[static_cast<std::size_t>(choice)];
+            for (const auto& [key, variable] : environment.variables) merged.variables[key] = variable;
+            std::string error; std::vector<modules::ApiRequest> requests;
+            if (!modules::parseApiRequestsFromEnvironment(m_document.toUtf8(), merged, requests, error) || requests.empty()) { setCommandStatus(error.empty() ? "No requests in this collection" : error, true); return; }
+            m_apiRequests = std::move(requests); m_apiEnvironments.clear(); m_apiChoosingEnvironment = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Choose a request; nothing is sent until you confirm", false); return;
+        }
+        if (!m_apiSelected && choice >= 0 && static_cast<std::size_t>(choice) < m_apiRequests.size()) { m_apiSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Review the destination and confirm before sending", false); return; }
+        if (choice == -82 && m_apiSelected && !m_apiConfirmed) {
+            if (!m_hasDocument || m_filePath != m_apiFile || m_document.revision() != m_apiRevision || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_apiModule) { setCommandStatus("Document or module changed; reopen the request", true); return; }
+            std::vector<modules::Module> fresh; std::string error;
+            if ((m_apiProfileMode && (!m_hasProject || m_project.root().generic_string() != m_apiRoot)) || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) { return module.id == m_apiModule && module.enabled && module.valid && module.network && (!m_apiProfileMode || module.project) && std::any_of(module.commands.begin(), module.commands.end(), [this](const auto& command) { return command.action == (m_apiProfileMode ? "open-api-environment" : "open-api-requests"); }); })) { setCommandStatus("Module or project changed; reopen the request", true); return; }
+            if (m_apiFuture.valid()) { setCommandStatus("A request is still finishing", false); return; }
+            auto request = m_apiRequests[*m_apiSelected]; m_apiRequests.clear(); m_apiSelected = 0;
+            m_apiConfirmed = true; m_apiResponse = {}; m_apiAssertionStage=0; m_apiAssertions={}; m_apiResponseView=0; m_apiSaveStage=0; m_apiCancel = std::make_shared<std::atomic_bool>(false); m_apiGeneration = m_searchBar.generation();
+            m_apiFuture = std::async(std::launch::async, [request = std::move(request), cancel = m_apiCancel] { return modules::sendApiRequest(request, cancel.get()); });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Sending request… Escape cancels", false); return;
+        }
+        return;
+    }
+    if (choice == -75 && m_sqlShowing) { if (m_sqlChangeSaveFuture.valid()) { if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); setCommandStatus("Cancelling database copy; it may already have been created",true); return; } if (m_sqlSchemaShowing && m_sqlSchemaSelected) { if (m_sqlColumnsCancel) m_sqlColumnsCancel->store(true); m_sqlColumns = {}; m_sqlSchemaSelected.reset(); m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; } if (m_sqlSchemaShowing) { if (m_sqlColumnsCancel) m_sqlColumnsCancel->store(true); if (m_sqlSchemaCancel) m_sqlSchemaCancel->store(true); m_sqlSchemaShowing=false; m_sqlSchema={}; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; } if (m_sqlCancel) m_sqlCancel->store(true); if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); if (m_sqlCsvCancel) m_sqlCsvCancel->store(true); m_sqlCsvStage = 0; m_sqlCsv = {}; m_sqlChange = {}; m_sqlRowShowing=false; m_sqlRowDiff={}; m_sqlChangeBindingsSnapshot.reset(); m_sqlChangeBindingsPath.clear(); m_sqlChangeStage = 0; m_sqlChangeMode = false; m_sqlSnapshot.reset(); m_sqlShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -240 && m_sqlShowing && !m_sqlSchemaShowing && !m_sqlFuture.valid() && m_sqlCsvStage==0 && m_sqlResult.error.empty()) {
+        const char* action=m_sqlBound ? (m_sqlExplain ? "sql-explain-bound" : "sql-query-bound") : (m_sqlExplain ? "sql-explain" : "sql-query");
+        if (m_sqlSchemaFuture.valid()) { setCommandStatus("Previous schema inspection is still finishing",false); return; }
+        if (!m_hasProject || m_project.root().generic_string()!=m_sqlRoot || !m_hasDocument || m_filePath!=m_sqlFile || m_document.revision()!=m_sqlRevision || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_sqlModule) { setCommandStatus("Query context changed; run it again",true); return; }
+        std::vector<modules::Module> fresh; std::string moduleError;
+        if (!modules::list(m_moduleRoot,fresh,moduleError) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& module) {
+            return module.id==m_sqlModule && module.enabled && module.valid && module.project &&
+                std::any_of(module.commands.begin(),module.commands.end(),[&](const auto& command) { return command.action==action; });
+        })) { setCommandStatus("Module changed; run the query again",true); return; }
+        if (!m_sqlSnapshot) { setCommandStatus("Query snapshot unavailable; run the query again",true); return; }
+        auto snapshot=m_sqlSnapshot; m_sqlSchemaCancel=std::make_shared<std::atomic_bool>(false);
+        m_sqlSchema={}; m_sqlSchemaSelected.reset(); m_sqlSchemaShowing=true; m_sqlSchemaGeneration=m_searchBar.generation(); m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1;
+        m_sqlSchemaFuture=std::async(std::launch::async,[snapshot,cancel=m_sqlSchemaCancel] {
+            return modules::inspectSqliteSchema(*snapshot,cancel.get());
+        });
+        refreshSuggestions(); setCommandStatus("Inspecting the query snapshot… Escape cancels",false); return;
+    }
+    if (m_sqlShowing && m_sqlSchemaShowing && !m_sqlSchemaFuture.valid() && !m_sqlSchemaSelected && choice>=0 && static_cast<std::size_t>(choice)<m_sqlSchema.objects.size()) {
+        if (m_sqlColumnsFuture.valid()) { setCommandStatus("Previous column inspection is still finishing", false); return; }
+        m_sqlSchemaSelected=static_cast<std::size_t>(choice); m_sqlColumns = {};
+        const auto& object = m_sqlSchema.objects[*m_sqlSchemaSelected];
+        if ((object.type == "table" || object.type == "view") && !object.truncated && m_sqlSnapshot && m_moduleSelected < m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(), m_modules[m_moduleSelected].requirements.end(), "sql-columns-v1") != m_modules[m_moduleSelected].requirements.end()) {
+            m_sqlColumnsObject = *m_sqlSchemaSelected; m_sqlColumnsSnapshot = m_sqlSnapshot; m_sqlColumnsCancel = std::make_shared<std::atomic_bool>(false);
+            m_sqlColumnsFuture = std::async(std::launch::async, [snapshot = m_sqlColumnsSnapshot, name = object.name, cancel = m_sqlColumnsCancel] { return modules::inspectSqliteColumns(*snapshot, name, cancel.get()); });
+        }
+        m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return;
+    }
+    if (choice == -304 && m_sqlShowing && m_sqlRowShowing) { if (m_sqlRowCancel) m_sqlRowCancel->store(true); m_sqlRowShowing=false; m_sqlRowDiff={}; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+    if (m_sqlShowing && m_sqlChangeMode && !m_sqlRowShowing && (m_sqlChangeStage==1 || m_sqlChangeStage==3) && choice<=-4000 && choice>=-4199) {
+        const auto row=static_cast<std::size_t>(-4000-choice);
+        if (row>=m_sqlChange.observedRows.size() || m_sqlRowFuture.valid()) { setCommandStatus("Row comparison is unavailable or still finishing",true); return; }
+        if (!m_hasProject || m_project.root().generic_string()!=m_sqlRoot || !m_hasDocument || m_filePath!=m_sqlFile || m_document.revision()!=m_sqlRevision || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_sqlModule) { setCommandStatus("Context changed; preview again",true); return; }
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_sqlModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"sql-change-row-diff-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c) { return c.action==(m_sqlBound?"sql-change-bound":"sql-change-preview"); }); })) { setCommandStatus("Module changed; preview again",true); return; }
+        auto preview=std::make_shared<modules::SqlChangePreview>(m_sqlChange); m_sqlRowCancel=std::make_shared<std::atomic_bool>(false); m_sqlRowShowing=true; m_sqlRowDiff={}; m_sqlRowIndex=row; m_sqlRowGeneration=m_searchBar.generation(); m_modulePage=0; m_selectedSuggestion=-1;
+        m_sqlRowFuture=std::async(std::launch::async,[preview,row,cancel=m_sqlRowCancel] { return modules::inspectSqlChangeRow(*preview,row,cancel.get()); });
+        refreshSuggestions(); setCommandStatus("Comparing row snapshots; values may be sensitive",false); return;
+    }
+    if (choice == -301 && m_sqlShowing && m_sqlChangeMode && m_sqlChangeStage==1 && !m_sqlChangeFuture.valid() && m_sqlChange.error.empty()) {
+        m_sqlChangeStage=2; m_searchBar.open(ui::PromptKind::ModuleSqlExportPath); setCommandStatus("Enter a new project-relative .db path",false); return;
+    }
+    if (choice == -302 && m_sqlShowing && m_sqlChangeMode && m_sqlChangeStage==3) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_sqlRoot || !m_hasDocument || m_filePath!=m_sqlFile || m_document.revision()!=m_sqlRevision || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_sqlModule) { setCommandStatus("Context changed; preview again",true); return; }
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_sqlModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"sql-change-copy-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c) { return c.action==(m_sqlBound ? "sql-change-bound" : "sql-change-preview"); }); })) { setCommandStatus("Module changed; preview again",true); return; }
+        if (m_filePath==m_sqlCsvPath || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[this](const auto& d){return d.path==m_sqlCsvPath;})) { setCommandStatus("Destination is open; choose another path",true); return; }
+        if (m_sqlBound && (!m_sqlChangeBindingsSnapshot || m_sqlChangeBindingsPath.empty() || (m_filePath==m_sqlChangeBindingsPath && m_document.dirty()) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[this](const auto& d) { return d.path==m_sqlChangeBindingsPath && d.document.dirty(); }))) { setCommandStatus("Bindings have unsaved changes; save and preview again",true); return; }
+        auto project=m_project; auto source=m_sqlDatabase, path=m_sqlCsvPath; auto preview=std::move(m_sqlChange); m_sqlChangeStage=4; m_sqlChangeCancel=std::make_shared<std::atomic_bool>(false);
+        m_sqlChangeSaveFuture=std::async(std::launch::async,[project=std::move(project),source,path,preview=std::move(preview),bindings=m_sqlChangeBindingsPath,snapshot=m_sqlChangeBindingsSnapshot,cancel=m_sqlChangeCancel]() mutable { std::string error; if (!bindings.empty()) { std::string current; if (!snapshot || !project.readFileBounded(bindings,current,error,2U*1024U*1024U,cancel.get()) || current!=*snapshot) return std::string("Bindings changed or could not be read; preview again"); } (void)modules::exportSqliteChange(project,source,path,preview,true,error,cancel.get()); return error; });
+        refreshSuggestions(); setCommandStatus("Creating a separate database copy… Escape requests cancellation",false); return;
+    }
+    if (choice == -175 && m_sqlShowing && m_sqlCsvStage == 0 && !m_sqlFuture.valid() && m_sqlResult.error.empty()) {
+        if (m_sqlCsvFuture.valid() || m_sqlCsvSaveFuture.valid()) { setCommandStatus("Previous export is still finishing", false); return; }
+        modules::SqlCsvOptions options; options.allowPartial = true; m_sqlCsvCancel = std::make_shared<std::atomic_bool>(false); m_sqlCsvStage = 1; m_sqlCsv = {}; m_modulePage = 0; m_selectedSuggestion = -1;
+        m_sqlCsvFuture = std::async(std::launch::async, [result=m_sqlResult, options, cancel=m_sqlCsvCancel] { return modules::serializeSqlResultCsv(result,options,cancel.get()); });
+        refreshSuggestions(); setCommandStatus("Preparing CSV… Escape cancels", false); return;
+    }
+    if (choice == -176 && m_sqlShowing && m_sqlCsvStage == 3) {
+        if (!m_hasProject || m_project.root().generic_string() != m_sqlRoot || !m_hasDocument || m_filePath != m_sqlFile || m_document.revision() != m_sqlRevision || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_sqlModule) { setCommandStatus("Query context changed; run it again", true); return; }
+        const char* action = m_sqlBound ? (m_sqlExplain ? "sql-explain-bound" : "sql-query-bound") : (m_sqlExplain ? "sql-explain" : "sql-query"); std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& module) { return module.id == m_sqlModule && module.enabled && module.valid && module.project && std::any_of(module.commands.begin(),module.commands.end(),[&](const auto& c) { return c.action == action; }); })) { setCommandStatus("Module changed; run the query again", true); return; }
+        if ((m_hasDocument && m_filePath == m_sqlCsvPath) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[this](const auto& doc) { return doc.path == m_sqlCsvPath; })) { setCommandStatus("Destination is open; choose a new CSV path", true); return; }
+        auto project=m_project; const auto db=m_sqlDatabase, path=m_sqlCsvPath; auto csv=std::move(m_sqlCsv); m_sqlCsvStage=4; m_sqlCsvCancel=std::make_shared<std::atomic_bool>(false); m_modulePage=0; m_selectedSuggestion=-1;
+        m_sqlCsvSaveFuture=std::async(std::launch::async,[project=std::move(project),db,path,csv=std::move(csv),cancel=m_sqlCsvCancel]() mutable { std::string result; (void)modules::saveSqlResultCsv(project,db,path,csv,result,nullptr,cancel.get()); return result; });
+        refreshSuggestions(); setCommandStatus("Creating CSV… Escape requests cancellation", false); return;
+    }
+    if (choice == -72 && m_releaseNotesShowing) { if (m_releaseNotesPreview) { m_releaseNotesPreview=false; m_releaseNotesDraft={}; } else m_releaseNotesShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_releaseNotesShowing && !m_releaseNotesPreview && (choice == -196 || choice == -197)) { m_releaseNotesFilter=choice == -196 ? 0 : 1; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+    if (choice == -195 && m_releaseNotesShowing && !m_releaseNotesPreview) {
+        if (m_releaseNotesFuture.valid()) { setCommandStatus("Wait for commits and tasks to load",false); return; }
+        auto draft=modules::buildReleaseNotes({}, {}, m_releaseNotesEntries); std::string error;
+        if (!draft.included || draft.incomplete || !editor::Document::canEditLosslessly(draft.markdown,error)) { setCommandStatus("Select valid entries that fit in the draft",true); return; }
+        m_releaseNotesDraft=std::move(draft); m_releaseNotesPreview=true; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus("Preview only; insert the draft to edit it",false); return;
+    }
+    if (choice == -73 && m_releaseNotesShowing) {
+        if (m_releaseNotesFuture.valid()) { setCommandStatus("Wait for commits and tasks to load", false); return; }
+        if (!m_hasProject || m_project.root().generic_string() != m_releaseNotesRoot || !m_hasDocument || m_filePath != m_releaseNotesFile || m_document.revision() != m_releaseNotesRevision || m_document.hasSelection()) { setCommandStatus("Original document changed or has a selection; reopen the builder", true); return; }
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) { return module.id == m_releaseNotesModule && module.enabled && module.valid && std::any_of(module.commands.begin(), module.commands.end(), [](const auto& command) { return command.action == "release-note-builder"; }); })) { setCommandStatus("Module changed or disabled; reopen the builder", true); return; }
+        const auto draft = m_releaseNotesPreview ? m_releaseNotesDraft : modules::buildReleaseNotes({}, {}, m_releaseNotesEntries);
+        if (!draft.included || draft.incomplete || !editor::Document::canEditLosslessly(draft.markdown, error)) { setCommandStatus("Select valid entries that fit in the draft", true); return; }
+        m_snippetSession.reset(); m_document.pasteUtf8(draft.markdown); m_releaseNotesShowing = false; m_searchBar.close(); m_followCursor = true; setStatus("Release notes inserted as an editable draft", false); return;
+    }
+    if (choice == -70 && m_accessibilityShowing) { m_accessibilityShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -13 && m_markdownPreviewShowing) { m_markdownPreviewShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -15 && m_markdownLinksShowing) { if (m_markdownLinksCancel) m_markdownLinksCancel->store(true); if (m_markdownExternalCancel) m_markdownExternalCancel->store(true); m_markdownExternalSelected.reset(); m_markdownLinksShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -250 && m_markdownLinksShowing && m_markdownExternalSelected) { if (m_markdownExternalCancel) m_markdownExternalCancel->store(true); m_markdownExternalSelected.reset(); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+    if ((choice == -251 || choice == -252) && m_markdownLinksShowing && m_markdownExternalMode && m_markdownExternalSelected) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_markdownLinksRoot || !m_hasDocument || m_filePath!=m_moduleMarkdownFile || m_document.revision()!=m_moduleMarkdownRevision || *m_markdownExternalSelected >= m_markdownLinksResults.links.size()) { setCommandStatus("Document or project changed; reopen link checks",true); return; }
+        const auto& link = m_markdownLinksResults.links[*m_markdownExternalSelected];
+        if (!link.sourceOffset) { setCommandStatus("Source location unavailable; link cannot be reviewed",true); return; }
+        if (choice == -251) {
+            const auto source = m_document.toUtf8(); if (*link.sourceOffset >= source.size()) { setCommandStatus("Source location unavailable",true); return; }
+            std::size_t line=0,column=0; for (std::size_t i=0;i<*link.sourceOffset;++i) { if (source[i]=='\n') { ++line; column=0; } else if ((static_cast<unsigned char>(source[i]) & 0xc0U)!=0x80U) ++column; }
+            if (line>=m_document.lineCount()) return;
+            m_document.setCursor(line,column); m_followCursor=true; m_markdownExternalSelected.reset(); m_markdownLinksShowing=false; m_searchBar.close(); return;
+        }
+        if (m_markdownExternalFuture.valid()) { setCommandStatus("The previous link check is still finishing",false); return; }
+        std::vector<modules::Module> fresh; std::string error;
+        if (!modules::list(m_moduleRoot,fresh,error) || m_moduleSelected>=m_modules.size()) { setCommandStatus("Module no longer available",true); return; }
+        const auto id=m_modules[m_moduleSelected].id;
+        const auto found=std::find_if(fresh.begin(),fresh.end(),[&](const auto& module) { return module.id==id && module.valid && module.enabled && module.project && module.network && std::any_of(module.commands.begin(),module.commands.end(),[](const auto& cmd) { return cmd.action=="markdown-external-links"; }); });
+        if (found==fresh.end()) { setCommandStatus("Module no longer has network permission",true); return; }
+        if (!platform::confirmDestructiveAction("Check external link?", "A HEAD request will send the selected URL path to its destination. Review the link in the source first. URLs with credentials, queries or fragments are refused; redirects are not followed.", "Check link")) return;
+        const auto destination=link.destination; m_markdownExternalRequestIndex=*m_markdownExternalSelected; m_markdownExternalModule=id; m_markdownExternalGeneration=m_searchBar.generation();
+        m_markdownExternalCancel=std::make_shared<std::atomic_bool>(false); auto cancel=m_markdownExternalCancel;
+        m_markdownExternalFuture=std::async(std::launch::async,[destination,cancel] { return modules::checkApprovedExternalLink(destination,cancel.get()); });
+        setCommandStatus("Checking selected link… Escape cancels",false); return;
+    }
+    if (m_markdownLinksShowing && (choice == -183 || choice == -184 || choice == -185)) { m_markdownLinksFilter = choice == -183 ? 0 : choice == -184 ? 1 : 2; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+    if (choice == -17 && m_coverageShowing) { if (m_coverageCancel) m_coverageCancel->store(true); m_coverageShowing = false; m_coverageChoosingBaseline = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -213 && m_coverageShowing && !m_coverageFuture.valid()) { m_coverageChoosingBaseline = true; m_searchBar.open(ui::PromptKind::ModuleCoveragePath); clearCommandFeedback(); setCommandStatus("Enter the project-relative baseline report in the same format", false); return; }
+    if (choice == -214 && m_coverageShowing) { m_coverageComparing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_coverageShowing && choice == -154) { m_coverageFilesMode = !m_coverageFilesMode; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_coverageShowing && choice == -155) { m_coverageFile.clear(); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_coverageShowing && m_coverageFilesMode && choice >= 0 && static_cast<std::size_t>(choice) < m_coverageSummary.files.size()) { m_coverageFile = m_coverageSummary.files[static_cast<std::size_t>(choice)].path; m_coverageFilesMode = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_coverageShowing && (choice == -151 || choice == -152 || choice == -153)) {
+        m_coverageFilter = choice == -151 ? 0 : choice == -152 ? 1 : 2;
+        m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+    }
+    if (choice == -21 && m_benchmarkShowing) { if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (m_benchmarkShowing && !m_benchmarkSelected && (choice == -177 || choice == -178 || choice == -179)) { m_benchmarkFilter = choice == -177 ? 0 : choice == -178 ? 1 : 2; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -23 && m_binaryShowing) { if (m_binaryCategory) m_binaryCategory.reset(); else { if (m_binaryCancel) m_binaryCancel->store(true); m_binaryShowing = false; m_binarySnapshot.reset(); } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -272 && m_localizationShowing && m_localizationEditPreview) { m_localizationEditPreview = false; m_localizationEditPlan = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -270 && m_localizationShowing && m_localizationSelected && *m_localizationSelected < m_localizationEntries.size()) {
+        const auto& entry = m_localizationEntries[*m_localizationSelected];
+        if (!entry.inSource || m_moduleSelected >= m_modules.size()) { setCommandStatus("Select a source key first", true); return; }
+        std::string textError;
+        if (entry.inTranslation && (entry.translationText.size() > ui::SearchBar::kMaxQueryLength || entry.translationText.find_first_of("\r\n") != std::string::npos || !editor::Document::canEditLosslessly(entry.translationText, textError))) { setCommandStatus("Open the translation file to edit long, multiline or unsupported text", true); return; }
+        m_localizationEditModule = m_modules[m_moduleSelected].id; m_localizationEditContextHasDocument = m_hasDocument; m_localizationEditContextFile = m_filePath; m_localizationEditContextRevision = m_hasDocument ? m_document.revision() : 0;
+        std::string error; if (!localizationEditReady(error)) { setCommandStatus(error, true); return; }
+        m_localizationEditPreview = false; m_localizationEditPlan = {}; m_searchBar.open(ui::PromptKind::ModuleLocalizationEdit); if (entry.inTranslation) m_searchBar.setQuery(entry.translationText); clearCommandFeedback(); setCommandStatus("Enter a single-line translation; review follows", false); return;
+    }
+    if (choice == -271 && m_localizationShowing && m_localizationEditPreview) {
+        std::string error, updated;
+        if (!localizationEditReady(error) || !modules::applyLocalizationEdit(m_localizationEditPlan, m_localizationSourceSnapshot, m_localizationTranslationSnapshot, updated, error)) { setCommandStatus(error, true); return; }
+        const auto path = normalizeRelative(m_localizationTranslation);
+        if (!m_hasDocument || m_filePath != path) openFile(path, false);
+        if (!m_hasDocument || m_filePath != path || m_document.dirty() || m_document.toUtf8() != m_localizationTranslationSnapshot || m_diskContents != m_localizationTranslationSnapshot) { setCommandStatus("Translation could not be opened unchanged; compare again", true); return; }
+        std::string sourceNow, translationNow;
+        if (!m_project.readFileBounded(normalizeRelative(m_localizationSource), sourceNow, error, 1024U * 1024U) || !m_project.readFileBounded(path, translationNow, error, 1024U * 1024U) || sourceNow != m_localizationSourceSnapshot || translationNow != m_localizationTranslationSnapshot) { setCommandStatus("Source or translation changed; compare again", true); return; }
+        if (!m_document.replaceAllUtf8(updated)) { setCommandStatus("Translation cannot be edited losslessly", true); return; }
+        m_localizationShowing = false; m_localizationSelected.reset(); m_localizationEditPreview = false; m_localizationEditPlan = {}; m_searchBar.close(); setStatus("Translation updated in the document; Undo restores it", false); return;
+    }
+    if (choice == -25 && m_localizationShowing) { if (m_localizationEditPreview) { m_localizationEditPreview = false; m_localizationEditPlan = {}; } else if (m_localizationSelected) m_localizationSelected.reset(); else { if (m_localizationCancel) m_localizationCancel->store(true); m_localizationShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if ((choice == -172 || choice == -173) && m_localizationShowing && m_localizationSelected && *m_localizationSelected < m_localizationEntries.size()) {
+        const bool source = choice == -172; const auto& entry = m_localizationEntries[*m_localizationSelected];
+        if ((source && !entry.inSource) || (!source && !entry.inTranslation) || !m_hasProject || m_project.root().generic_string() != m_localizationRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Comparison context changed; compare again", true); return; }
+        std::vector<modules::Module> fresh; std::string error; const auto id = m_modules[m_moduleSelected].id;
+        if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id == id && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action == "compare-localization"; }); })) { setCommandStatus("Module changed; compare again", true); return; }
+        const auto path = normalizeRelative(source ? m_localizationSource : m_localizationTranslation); const auto& snapshot = source ? m_localizationSourceSnapshot : m_localizationTranslationSnapshot;
+        const auto offset = source ? entry.sourceOffset : entry.translationOffset; std::string contents;
+        if (offset >= snapshot.size() || !m_project.readFileBounded(path, contents, error, 1024U * 1024U) || contents != snapshot) { setCommandStatus("File changed since comparison; compare again", true); return; }
+        const auto cached = std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path == path; });
+        if ((m_hasDocument && m_document.dirty()) || (cached != m_inactiveDocuments.end() && cached->document.dirty())) { setCommandStatus("Save or resolve open edits before navigating", true); return; }
+        std::size_t line = 0, column = 0; for (std::size_t i=0; i<offset; ++i) { if (snapshot[i]=='\n') { ++line; column=0; } else if ((static_cast<unsigned char>(snapshot[i]) & 0xc0U)!=0x80U) ++column; }
+        if (!m_hasDocument || m_filePath != path) openFile(path,false);
+        if (!m_hasDocument || m_filePath != path || m_document.toUtf8() != snapshot) { setCommandStatus("File could not be opened unchanged; compare again", true); return; }
+        m_document.setCursor(line,column); m_followCursor = true; m_localizationShowing = false; m_localizationSelected.reset(); m_searchBar.close(); return;
+    }
+    if (choice == -27 && m_designTokenShowing) { if (m_designTokenSelected) m_designTokenSelected.reset(); else { if (m_designTokenCancel) m_designTokenCancel->store(true); m_designTokenShowing = false; m_designTokenSnapshot.clear(); m_designTokenAliases.clear(); m_designTokenAliasEnabled=false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice==-312 && m_designTokenShowing && m_designTokenSelected && *m_designTokenSelected<m_designTokenAliases.size()) {
+        const auto target=m_designTokenAliases[*m_designTokenSelected].targetIndex; std::string error,contents; std::vector<modules::Module> fresh;
+        if(target>=m_designTokenReport.tokens.size() || !m_hasProject || m_project.root().generic_string()!=m_designTokenRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_designTokenModule || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) {return m.id==m_designTokenModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"design-token-aliases-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="design-token-explorer";});})) {setCommandStatus("Token context changed; inspect again",true);return;}
+        const auto path=normalizeRelative(m_designTokenFile); const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc){return doc.path==path;});
+        if((m_hasDocument && m_filePath==path && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty()) || !m_project.readFileBounded(path,contents,error,4U*1024U*1024U) || contents!=m_designTokenSnapshot) {setCommandStatus("Token file changed; inspect it again",true);return;}
+        m_designTokenSelected=target; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return;
+    }
+    if ((choice == -181 || choice == -182) && m_designTokenShowing && m_designTokenSelected && *m_designTokenSelected < m_designTokenReport.tokens.size()) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_designTokenRoot || m_moduleSelected>=m_modules.size()) { setCommandStatus("Project changed; inspect tokens again",true); return; }
+        std::vector<modules::Module> fresh; std::string error; const auto id=m_modules[m_moduleSelected].id;
+        if (id!=m_designTokenModule || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==id && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action=="design-token-explorer"; }); })) { setCommandStatus("Module changed; inspect tokens again",true); return; }
+        const auto& token=m_designTokenReport.tokens[*m_designTokenSelected];
+        if (choice == -182) { const auto name=token.name; if (name.empty() || std::any_of(name.begin(),name.end(),[](unsigned char c) { return c<32 || c==127; })) { setCommandStatus("Token name cannot be searched safely",true); return; } openProjectSearch(false); if (m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ProjectSearch) { m_designTokenShowing=false; m_designTokenSnapshot.clear(); m_searchBar.setQuery(name); setCommandStatus("Search exact token name; aliases and transformed names may differ",false); } return; }
+        const auto path=normalizeRelative(m_designTokenFile); std::string contents;
+        if (token.byteOffset>=m_designTokenSnapshot.size() || !m_project.readFileBounded(path,contents,error,4U*1024U*1024U) || contents!=m_designTokenSnapshot) { setCommandStatus("Token file changed; inspect it again",true); return; }
+        if (std::any_of(contents.begin(),contents.end(),[](unsigned char c) { return c==0 || (c<32 && c!='\n' && c!='\r' && c!='\t' && c!='\f'); }) || !editor::Document::canEditLosslessly(contents,error)) { setCommandStatus("Token file contains unsupported text",true); return; }
+        const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path==path; });
+        if ((m_hasDocument && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty())) { setCommandStatus("Save or resolve open edits before navigating",true); return; }
+        std::size_t line=0,column=0; for (std::size_t i=0;i<token.byteOffset;++i) { if (contents[i]=='\n') { ++line; column=0; } else if ((static_cast<unsigned char>(contents[i]) & 0xc0U)!=0x80U) ++column; }
+        if (!m_hasDocument || m_filePath!=path) openFile(path,false);
+        if (!m_hasDocument || m_filePath!=path || m_document.toUtf8()!=m_designTokenSnapshot) { setCommandStatus("Token file could not be opened unchanged",true); return; }
+        m_document.setCursor(line,column); m_followCursor=true; m_designTokenShowing=false; m_designTokenSelected.reset(); m_designTokenSnapshot.clear(); m_searchBar.close(); return;
+    }
+    if (choice == -29 && m_logShowing) { if (m_logSelected) m_logSelected.reset(); else { if (m_logCancel) m_logCancel->store(true); m_logShowing = false; m_logSnapshots.clear(); } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -180 && m_logShowing && m_logSelected && *m_logSelected < m_logReport.records.size()) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_logRoot || m_moduleSelected>=m_modules.size()) { setCommandStatus("Project changed; correlate logs again",true); return; }
+        const auto& record=m_logReport.records[*m_logSelected]; const auto snapshot=m_logSnapshots.find(record.source);
+        std::vector<modules::Module> fresh; std::string error; const auto id=m_modules[m_moduleSelected].id;
+        if (id!=m_logModule || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==id && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c) { return c.action==(m_logJson?"log-correlation-json":"log-correlation"); }); })) { setCommandStatus("Module changed; correlate logs again",true); return; }
+        const auto path=normalizeRelative(record.source); std::string contents;
+        if (snapshot==m_logSnapshots.end() || !record.line || !m_project.readFileBounded(path,contents,error,16U*1024U*1024U) || contents!=snapshot->second) { setCommandStatus("Log changed since correlation; run it again",true); return; }
+        if (std::any_of(contents.begin(),contents.end(),[](unsigned char c) { return c == 0 || (c < 32 && c != '\n' && c != '\r' && c != '\t' && c != '\f'); }) || !editor::Document::canEditLosslessly(contents,error)) { setCommandStatus("Log contains binary or unsupported text; cannot navigate",true); return; }
+        const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path==path; });
+        if ((m_hasDocument && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty())) { setCommandStatus("Save or resolve open edits before navigating",true); return; }
+        const auto line=record.line-1;
+        if (!m_hasDocument || m_filePath!=path) openFile(path,false);
+        if (!m_hasDocument || m_filePath!=path || m_document.toUtf8()!=snapshot->second || line>=m_document.lineCount()) { setCommandStatus("Log could not be opened unchanged; correlate again",true); return; }
+        m_document.setCursor(line,0); m_followCursor=true; m_logShowing=false; m_logSelected.reset(); m_logSnapshots.clear(); m_searchBar.close(); return;
+    }
+    if (choice == -31 && m_pythonShowing) {
+        if (m_pythonProvisionFuture.valid()) { if (m_pythonProvisionCancel) m_pythonProvisionCancel->store(true); setCommandStatus("Cancelling installation; environment changes may remain", false); return; }
+        if (m_pythonProvisionBootstrap) m_pythonProvisionBootstrap.reset(); else if (m_pythonSelected) m_pythonSelected.reset(); else m_pythonShowing = false;
+        m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+    }
+    if (choice == -36 && m_ctestShowing) { if (m_ctestRunFuture.valid() || m_ctestDiscoveryFuture.valid()) { if (m_ctestCancel) m_ctestCancel->store(true); setCommandStatus("Cancellation requested; completed results remain recorded", false); return; } if (m_ctestRerunSelected) m_ctestRerunSelected.reset(); else if (m_ctestRerunShowing) m_ctestRerunShowing = false; else if (m_ctestSelected) m_ctestSelected.reset(); else m_ctestShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -224 && m_usbBoardShowing) {m_usbBoardShowing=false;m_usbBoardMappings={};m_usbBoardScan={};m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();return;}
+    if (choice == -223 && m_usbBoardShowing && !m_usbBoardConfirmed && !m_usbBoardFuture.valid()) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_usbBoardRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_usbBoardModule) {setCommandStatus("Project or module changed",true);return;}
+        std::vector<modules::Module> fresh; std::string error;
+        if(!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_usbBoardModule && m.enabled && m.valid && m.project && m.devices && std::find(m.requirements.begin(),m.requirements.end(),"usb-board-identification-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="identify-usb-boards";});})) {setCommandStatus("Module changed; reopen the command",true);return;}
+        m_usbBoardConfirmed=true; m_usbBoardFuture=std::async(std::launch::async,[]{return modules::discoverUsbDescriptors();}); m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();return;
+    }
+    if (choice == -221 && m_svdShowing) { if (m_svdSelected) m_svdSelected.reset(); else { if (m_svdCancel) m_svdCancel->store(true); m_svdShowing=false; } m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+    if (choice == -53 && m_linkerShowing) { if (m_linkerCancel) m_linkerCancel->store(true); m_linkerShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if(choice==-255 && m_toolchainShowing && m_toolchainSelected && *m_toolchainSelected<m_toolchainProfiles.size() && m_targetConfigureStage==0 && m_moduleSelected<m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"toolchain-configure-v1")!=m_modules[m_moduleSelected].requirements.end()) {m_targetConfigureStage=1;m_searchBar.open(ui::PromptKind::ModuleToolchainPath);clearCommandFeedback();setCommandStatus("Enter an existing project-relative build directory",false);return;}
+    if(choice==-256 && m_toolchainShowing && m_targetConfigureStage==3 && !m_targetConfigureFuture.valid()) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_toolchainRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_toolchainModule){setCommandStatus("Project or module changed",true);return;}
+        std::vector<modules::Module> fresh;std::string error;if(!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[this](const auto& m){return m.id==m_toolchainModule && m.enabled && m.valid && m.project && m.processes && std::find(m.requirements.begin(),m.requirements.end(),"toolchain-configure-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="inspect-toolchain-profiles";});})){setCommandStatus("Module changed or disabled",true);return;}
+        std::string current;if(!m_project.readFileBounded(m_toolchainFile,current,error,1024U*1024U) || current!=m_toolchainSnapshot){setCommandStatus("Target profiles changed; inspect again",true);return;}
+        if((m_hasDocument && m_document.dirty()) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[this](const auto& doc){return (doc.path==m_toolchainFile || doc.path=="CMakeLists.txt") && doc.document.dirty();})){setCommandStatus("Save or resolve open edits before configuring",true);return;}
+        auto project=m_project;auto plan=m_targetConfigurePlan;m_targetConfigureCancel=std::make_shared<std::atomic_bool>(false);auto cancel=m_targetConfigureCancel;m_targetConfigureStage=4;m_targetConfigureFuture=std::async(std::launch::async,[project,plan,cancel]{return modules::runTargetConfigure(project,plan,true,cancel.get());});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Running CMake; cancellation may leave changed build files",false);return;
+    }
+    if ((choice==-250 || choice==-251 || choice==-252) && m_toolchainShowing && !m_toolchainSaveFuture.valid() && !m_toolchainFuture.valid() && m_toolchainEditMode==0) {
+        if(m_moduleSelected>=m_modules.size() || std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"toolchain-target-edit-v1")==m_modules[m_moduleSelected].requirements.end()) return;
+        if(choice!=-250 && (!m_toolchainSelected || *m_toolchainSelected>=m_toolchainProfiles.size())) return;
+        m_toolchainEditMode=choice==-250?1:choice==-251?2:3;
+        if(m_toolchainEditMode==3) {m_toolchainDraft=modules::prepareTargetEdit(m_toolchainSnapshot,modules::TargetEditKind::Remove,m_toolchainProfiles[*m_toolchainSelected].name); if(!m_toolchainDraft.error.empty()){setCommandStatus(m_toolchainDraft.error,true);m_toolchainEditMode=0;return;}m_toolchainEditMode=6;m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Review target removal and confirm save",false);}
+        else {m_searchBar.open(ui::PromptKind::ModuleToolchainPath);clearCommandFeedback();setCommandStatus("Enter JSON containing exactly one target profile",false);} return;
+    }
+    if(choice==-253 && m_toolchainShowing && m_toolchainEditMode>=4 && !m_toolchainSaveFuture.valid()) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_toolchainRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_toolchainModule){setCommandStatus("Project or module changed",true);return;}
+        std::vector<modules::Module> fresh;std::string error; if(!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[this](const auto& m){return m.id==m_toolchainModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"toolchain-target-edit-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="inspect-toolchain-profiles";});})){setCommandStatus("Module changed or disabled",true);return;}
+        const auto resolved=m_project.resolve(m_toolchainFile,error); std::error_code ec; const auto root=std::filesystem::weakly_canonical(m_project.root(),ec); const auto relative=resolved.lexically_relative(root);
+        if(!error.empty() || ec || relative.empty() || relative.generic_string()!=m_toolchainFile){setCommandStatus("Profile path changed or contains a symbolic link",true);return;}
+        if((m_hasDocument && m_filePath==m_toolchainFile) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[this](const auto& doc){return doc.path==m_toolchainFile;})){setCommandStatus("Close the open profile file before saving",true);return;}
+        auto project=m_project;auto file=m_toolchainFile;auto draft=m_toolchainDraft;m_toolchainSaveCancel=std::make_shared<std::atomic_bool>(false);auto cancel=m_toolchainSaveCancel;
+        m_toolchainSaveFuture=std::async(std::launch::async,[project,file,draft,cancel]() mutable {std::string e;if(!project.writeFile(file,draft.updated,e,&draft.original,false,cancel.get()) && e.empty()) e="Could not save target profiles";return e;});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Saving target profiles…",false);return;
+    }
+    if (choice == -193 && m_toolchainShowing) { if(m_targetConfigureFuture.valid()){if(m_targetConfigureCancel)m_targetConfigureCancel->store(true);setCommandStatus("Cancellation requested; build files may already be changed",true);return;} if(m_targetConfigureStage){m_targetConfigureStage=0;} else if(m_toolchainSaveFuture.valid()) {if(m_toolchainSaveCancel)m_toolchainSaveCancel->store(true);setCommandStatus("Cancelling target save; it may already have completed",true);return;} else if(m_toolchainEditMode){m_toolchainEditMode=0;m_toolchainDraft={};} else if (m_toolchainSelected) m_toolchainSelected.reset(); else { if (m_toolchainCancel) m_toolchainCancel->store(true); m_toolchainShowing=false; m_toolchainProfiles.clear(); } m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+    if (choice == -220 && m_crashShowing && !m_crashIsGdb && !m_crashFuture.valid() && m_hasProject && m_project.root().generic_string() == m_crashRoot) { m_crashMapInput = true; m_searchBar.open(ui::PromptKind::ModuleCrashPath); setCommandStatus("Enter project-relative TSV or Breakpad .sym; mappings are unverified", false); return; }
+    if (choice == -57 && m_crashShowing) { if (m_crashCancel) m_crashCancel->store(true); m_crashDump = {}; m_crashShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if(choice==-403 && m_rustOwnershipShowing && m_rustRunStage==2 && !m_rustRunFuture.valid()) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_rustOwnershipRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_rustRunModule){setCommandStatus("Rust project or module changed",true);return;}
+        std::vector<modules::Module> fresh;std::string error;if(!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[this](const auto& m){return m.id==m_rustRunModule && m.enabled && m.valid && m.project && m.processes && std::find(m.requirements.begin(),m.requirements.end(),"rust-diagnostic-run-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="run-rust-ownership";});})){setCommandStatus("Module changed or disabled",true);return;}
+        if((m_hasDocument && m_document.dirty()) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[](const auto& d){return d.document.dirty();})){setCommandStatus("Save or resolve open project edits before running Cargo",true);return;}
+        auto project=m_project;auto plan=m_rustRunPlan;m_rustRunCancel=std::make_shared<std::atomic_bool>(false);auto cancel=m_rustRunCancel;m_rustRunStage=3;m_rustRunFuture=std::async(std::launch::async,[project,plan,cancel]{return modules::runRustDiagnostic(project,plan,true,cancel.get());});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Running Cargo; cancellation may leave changed files",false);return;
+    }
+    if (choice == -59 && m_rustOwnershipShowing) { if(m_rustRunFuture.valid()){if(m_rustRunCancel)m_rustRunCancel->store(true);setCommandStatus("Cancellation requested; build scripts may have changed files",true);return;} if(m_rustRunStage && m_rustRunStage!=4){m_rustRunStage=0;} else if (m_rustOwnershipSelected) m_rustOwnershipSelected.reset(); else { if (m_rustOwnershipCancel) m_rustOwnershipCancel->store(true); m_rustOwnershipDiagnostics.clear(); m_rustOwnershipSpans.clear(); m_rustOwnershipShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if ((choice == -54 || choice == -55) && m_linkerShowing) {
+        if (choice == -54 && m_linkerSectionOffset) m_linkerSectionOffset -= std::min<std::size_t>(256, m_linkerSectionOffset);
+        else if (choice == -55 && m_linkerSectionOffset + 256 < m_linkerMap.sections.size()) m_linkerSectionOffset += 256;
+        m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+    }
+    if (((choice <= -40 && choice >= -52) || choice == -205 || choice == -206) && m_hexShowing) {
+        if (m_hexFuture.valid()) { setCommandStatus("Wait for the binary operation to finish", false); return; }
+        if (choice == -40) {
+            if (m_hexFile && m_hexFile->buffer().bytes() != m_hexBaseline && !platform::confirmDestructiveAction("Discard binary edits?", "The open binary has unsaved changes.", "Discard")) return;
+            m_hexFile.reset(); m_hexBaseline.clear(); m_hexShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        std::string error; if (!hexModuleReady(error) || !m_hexFile) { setCommandStatus(error.empty() ? "Open a binary first" : error, true); return; }
+        auto& buffer = m_hexFile->buffer();
+        if (choice == -41) {
+            if (buffer.bytes() == m_hexBaseline) { setCommandStatus("No binary changes to save", false); return; }
+            auto file = *m_hexFile; auto project = m_project; const auto root = m_hexRoot, path = m_hexPath;
+            m_hexSaving = true; m_hexFuture = std::async(std::launch::async, [file = std::move(file), project, root, path]() mutable { HexOperation result; result.file = std::move(file); result.root = root; result.path = path; result.saving = true; try { result.ok = result.file.save(project, result.error); } catch (const std::exception& e) { result.error = e.what(); } return result; });
+            setCommandStatus("Saving binary with an external-change check…", false); return;
+        }
+        if (choice == -42 || choice == -43) { if (!(choice == -42 ? buffer.undo() : buffer.redo())) { setCommandStatus(choice == -42 ? "Nothing to undo" : "Nothing to redo", false); return; } m_hexLastNeedle.clear(); }
+        else if (choice == -44 || choice == -48 || choice == -49 || choice == -52) {
+            m_hexOffsetAction = choice == -44 ? HexOffsetAction::Overwrite : choice == -49 ? HexOffsetAction::Select : choice == -52 ? HexOffsetAction::Insert : HexOffsetAction::Navigate;
+            m_searchBar.open(ui::PromptKind::ModuleHexOffset); clearCommandFeedback(); setCommandStatus("Enter a decimal offset or 0x-prefixed hexadecimal offset", false); return;
+        }
+        else if (choice == -50) {
+            if (!buffer.selectionLength() || buffer.selectionLength() > 4096) { setCommandStatus("Select 1 to 4096 bytes to overwrite", true); return; }
+            m_hexEditOffset = buffer.selectionOffset(); m_hexBytesInsert = false; m_hexReplaceSelection = true;
+            m_searchBar.open(ui::PromptKind::ModuleHexBytes); clearCommandFeedback(); setCommandStatus("Enter exactly " + std::to_string(buffer.selectionLength()) + " hexadecimal bytes", false); return;
+        }
+        else if (choice == -51) {
+            if (!buffer.selectionLength() || !buffer.erase(buffer.selectionOffset(), buffer.selectionLength())) { setCommandStatus("Selection exceeds the undo limit or is empty", true); return; }
+            m_hexLastNeedle.clear(); setStatus("Binary deletion is unsaved", false);
+        }
+        else if (choice == -45) { m_searchBar.open(ui::PromptKind::ModuleHexSearch); clearCommandFeedback(); setCommandStatus("Enter hexadecimal byte pairs to find", false); return; }
+        else if (choice == -205 || choice == -206) {
+            if (m_hexLastNeedle.empty()) { setCommandStatus("Find a byte sequence first", true); return; }
+            const auto current = m_hexNextSearch ? m_hexNextSearch - 1 : 0;
+            std::size_t found = modules::HexBuffer::notFound; bool wrapped = false;
+            if (choice == -205) {
+                found = buffer.find(m_hexLastNeedle, m_hexNextSearch);
+                if (found == modules::HexBuffer::notFound) { found = buffer.find(m_hexLastNeedle, 0); wrapped = true; }
+            } else {
+                if (current > 0) found = buffer.rfind(m_hexLastNeedle, current - 1);
+                if (found == modules::HexBuffer::notFound) { found = buffer.rfind(m_hexLastNeedle); wrapped = true; }
+            }
+            if (found == modules::HexBuffer::notFound) { m_hexLastNeedle.clear(); setCommandStatus("Byte sequence no longer found", true); refreshSuggestions(); return; }
+            m_hexNextSearch = found + 1; m_hexViewOffset = (found / 256) * 256; m_hexEditOffset = found;
+            (void)buffer.select(found, m_hexLastNeedle.size());
+            setStatus("Found at byte " + std::to_string(found) + (wrapped ? " (wrapped)" : ""), false);
+        }
+        else if (choice == -46) m_hexViewOffset = m_hexViewOffset >= 256 ? m_hexViewOffset - 256 : 0;
+        else if (choice == -47 && m_hexViewOffset + 256 < buffer.bytes().size()) m_hexViewOffset += 256;
+        if (m_hexViewOffset >= buffer.bytes().size()) m_hexViewOffset = buffer.bytes().empty() ? 0 : ((buffer.bytes().size() - 1) / 256) * 256;
+        m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+    }
+    if (choice == -215 && m_ctestShowing && !m_ctestSelected && !m_ctestRerunShowing) {
+        std::string error; if (!ctestModuleReady(error) || !m_ctestHistoryReady || m_ctestDiscoveryFuture.valid() || m_ctestRunFuture.valid()) { setCommandStatus(error.empty() ? "Test history or discovery is unavailable" : error, true); return; }
+        if (!modules::planFailedCTestReruns(m_ctestDiscovery, m_ctestHistory.runs, m_ctestRerunCandidates, error)) { setCommandStatus(error, true); return; }
+        m_ctestRerunShowing = true; m_ctestRerunSelected.reset(); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+    }
+    if (choice == -217 && m_ctestShowing && m_ctestRerunShowing && m_ctestRerunSelected && *m_ctestRerunSelected < m_ctestRerunCandidates.size()) {
+        const auto& candidate = m_ctestRerunCandidates[*m_ctestRerunSelected];
+        std::string error; if (!ctestModuleReady(error) || candidate.status != modules::FailedRerunStatus::Ready || !modules::ctestSingleRunSupported() || m_ctestDiscoveryFuture.valid() || m_ctestRunFuture.valid()) { setCommandStatus(error.empty() ? "Cannot run this candidate; reopen the review" : error, true); return; }
+        m_ctestRunning = candidate.name; const auto name = m_ctestRunning; const auto executable = m_ctestExecutable, build = m_ctestBuild;
+        m_ctestCancel = std::make_shared<std::atomic_bool>(false);
+        m_ctestRunFuture = std::async(std::launch::async, [executable, build, name, cancel = m_ctestCancel] { return modules::runCTestSingle(executable, build, name, std::chrono::minutes(5), cancel.get()); });
+        m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Verifying and running the confirmed test; Escape requests cancellation", false); return;
+    }
+    if (choice == -37 && m_ctestShowing && m_ctestSelected && *m_ctestSelected < m_ctestDiscovery.tests.size()) {
+        std::string error; if (!ctestModuleReady(error)) { setCommandStatus(error, true); return; }
+        if (!modules::ctestSingleRunSupported()) { setCommandStatus("Running individual CTest tests is not yet supported on this platform", true); return; }
+        if (m_ctestDiscoveryFuture.valid() || m_ctestRunFuture.valid()) { setCommandStatus("A CTest operation is still running", false); return; }
+        m_ctestRunning = m_ctestDiscovery.tests[*m_ctestSelected].name; const auto name = m_ctestRunning; const auto executable = m_ctestExecutable, build = m_ctestBuild;
+        m_ctestCancel = std::make_shared<std::atomic_bool>(false);
+        m_ctestRunFuture = std::async(std::launch::async, [executable, build, name, cancel = m_ctestCancel] { return modules::runCTestSingle(executable, build, name, std::chrono::minutes(5), cancel.get()); });
+        setCommandStatus("Running selected test; Escape cancels", false); return;
+    }
+    if (choice == -207 && m_pythonShowing && !m_pythonSelected) {
+        std::string error; if (!pythonModuleReady(error)) { setCommandStatus(error, true); return; }
+        m_searchBar.open(ui::PromptKind::ModulePythonInterpreterPath); clearCommandFeedback(); setCommandStatus("Enter an absolute interpreter path; it will not run yet", false); return;
+    }
+    if ((choice == -33 || choice == -34 || choice == -35) && m_pythonShowing) {
+        std::string error; if (!pythonModuleReady(error)) { setCommandStatus(error, true); return; }
+        if (m_pythonRuntimeFuture.valid() || m_pythonProvisionFuture.valid()) { setCommandStatus("A Python operation is still running", false); return; }
+        if (choice == -35) {
+            if (!modules::savePythonPreference(m_settingsRoot, m_pythonPreference, {}, error)) { setCommandStatus(error, true); return; }
+            m_languageAttemptRoot.clear();
+            if (m_languageKind == "python") { m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); }
+            refreshSuggestions(); setCommandStatus("Remembered interpreter cleared", false); return;
+        }
+        if (!m_pythonSelected || *m_pythonSelected >= m_pythonEnvironments.size()) return;
+        if (choice == -34) { m_searchBar.open(ui::PromptKind::ModulePythonCreatePath); clearCommandFeedback(); setCommandStatus("Enter a new project-relative directory; the selected interpreter will run", false); return; }
+        const auto interpreter = m_pythonEnvironments[*m_pythonSelected].interpreter; m_pythonCreating = false;
+        m_pythonRuntimeFuture = std::async(std::launch::async, [interpreter] { return modules::validatePythonRuntime(interpreter); });
+        setCommandStatus("Validating the selected executable; it continues if you leave", false); return;
+    }
+    if ((choice == -160 || choice == -161 || choice == -162) && m_pythonShowing) {
+        std::string error;
+        if (!pythonModuleReady(error)) { setCommandStatus(error, true); return; }
+        if (m_pythonRuntimeFuture.valid() || m_pythonProvisionFuture.valid() || !m_pythonSelected || *m_pythonSelected >= m_pythonEnvironments.size()) { setCommandStatus("Select the remembered interpreter and wait for other operations", true); return; }
+        const auto interpreter = m_pythonEnvironments[*m_pythonSelected].interpreter;
+        modules::PythonPreference freshPreference;
+        std::vector<modules::Module> fresh;
+        if (!modules::loadPythonPreference(m_settingsRoot, m_project.root(), freshPreference, error) || freshPreference.interpreter != interpreter || m_pythonPreference.interpreter != interpreter ||
+            !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& module) {
+                return module.id == m_modules[m_moduleSelected].id && module.enabled && module.valid && module.network && module.processes && module.settings &&
+                    std::find(module.requirements.begin(), module.requirements.end(), "python-pylsp-install-v1") != module.requirements.end() &&
+                    std::any_of(module.commands.begin(), module.commands.end(), [](const auto& command) { return command.action == "install-python-pylsp"; });
+            })) { setCommandStatus("Remembered interpreter or module permission changed; reopen Python Environments", true); return; }
+        if (choice == -160 || choice == -161) {
+            m_pythonProvisionBootstrap = choice == -161; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus("Review installation and confirm; no installation has started", false); return;
+        }
+        if (!m_pythonProvisionBootstrap) return;
+        const bool bootstrap = *m_pythonProvisionBootstrap;
+        m_pythonProvisionRoot = m_project.root().generic_string(); m_pythonProvisionInterpreter = interpreter;
+        m_pythonProvisionGeneration = m_searchBar.generation(); m_pythonProvisionCancel = std::make_shared<std::atomic_bool>(false);
+        m_pythonProvisionFuture = std::async(std::launch::async, [interpreter, bootstrap, cancel = m_pythonProvisionCancel] { return modules::provisionPythonLanguageServer(interpreter, bootstrap, cancel.get()); });
+        m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        setCommandStatus("Installing Python language server; Escape requests cancellation", false); return;
+    }
+    if (choice == -18 && m_moduleHistoryShowing) { if (m_moduleHistoryDiffShowing) m_moduleHistoryDiffShowing = false; else m_moduleHistoryShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if(choice==-400 && m_moduleCMakeShowing && !m_moduleCMakeEditing && m_moduleCMakeTarget && m_cmakeBuildStage==0 && m_moduleSelected<m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"cmake-build-target-v1")!=m_modules[m_moduleSelected].requirements.end()) {m_cmakeBuildStage=1;m_searchBar.open(ui::PromptKind::ModuleCMakePath);clearCommandFeedback();setCommandStatus("Enter absolute CMake executable path",false);return;}
+    if(choice==-401 && m_moduleCMakeShowing && m_cmakeBuildStage==3 && !m_cmakeBuildFuture.valid()) {
+        if(!m_hasProject || m_project.root().generic_string()!=m_moduleCMakeRoot || m_moduleSelected>=m_modules.size()){setCommandStatus("Project or module changed",true);return;}
+        const auto id=m_modules[m_moduleSelected].id;std::vector<modules::Module> fresh;std::string error;if(!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==id && m.enabled && m.valid && m.project && m.processes && std::find(m.requirements.begin(),m.requirements.end(),"cmake-build-target-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="browse-cmake";});})){setCommandStatus("Module changed or disabled",true);return;}
+        if((m_hasDocument && m_document.dirty()) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[](const auto& doc){return doc.document.dirty();})){setCommandStatus("Save or resolve open project edits before building",true);return;}
+        auto project=m_project;auto plan=m_cmakeBuildPlan;m_cmakeBuildCancel=std::make_shared<std::atomic_bool>(false);auto cancel=m_cmakeBuildCancel;m_cmakeBuildStage=4;m_cmakeBuildFuture=std::async(std::launch::async,[project,plan,cancel]{return modules::runCMakeBuild(project,plan,true,cancel.get());});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Building target; cancellation may leave changed files",false);return;
+    }
+    if (choice == -11 && m_moduleCMakeShowing && !m_moduleCMakeTarget) { m_moduleCMakeOptions = true; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if(choice==-320 && m_moduleCMakeShowing && m_moduleCMakeEditing && m_moduleCMakeOptions && !m_moduleCMakeStale && !m_cmakeValuesFuture.valid()) {if(!m_hasProject || m_project.root().generic_string()!=m_moduleCMakeRoot || m_moduleSelected>=m_modules.size() || std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"cmake-cache-values-v1")==m_modules[m_moduleSelected].requirements.end())return;auto project=m_project;auto path=m_moduleCMakeBuild+"/CMakeCache.txt";m_cmakeValueMode=true;m_cmakeValueSelected.reset();m_cmakeValues.clear();m_cmakeValuesFuture=std::async(std::launch::async,[project,path]{CMakeValuesResult r;(void)modules::listCMakeCacheValues(project,path,r.values,r.error);return r;});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();return;}
+    if(choice==-321 && m_moduleCMakeShowing && m_cmakeValueMode && m_cmakeValueSelected && !m_cmakeCachePrepareFuture.valid()) {m_cmakeValueInput=true;m_searchBar.open(ui::PromptKind::ModuleCMakePath);clearCommandFeedback();setCommandStatus("Enter the replacement cache value",false);return;}
+    if (choice == -9 && m_moduleCMakeShowing) { if(m_cmakeBuildFuture.valid()){if(m_cmakeBuildCancel)m_cmakeBuildCancel->store(true);setCommandStatus("Build cancellation requested; files may have changed",true);return;} if(m_cmakeBuildPrepareFuture.valid()){setCommandStatus("Wait for build review to finish",false);return;} if(m_cmakeBuildStage){m_cmakeBuildStage=0;} else if (m_cmakeCachePrepareFuture.valid() || m_cmakeCacheSaveFuture.valid()) { setCommandStatus("Wait for the cache operation to finish",false); return; } else if(m_cmakeValueSelected){m_cmakeValueSelected.reset();m_cmakeCacheUpdate={};} else if(m_cmakeValueMode){m_cmakeValueMode=false;} else if (m_moduleCMakeOption) { m_moduleCMakeOption.reset(); m_cmakeCacheUpdate={}; } else if (m_moduleCMakeOptions) m_moduleCMakeOptions = false; else if (m_moduleCMakeTarget) m_moduleCMakeTarget.reset(); else m_moduleCMakeShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if ((choice == -186 || choice == -187) && m_moduleCMakeShowing && m_moduleCMakeEditing && m_moduleCMakeOption && *m_moduleCMakeOption < m_moduleCMakeModel.options.size() && !m_moduleCMakeStale && !m_cmakeCachePrepareFuture.valid() && !m_cmakeCacheSaveFuture.valid()) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_moduleCMakeRoot) { setCommandStatus("Project changed; reopen CMake options",true); return; }
+        const auto option=m_moduleCMakeModel.options[*m_moduleCMakeOption]; const auto path=m_moduleCMakeBuild + "/CMakeCache.txt"; auto project=m_project; const bool enabled=choice==-186; m_cmakeCacheTarget=enabled ? "ON" : "OFF"; m_cmakeCacheUpdate={}; m_modulePage=0; m_selectedSuggestion=-1;
+        m_cmakeCachePrepareFuture=std::async(std::launch::async,[project,path,option,enabled] { CMakeCachePrepareResult result; (void)modules::prepareCMakeBoolCacheUpdate(project,path,option.name,option.value,enabled,result.update,result.error); return result; });
+        refreshSuggestions(); setCommandStatus("Checking cache against the displayed option…",false); return;
+    }
+    if (choice == -188 && m_moduleCMakeShowing && m_moduleCMakeEditing && (m_moduleCMakeOption || m_cmakeValueSelected) && !m_cmakeCacheUpdate.path.empty() && !m_moduleCMakeStale && !m_cmakeCacheSaveFuture.valid()) {
+        if (!m_hasProject || m_project.root().generic_string()!=m_moduleCMakeRoot || m_moduleSelected>=m_modules.size()) { setCommandStatus("Project changed; reopen CMake options",true); return; }
+        std::vector<modules::Module> fresh; std::string error; const auto id=m_modules[m_moduleSelected].id;
+        if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==id && m.enabled && m.valid && m.project && (!m_cmakeValueSelected || std::find(m.requirements.begin(),m.requirements.end(),"cmake-cache-values-v1")!=m.requirements.end()) && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action=="edit-cmake-options"; }); })) { setCommandStatus("Module changed; reopen CMake options",true); return; }
+        const auto path=normalizeRelative(m_cmakeCacheUpdate.path);
+        if ((m_hasDocument && m_filePath==path) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path==path; })) { setCommandStatus("Close the open cache file before editing",true); return; }
+        auto project=m_project; auto update=std::move(m_cmakeCacheUpdate); m_modulePage=0; m_selectedSuggestion=-1;
+        m_cmakeCacheSaveFuture=std::async(std::launch::async,[project=std::move(project),update=std::move(update)]() mutable { std::string error; (void)modules::saveCMakeCacheValueUpdate(project,update,error); return error; });
+        refreshSuggestions(); setCommandStatus("Saving reviewed cache change…",false); return;
     }
     if (choice < 0) { if (choice == -1 && m_modulePage) --m_modulePage; else if (choice == -2) ++m_modulePage; m_pagedScroll = 0; m_selectedSuggestion = -1; m_menuReselectionRequired = true; refreshSuggestions(); return; }
     if (m_searchBar.kind() == ui::PromptKind::ModulePreview) {
@@ -2487,6 +5499,7 @@ void Application::applyModuleCommand() {
         if (m_moduleFetchFuture.valid()) { setCommandStatus("A module download is still running", false); return; }
         if (static_cast<std::size_t>(choice) >= m_moduleCatalog.size()) return;
         const auto entry = m_moduleCatalog[static_cast<std::size_t>(choice)];
+        if (std::any_of(entry.requirements.begin(), entry.requirements.end(), [](const std::string& requirement) { return !modules::supportsCapability(requirement); })) { setCommandStatus("This module requires capabilities unavailable in this Lucid version", true); return; }
         const auto generation = ++m_moduleFetchGeneration;
         m_moduleFetchFuture = std::async(std::launch::async, [entry, generation] {
             ModuleFetchResult result; result.id = entry.id; result.generation = generation;
@@ -2504,25 +5517,630 @@ void Application::applyModuleCommand() {
     if (m_moduleSelected >= m_modules.size()) return;
     const auto current = m_modules[m_moduleSelected];
     if (m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (m_releaseNotesShowing) {
+            if (m_releaseNotesPreview || m_releaseNotesFuture.valid() || static_cast<std::size_t>(choice) >= m_releaseNotesEntries.size()) return;
+            auto& item = m_releaseNotesEntries[static_cast<std::size_t>(choice)]; item.selected = !item.selected;
+            refreshSuggestions(); setCommandStatus("Enter toggles an item; choose Insert selected items as draft", false); return;
+        }
+        if (m_rustOwnershipShowing) {
+            if (!m_rustOwnershipSelected) {
+                if (static_cast<std::size_t>(choice) >= m_rustOwnershipDiagnostics.size()) return;
+                m_rustOwnershipSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+            }
+            if (!m_hasProject || m_project.root().generic_string() != m_rustOwnershipRoot || static_cast<std::size_t>(choice) >= m_rustOwnershipSpans.size()) return;
+            const auto span = m_rustOwnershipSpans[static_cast<std::size_t>(choice)];
+            if (!span.lineStart || !span.columnStart || span.file.empty() || span.file.find('\0') != std::string::npos) { setCommandStatus("Compiler span is invalid", true); return; }
+            std::error_code ec; const auto root = std::filesystem::canonical(m_project.root(), ec); if (ec) { setCommandStatus("Project directory is unavailable", true); return; }
+            const auto path = std::filesystem::path(std::u8string(span.file.begin(), span.file.end()));
+            const auto absolute = std::filesystem::canonical(path.is_absolute() ? path : root / path, ec);
+            if (ec || absolute.extension() != ".rs") { setCommandStatus("Rust source file is unavailable", true); return; }
+            const auto relative = absolute.lexically_relative(root);
+            if (relative.empty() || relative.is_absolute() || *relative.begin() == "..") { setCommandStatus("Compiler span is outside the project", true); return; }
+            const auto relativeUtf8=relative.generic_u8string(); const std::string filename(reinterpret_cast<const char*>(relativeUtf8.data()),relativeUtf8.size());
+            std::string contents, error;
+            if (!m_project.readFileBounded(filename,contents,error,workspace::Project::maxFileSize) || std::any_of(contents.begin(),contents.end(),[](unsigned char c) { return c==0 || (c<32 && c!='\n' && c!='\r' && c!='\t' && c!='\f'); }) || !editor::Document::canEditLosslessly(contents,error)) { setCommandStatus("Rust source is unavailable or not editable text",true); return; }
+            const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path==filename; });
+            if ((m_hasDocument && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty())) { setCommandStatus("Save or resolve open edits before navigating",true); return; }
+            const auto line = span.lineStart - 1, column = span.columnStart - 1;
+            const auto document=editor::Document::fromUtf8(contents);
+            if (line >= document.lineCount() || column > document.line(line).size()) { setCommandStatus("Compiler span no longer fits the source", true); return; }
+            for (std::size_t i=0;i<span.sourceLines.size();++i) if (i>=document.lineCount()-line || span.sourceLines[i].text!=document.lineUtf8(line+i)) { setCommandStatus("Compiler source changed; generate fresh diagnostics", true); return; }
+            if (!m_hasDocument || m_filePath!=filename) openFile(filename,false);
+            if (!m_hasDocument || m_filePath!=filename || m_document.toUtf8()!=contents) { setCommandStatus("Source could not be opened unchanged; generate fresh diagnostics",true); return; }
+            m_document.setCursor(line, column); m_followCursor = true; setStatus(span.sourceLines.empty() ? "Compiler source text unavailable; span is unverified" : "Compiler span text matches; other source changes may exist", false); return;
+        }
+        if (m_crashShowing) {
+            if (!m_hasProject || m_project.root().generic_string() != m_crashRoot || m_moduleSelected >= m_modules.size() || m_crashFuture.valid()) return;
+            std::vector<modules::Module> fresh; std::string error; const auto id = m_modules[m_moduleSelected].id;
+            if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [&](const auto& m) { return m.id==id && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action=="crash-dump-reader"; }); })) { setCommandStatus("Module changed; reopen crash dump",true); return; }
+            std::size_t index = 0; const modules::CrashFrame* frame = nullptr;
+            for (const auto& thread : m_crashDump.threads) for (const auto& candidate : thread.frames) { if (index++ == static_cast<std::size_t>(choice) && index <= 512) frame = &candidate; }
+            if (!frame) return;
+            const auto location = modules::locateCrashAddress(frame->address, m_crashDump.modules, m_crashSourceMap);
+            if (location.path.empty() || !location.line) { setCommandStatus("No unique source mapping for this frame", true); return; }
+            const auto resolved = m_project.resolve(location.path, error); if (!error.empty()) { setCommandStatus("Mapped source is outside the project",true); return; }
+            std::error_code ec; const auto root = std::filesystem::weakly_canonical(m_project.root(), ec); if (ec) { setCommandStatus("Project unavailable",true); return; }
+            const auto relative = resolved.lexically_relative(root); if (relative.empty() || relative.is_absolute() || *relative.begin()=="..") { setCommandStatus("Mapped source is outside the project",true); return; }
+            const auto rawPath = relative.generic_u8string(); const std::string path(reinterpret_cast<const char*>(rawPath.data()),rawPath.size());
+            std::string contents; if (!m_project.readFileBounded(path, contents, error, workspace::Project::maxFileSize) || std::any_of(contents.begin(),contents.end(),[](unsigned char c) { return c==0 || (c<32 && c!='\n' && c!='\r' && c!='\t' && c!='\f'); }) || !editor::Document::canEditLosslessly(contents,error)) { setCommandStatus("Mapped source is unavailable or not editable text",true); return; }
+            const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path==path; });
+            if ((m_hasDocument && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty())) { setCommandStatus("Save or resolve open edits before navigating",true); return; }
+            const auto document=editor::Document::fromUtf8(contents); if (location.line > document.lineCount()) { setCommandStatus("Mapped source line is unavailable",true); return; }
+            if (!m_hasDocument || m_filePath!=path) openFile(path,false);
+            if (!m_hasDocument || m_filePath!=path || m_document.toUtf8()!=contents) { setCommandStatus("Source changed or could not be opened",true); return; }
+            m_document.setCursor(location.line-1,0); m_followCursor=true; m_crashShowing=false; m_searchBar.close(); setStatus("Source map and frame are unverified; location may be wrong or stale",false); return;
+        }
+        if (m_svdShowing) { if (!m_svdSelected && !m_svdFuture.valid() && static_cast<std::size_t>(choice)<m_svdRegisters.registers.size()) {m_svdSelected=static_cast<std::size_t>(choice);m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();} return; }
+        if (m_linkerShowing) return;
+        if (m_toolchainShowing) { if (!m_toolchainSelected && static_cast<std::size_t>(choice)<m_toolchainProfiles.size()) { m_toolchainSelected=static_cast<std::size_t>(choice); m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); } return; }
+        if (m_hexShowing) {
+            if (m_hexFuture.valid() || !m_hexFile || static_cast<std::size_t>(choice) >= 16) return;
+            std::string error; if (!hexModuleReady(error)) { setCommandStatus(error, true); return; }
+            const auto offset = m_hexViewOffset + static_cast<std::size_t>(choice) * 16;
+            if (offset >= m_hexFile->buffer().bytes().size()) return;
+            m_hexEditOffset = offset; m_hexBytesInsert = false; m_hexReplaceSelection = false; m_searchBar.open(ui::PromptKind::ModuleHexBytes); clearCommandFeedback(); setCommandStatus("Enter hexadecimal byte pairs to overwrite from offset " + std::to_string(offset), false); return;
+        }
+        if (m_ctestShowing) {
+            if (m_ctestRerunShowing) {
+                if (m_ctestRerunSelected || m_ctestRunFuture.valid() || static_cast<std::size_t>(choice) >= m_ctestRerunCandidates.size() || m_ctestRerunCandidates[static_cast<std::size_t>(choice)].status != modules::FailedRerunStatus::Ready) return;
+                m_ctestRerunSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+            }
+            if (m_ctestSelected || static_cast<std::size_t>(choice) >= m_ctestDiscovery.tests.size()) return;
+            m_ctestSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        if (m_pythonShowing) {
+            if (!m_pythonManage || m_pythonSelected || static_cast<std::size_t>(choice) >= m_pythonEnvironments.size()) return;
+            m_pythonSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        if (m_logShowing) {
+            if (m_logSelected || static_cast<std::size_t>(choice) >= m_logReport.records.size()) return;
+            m_logSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+        }
+        if (m_designTokenShowing) {
+            if (!m_hasProject || m_project.root().generic_string() != m_designTokenRoot || m_designTokenSelected || static_cast<std::size_t>(choice) >= m_designTokenReport.tokens.size()) return;
+            m_designTokenSelected=static_cast<std::size_t>(choice); m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions();
+            return;
+        }
+        if (m_localizationShowing) {
+            if (m_localizationSelected || static_cast<std::size_t>(choice) >= m_localizationEntries.size()) return;
+            m_localizationSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus("Plain text preview; RTL layout and shaping are not simulated", false); return;
+        }
+        if (m_binaryShowing) {
+            if (m_binaryCategory && *m_binaryCategory == 5 && !m_binaryFuture.valid() && m_hasProject && m_project.root().generic_string() == m_binaryRoot && m_binarySnapshot && choice >= 0 && static_cast<std::size_t>(choice) < m_binaryInspection.slices.size()) {
+                const auto selected = static_cast<std::size_t>(choice); auto snapshot = m_binarySnapshot;
+                m_binaryCancel = std::make_shared<std::atomic_bool>(false); auto cancel = m_binaryCancel;
+                m_binaryCategory.reset(); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1;
+                m_binaryFuture = std::async(std::launch::async, [snapshot, selected, cancel] { BinaryResult result; result.selecting = true; result.slice = selected; result.snapshot = snapshot; try { if (!cancel->load()) result.inspection = modules::inspectBinarySlice(*snapshot, selected, 2000); } catch (const std::exception& e) { result.inspection.error = e.what(); } return result; });
+                refreshSuggestions(); setCommandStatus("Inspecting selected architecture… Escape cancels", false); return;
+            }
+            if (!m_binaryCategory && !m_binaryFuture.valid() && m_binaryInspection.error.empty() && choice >= 0 && (choice <= 2 || (m_binaryInspection.format == "PE" && choice <= 4) || (choice == 5 && !m_binaryInspection.slices.empty() && m_binarySnapshot))) {
+                m_binaryCategory = static_cast<unsigned>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            }
+            return;
+        }
+        if (m_benchmarkShowing) { if (!m_benchmarkSelected && static_cast<std::size_t>(choice) < m_benchmarkComparison.entries.size()) { m_benchmarkSelected=static_cast<std::size_t>(choice); m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); } return; }
+        if (m_moduleHistoryShowing) {
+            if (m_moduleHistoryRange) {
+                if (m_moduleHistoryDiffShowing || m_moduleHistoryFuture.valid() || !m_hasProject || !m_hasDocument || m_project.root().generic_string() != m_moduleHistoryRoot || m_filePath != m_moduleHistoryFile || m_document.revision() != m_moduleHistoryRevision || static_cast<std::size_t>(choice) >= m_moduleRangeHistory.size()) return;
+                m_moduleHistoryDiff = m_moduleRangeHistory[static_cast<std::size_t>(choice)].review; m_moduleHistoryDiffShowing = true;
+                m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; refreshSuggestions(); setCommandStatus("Historical selected-line changes; line numbers do not refer to the current buffer", false); return;
+            }
+            if (m_moduleHistoryDiffShowing || m_moduleHistoryFuture.valid() || !m_hasProject || !m_hasDocument || m_project.root().generic_string() != m_moduleHistoryRoot || m_filePath != m_moduleHistoryFile || static_cast<std::size_t>(choice) >= m_moduleHistoryEntries.size()) return;
+            const auto root = m_project.root(); const auto entry = m_moduleHistoryEntries[static_cast<std::size_t>(choice)];
+            m_moduleHistoryDiff = {}; m_moduleHistoryDiffShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+            m_moduleHistoryFuture = std::async(std::launch::async, [root, entry] { ModuleHistoryResult result; result.isDiff = true; try { (void)workspace::gitHistoricalFileDiff(root, entry.path, entry.hash, result.diff, result.error, entry.previousPath); } catch (const std::exception& e) { result.error = e.what(); } return result; });
+            refreshSuggestions(); setCommandStatus("Loading historical changes…", false); return;
+        }
+        if (m_coverageShowing) {
+            if (!m_hasProject || m_project.root().generic_string() != m_coverageRoot || static_cast<std::size_t>(choice) >= m_coverageReport.lines.size()) return;
+            const auto line = m_coverageReport.lines[static_cast<std::size_t>(choice)]; openFile(line.path, false);
+            if (m_hasDocument && m_filePath == line.path) { m_document.setCursor(line.line, 0); m_followCursor = true; setStatus("Coverage report may be older than the source", false); }
+            return;
+        }
+        if (m_accessibilityShowing) {
+            if (!m_hasDocument || m_filePath != m_accessibilityFile || m_document.revision() != m_accessibilityRevision) { setCommandStatus("Document changed; rerun the accessibility audit", true); return; }
+            if (static_cast<std::size_t>(choice) >= m_accessibilityAudit.findings.size()) return;
+            const auto& finding = m_accessibilityAudit.findings[static_cast<std::size_t>(choice)];
+            const auto line = finding.line ? finding.line - 1 : 0;
+            if (line >= m_document.lineCount()) return;
+            const auto text = m_document.lineUtf8(line);
+            const auto byteColumn = std::min(finding.column ? finding.column - 1 : 0, text.size());
+            std::size_t column = 0;
+            for (std::size_t i = 0; i < byteColumn; ++i) if ((static_cast<unsigned char>(text[i]) & 0xc0U) != 0x80U) ++column;
+            m_document.setCursor(line, column); m_followCursor = true; m_accessibilityShowing = false; m_searchBar.close(); return;
+        }
+        if (m_markdownLinksShowing) {
+            if (!m_hasProject || m_project.root().generic_string()!=m_markdownLinksRoot || !m_hasDocument || m_filePath!=m_moduleMarkdownFile || m_document.revision()!=m_moduleMarkdownRevision || static_cast<std::size_t>(choice)>=m_markdownLinksResults.links.size()) { setCommandStatus("Document or project changed; check links again",true); return; }
+            if (m_markdownExternalMode) { m_markdownExternalSelected=static_cast<std::size_t>(choice); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
+            const auto& link=m_markdownLinksResults.links[static_cast<std::size_t>(choice)]; const auto source=m_document.toUtf8();
+            if (!link.sourceOffset || *link.sourceOffset>=source.size()) { setCommandStatus("Source location unavailable",true); return; }
+            std::size_t line=0,column=0; for (std::size_t i=0;i<*link.sourceOffset;++i) { if (source[i]=='\n') { ++line; column=0; } else if ((static_cast<unsigned char>(source[i]) & 0xc0U)!=0x80U) ++column; }
+            if (line>=m_document.lineCount()) { setCommandStatus("Source location unavailable",true); return; }
+            m_document.setCursor(line,column); m_followCursor=true; m_markdownLinksShowing=false; m_searchBar.close(); return;
+        }
+        if (m_markdownPreviewShowing) return;
+        if (m_moduleMarkdownShowing) {
+            if (!m_hasDocument || m_filePath != m_moduleMarkdownFile || m_document.revision() != m_moduleMarkdownRevision) { setCommandStatus("Document changed; regenerate the outline", true); return; }
+            if (static_cast<std::size_t>(choice) >= m_moduleMarkdownOutline.headings.size()) return;
+            m_document.setCursor(m_moduleMarkdownOutline.headings[static_cast<std::size_t>(choice)].line, 0);
+            m_followCursor = true; m_moduleMarkdownShowing = false; m_searchBar.close(); return;
+        }
+        if (m_moduleCMakeShowing) {
+            if (!m_hasProject || m_project.root().generic_string() != m_moduleCMakeRoot) return;
+            if (m_moduleCMakeOptions) { if(m_cmakeValueMode && !m_cmakeValueSelected && static_cast<std::size_t>(choice)<m_cmakeValues.size()){m_cmakeValueSelected=static_cast<std::size_t>(choice);m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();return;} if (m_moduleCMakeEditing && !m_moduleCMakeStale && !m_moduleCMakeOption && static_cast<std::size_t>(choice)<m_moduleCMakeModel.options.size()) { m_moduleCMakeOption=static_cast<std::size_t>(choice); m_cmakeCacheUpdate={}; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); } return; }
+            if (!m_moduleCMakeTarget) {
+                if (static_cast<std::size_t>(choice) >= m_moduleCMakeModel.targets.size()) return;
+                m_moduleCMakeTarget = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+            }
+            const auto& target = m_moduleCMakeModel.targets[*m_moduleCMakeTarget];
+            if (static_cast<std::size_t>(choice) >= target.sources.size()) return;
+            const std::filesystem::path source(target.sources[static_cast<std::size_t>(choice)].path);
+            const auto absolute = source.is_absolute() ? source : std::filesystem::path(m_moduleCMakeModel.sourceDirectory) / source;
+            std::error_code ec; const auto canonicalRoot = std::filesystem::weakly_canonical(m_project.root(), ec); if (ec) { setCommandStatus("Cannot resolve project path", true); return; }
+            const auto canonicalSource = std::filesystem::weakly_canonical(absolute, ec); if (ec) { setCommandStatus("Source file is unavailable", true); return; }
+            const auto relative = canonicalSource.lexically_relative(canonicalRoot);
+            if (relative.empty() || relative.is_absolute() || *relative.begin() == "..") { setCommandStatus("Source is outside the project", true); return; }
+            openFile(relative.generic_string(), false); return;
+        }
+        if (m_moduleScanShowingResults) {
+            if (!m_hasProject || m_project.root().generic_string() != m_moduleScanRoot || static_cast<std::size_t>(choice) >= m_moduleScanResults.findings.size()) return;
+            const auto finding = m_moduleScanResults.findings[static_cast<std::size_t>(choice)];
+            std::vector<modules::Module> fresh; std::string error; const auto id=m_modules[m_moduleSelected].id;
+            if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==id && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action=="scan-secrets"; }); })) { setCommandStatus("Module changed; scan again",true); return; }
+            std::string contents;
+            if (finding.contentSha256.empty() || !m_project.readFileBounded(finding.path,contents,error,workspace::Project::maxFileSize) || picosha2::hash256_hex_string(contents)!=finding.contentSha256) { setCommandStatus("File changed since the scan; scan again",true); return; }
+            if (std::any_of(contents.begin(),contents.end(),[](unsigned char c) { return c==0 || (c<32 && c!='\n' && c!='\r' && c!='\t' && c!='\f'); }) || !editor::Document::canEditLosslessly(contents,error)) { setCommandStatus("File contains unsupported or binary text",true); return; }
+            const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc) { return doc.path==finding.path; });
+            if ((m_hasDocument && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty())) { setCommandStatus("Save or resolve open edits before navigating",true); return; }
+            openFile(finding.path, false);
+            if (m_hasDocument && m_filePath == finding.path && m_document.toUtf8()==contents && finding.line<m_document.lineCount()) { m_document.setCursor(finding.line, finding.column); m_followCursor = true; setStatus("Possible " + finding.kind + "; verify the current file", true); }
+            else setCommandStatus("File could not be opened unchanged; scan again",true);
+            return;
+        }
         // Re-read the manifest and enabled state at the time of use.
         std::vector<modules::Module> fresh; std::string error;
         if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
         const auto found = std::find_if(fresh.begin(), fresh.end(), [&current](const auto& m) { return m.id == current.id; });
-        if (found == fresh.end() || !found->enabled || static_cast<std::size_t>(choice) >= found->commands.size() ||
+        if (found == fresh.end() || !found->enabled || found->requirements != current.requirements || static_cast<std::size_t>(choice) >= found->commands.size() ||
             found->commands[static_cast<std::size_t>(choice)].title != current.commands[static_cast<std::size_t>(choice)].title ||
-            found->commands[static_cast<std::size_t>(choice)].insert != current.commands[static_cast<std::size_t>(choice)].insert) {
+            found->commands[static_cast<std::size_t>(choice)].insert != current.commands[static_cast<std::size_t>(choice)].insert ||
+            found->commands[static_cast<std::size_t>(choice)].snippet != current.commands[static_cast<std::size_t>(choice)].snippet ||
+            found->commands[static_cast<std::size_t>(choice)].action != current.commands[static_cast<std::size_t>(choice)].action) {
             setCommandStatus("Module changed or was disabled; reopen Modules", true); return;
         }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "scan-secrets") {
+            if (!m_hasProject) { setCommandStatus("Open a project before scanning", true); return; }
+            if (m_moduleScanFuture.valid()) { setCommandStatus("A scan is still finishing", true); return; }
+            m_moduleScanRoot = m_project.root().generic_string(); m_moduleScanResults = {}; m_moduleScanFilter = 0; m_moduleScanShowingResults = true;
+            m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+            m_moduleScanCancel = std::make_shared<std::atomic_bool>(false);
+            auto project = m_project;
+            m_moduleScanFuture = std::async(std::launch::async, [project, cancel = m_moduleScanCancel]() mutable {
+                bool complete = false; project.refresh(&complete, cancel.get());
+                auto result = modules::scanSecrets(project, cancel.get()); result.incomplete = result.incomplete || !complete; return result;
+            });
+            refreshSuggestions(); setCommandStatus("Scanning saved project files locally… Escape cancels", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "git-file-history" || found->commands[static_cast<std::size_t>(choice)].action == "git-range-history") {
+            if (!m_hasProject || !m_hasDocument) { setCommandStatus("Open a project file first", true); return; }
+            if (m_moduleHistoryFuture.valid()) { setCommandStatus("Git history is still loading", false); return; }
+            const bool rangeHistory = found->commands[static_cast<std::size_t>(choice)].action == "git-range-history";
+            if (rangeHistory && !m_document.hasSelection()) { setCommandStatus("Select the function or lines to trace first", true); return; }
+            m_moduleHistoryRoot = m_project.root().generic_string(); m_moduleHistoryFile = m_filePath;
+            m_moduleHistoryEntries.clear(); m_moduleRangeHistory.clear(); m_moduleHistoryDiff = {}; m_moduleHistoryShowing = true; m_moduleHistoryDiffShowing = false; m_moduleHistoryRange = rangeHistory; m_moduleHistoryRevision = m_document.revision();
+            m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; const auto root = m_project.root(); const auto path = m_filePath;
+            const auto start = m_document.selectionStart(), end = m_document.selectionEnd();
+            const auto first = start.line + 1, last = end.column == 0 && end.line > start.line ? end.line : end.line + 1;
+            const auto source = rangeHistory ? m_document.toUtf8() : std::string{};
+            m_moduleHistoryFuture = std::async(std::launch::async, [root, path, source, first, last, rangeHistory] { ModuleHistoryResult result; try { if (rangeHistory) (void)workspace::gitRangeHistory(root, path, source, first, last, result.ranges, result.error); else (void)workspace::gitFileHistory(root, path, result.entries, result.error, &result.stoppedAtBoundary); } catch (const std::exception& e) { result.error = e.what(); } return result; });
+            refreshSuggestions(); setCommandStatus(rangeHistory ? "Tracing selected lines with Git…" : "Loading file history with Git…", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "coverage-lcov" || found->commands[static_cast<std::size_t>(choice)].action == "coverage-cobertura") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_coverageFuture.valid()) { setCommandStatus("Coverage import is still finishing", false); return; }
+            m_coverageChoosingBaseline = false; m_coverageCobertura = found->commands[static_cast<std::size_t>(choice)].action == "coverage-cobertura";
+            m_coverageRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleCoveragePath);
+            m_searchBar.setQuery(m_coverageCobertura ? "coverage.xml" : "coverage.info"); clearCommandFeedback(); setCommandStatus(m_coverageCobertura ? "Enter a project-relative Cobertura XML report path" : "Enter a project-relative LCOV report path", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "benchmark-comparison") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_benchmarkFuture.valid()) { setCommandStatus("A comparison is still finishing", false); return; }
+            m_benchmarkRoot = m_project.root().generic_string(); m_benchmarkBaseline.clear(); m_benchmarkSelectingCandidate = false;
+            m_searchBar.open(ui::PromptKind::ModuleBenchmarkPath); clearCommandFeedback(); setCommandStatus("Enter the baseline report path", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "binary-inspector") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_binaryFuture.valid()) { setCommandStatus("An inspection is still finishing", false); return; }
+            m_binaryRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleBinaryPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative binary path (up to 128 MiB)", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "compare-localization") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_localizationFuture.valid()) { setCommandStatus("A comparison is still finishing", false); return; }
+            m_localizationRoot = m_project.root().generic_string(); m_localizationSource.clear(); m_localizationSelectingTranslation = false;
+            m_searchBar.open(ui::PromptKind::ModuleLocalizationPath); clearCommandFeedback(); setCommandStatus("Enter the source JSON path", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "design-token-explorer") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_designTokenFuture.valid()) { setCommandStatus("A token inspection is still finishing", false); return; }
+            m_designTokenRoot = m_project.root().generic_string(); m_designTokenModule=current.id; m_searchBar.open(ui::PromptKind::ModuleDesignTokensPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative CSS or JSON file", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "log-correlation" || found->commands[static_cast<std::size_t>(choice)].action == "log-correlation-json") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_logFuture.valid()) { setCommandStatus("A log comparison is still finishing", false); return; }
+            m_logRoot = m_project.root().generic_string(); m_logModule=current.id; m_logJson=found->commands[static_cast<std::size_t>(choice)].action=="log-correlation-json"; m_logPaths.clear(); m_logInputStage = 0;
+            m_searchBar.open(ui::PromptKind::ModuleLogsInput); clearCommandFeedback(); setCommandStatus("Enter a project-relative log path; add up to 8", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "browse-python-environments" || found->commands[static_cast<std::size_t>(choice)].action == "manage-python-environments" || found->commands[static_cast<std::size_t>(choice)].action == "install-python-pylsp") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_pythonDiscoveryFuture.valid() || m_pythonRuntimeFuture.valid() || m_pythonProvisionFuture.valid()) { setCommandStatus("A Python operation is still finishing", false); return; }
+            m_pythonManage = found->commands[static_cast<std::size_t>(choice)].action != "browse-python-environments";
+            m_pythonRoot = m_project.root().generic_string(); m_pythonEnvironments.clear(); m_pythonUnlistedInterpreter.clear(); m_pythonPreferenceReady = false; m_pythonSelected.reset(); m_pythonProvisionBootstrap.reset(); m_pythonShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+            const auto root = m_project.root(); const auto settings = std::filesystem::path(m_settingsRoot); const bool manage = m_pythonManage;
+            m_pythonDiscoveryFuture = std::async(std::launch::async, [root, settings, manage] { PythonDiscoveryResult result; try { result.environments = modules::discoverPythonEnvironments(modules::defaultPythonEnvironmentSearch(root)); if (manage && !modules::loadPythonPreference(settings, root, result.preference, result.preferenceError) && result.preferenceError.empty()) result.preferenceError = "Preference unavailable"; } catch (const std::exception& e) { result.error = e.what(); } return result; });
+            refreshSuggestions(); setCommandStatus("Looking in project, user environment and PATH directories…", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "run-ctest") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_ctestDiscoveryFuture.valid() || m_ctestRunFuture.valid()) { setCommandStatus("A CTest operation is still finishing", false); return; }
+            m_ctestRoot = m_project.root().generic_string(); m_ctestInputStage = 0; m_searchBar.open(ui::PromptKind::ModuleCTestInput); m_searchBar.setQuery("build"); clearCommandFeedback(); setCommandStatus("Enter an existing project-relative CMake build directory", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "hex-editor") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_hexFuture.valid()) { setCommandStatus("A binary operation is still running", false); return; }
+            const auto root = m_project.root().generic_string();
+            if (m_hexFile && root != m_hexRoot && m_hexFile->buffer().bytes() != m_hexBaseline) { setCommandStatus("Return to the original project to save or discard binary edits", true); return; }
+            if (m_hexFile && root == m_hexRoot) { m_hexShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            m_hexFile.reset(); m_hexBaseline.clear(); m_hexRoot = root; m_searchBar.open(ui::PromptKind::ModuleHexPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative binary file (up to 16 MiB)", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "identify-usb-boards") {
+            if(!m_hasProject) {setCommandStatus("Open a project first",true);return;} if(m_usbBoardFuture.valid()) {setCommandStatus("USB discovery is still finishing",false);return;}
+            m_usbBoardInput=true; m_usbBoardRoot=m_project.root().generic_string(); m_usbBoardModule=current.id; m_searchBar.open(ui::PromptKind::ModuleToolchainPath); clearCommandFeedback(); setCommandStatus("Enter project-relative USB board mappings JSON",false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "inspect-toolchain-profiles") {
+            if (!m_hasProject) { setCommandStatus("Open a project first",true); return; }
+            if (m_toolchainFuture.valid() || m_toolchainSaveFuture.valid() || m_targetConfigureFuture.valid()) { setCommandStatus("A target operation is still finishing",false); return; }
+            m_targetConfigureStage=0; m_usbBoardInput=false; m_toolchainRoot=m_project.root().generic_string(); m_toolchainModule=current.id; m_searchBar.open(ui::PromptKind::ModuleToolchainPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative toolchain profiles JSON path",false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "inspect-svd-registers") {
+            if (m_svdFuture.valid()) {setCommandStatus("An SVD read is still finishing",false);return;}
+            m_svdInput=true; m_linkerRoot=m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleLinkerPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative CMSIS-SVD file",false);return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "review-linker-map") {
+            m_svdInput=false;
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_linkerFuture.valid()) { setCommandStatus("A linker-map read is still finishing", false); return; }
+            m_linkerRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleLinkerPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative GNU ld map file", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "crash-dump-reader") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_crashFuture.valid()) { setCommandStatus("A crash inspection is still finishing", false); return; }
+            m_crashMapInput = false; m_crashRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleCrashPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative minidump or supported GDB text", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "run-rust-ownership") {
+            if(!m_hasProject){setCommandStatus("Open a Rust project first",true);return;}if(m_rustRunFuture.valid() || m_rustOwnershipFuture.valid()){setCommandStatus("A Rust operation is still finishing",false);return;}
+            m_rustOwnershipRoot=m_project.root().generic_string();m_rustRunModule=current.id;m_rustRunStage=1;m_rustOwnershipDiagnostics.clear();m_rustOwnershipSelected.reset();m_searchBar.open(ui::PromptKind::ModuleRustPath);clearCommandFeedback();setCommandStatus("Enter absolute Cargo executable path",false);return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "review-rust-ownership") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_rustOwnershipFuture.valid()) { setCommandStatus("A Rust diagnostic read is still finishing", false); return; }
+            m_rustRunStage=0; m_rustOwnershipRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleRustPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative rustc or Cargo JSON diagnostics file", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "fetch-pull-request") {
+            if (m_pullRequestFuture.valid() || m_pullCommentFuture.valid()) { setCommandStatus("A pull request operation is still finishing", false); return; }
+            m_pullRequestModule = current.id; m_searchBar.open(ui::PromptKind::ModulePullRequestUrl); clearCommandFeedback(); setCommandStatus("Enter a GitHub pull request URL", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "serial-monitor" || found->commands[static_cast<std::size_t>(choice)].action == "board-profile" || found->commands[static_cast<std::size_t>(choice)].action == "flash-firmware") {
+            if (m_serialFuture.valid() || m_serialScanFuture.valid() || m_flashPrepareFuture.valid() || m_flashFuture.valid()) { setCommandStatus("A device operation is still finishing", false); return; }
+            m_serialModule = current.id; m_serialShowing = true; m_serialResult = {}; m_serialScan = {}; m_serialStage = 0; m_serialGeneration = m_searchBar.generation(); m_modulePage = 0; m_selectedSuggestion = -1;
+            if (found->commands[static_cast<std::size_t>(choice)].action == "flash-firmware") {
+                if (!m_hasProject || !m_hasDocument) { m_serialShowing = false; setCommandStatus("Open a project and OpenOCD profile first", true); return; }
+                const auto profile = modules::parseBoardProfile(m_document.toUtf8());
+                if (!profile.error.empty() || profile.incomplete || !profile.warnings.empty()) { m_serialShowing = false; setCommandStatus("Profile has unsupported or invalid directives; inspect it first", true); return; }
+                m_flashRoot = m_project.root().generic_string(); m_flashFile = m_filePath; m_flashRevision = m_document.revision(); m_flashGeneration = m_searchBar.generation();
+                m_flashSnapshot = {}; m_flashResult = {}; m_flashExecutable.clear();
+                auto extension=std::filesystem::path(profile.firmware).extension().string(); std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+                if (extension==".bin") {
+                    if (std::find(found->requirements.begin(),found->requirements.end(),"openocd-bin-v1")==found->requirements.end()) {m_serialShowing=false;setCommandStatus("Module does not support raw BIN flashing",true);return;}
+                    m_serialStage=12; m_searchBar.open(ui::PromptKind::ModuleFlashExecutable); clearCommandFeedback(); setCommandStatus("Enter the raw BIN flash address; no default is assumed",false);return;
+                }
+                m_flashCancel = std::make_shared<std::atomic_bool>(false); m_serialStage = 5;
+                const auto project = m_project;
+                m_flashPrepareFuture = std::async(std::launch::async, [project, profile, cancel = m_flashCancel] { FlashPrepareResult result; (void)modules::prepareFirmware(project, profile, result.snapshot, result.error, cancel.get()); return result; });
+                refreshSuggestions(); setCommandStatus("Reading a firmware snapshot; no hardware is accessed", false); return;
+            }
+            if (found->commands[static_cast<std::size_t>(choice)].action == "board-profile") {
+                if (!m_hasDocument) { m_serialShowing = false; setCommandStatus("Open an OpenOCD profile first", true); return; }
+                m_boardProfile = modules::parseBoardProfile(m_document.toUtf8());
+                if (!m_boardProfile.error.empty()) { m_serialShowing = false; setCommandStatus(m_boardProfile.error, true); return; }
+                m_serialStage = 4; refreshSuggestions(); setCommandStatus("Profile inspected locally; unsupported directives are not executed", false); return;
+            }
+            m_serialScanFuture = std::async(std::launch::async, [] { return modules::discoverSerialDevices(); }); refreshSuggestions(); setCommandStatus("Finding serial devices; none will be opened yet", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "web-preview") {
+#if defined(__APPLE__)
+            if (!m_hasProject || !m_hasDocument) { setCommandStatus("Open a project and a preview configuration JSON file", true); return; }
+            if (m_webBundleFuture.valid()) { setCommandStatus("A preview is still finishing", false); return; }
+            m_webRoot = m_project.root().generic_string(); m_webFile = m_filePath; m_webRevision = m_document.revision(); m_webModule = current.id;
+            m_webShowing = true; m_webStarted = false; m_webReady = false; m_webError.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus("Review trust notice before rendering", false); return;
+#else
+            setCommandStatus("Web preview is currently available on macOS only", true); return;
+#endif
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "compile-shader") {
+            if (!m_hasProject || !m_hasDocument) { setCommandStatus("Open a shader inside a project first", true); return; }
+            if (m_document.toUtf8() != m_diskContents) { setCommandStatus("Save the shader before compiling", true); return; }
+            if (m_shaderFuture.valid()) { setCommandStatus("A shader compilation is still finishing", false); return; }
+            const auto extension = std::filesystem::path(m_filePath).extension().string();
+            const auto stage = extension.size() > 1 ? extension.substr(1) : std::string{};
+            if (stage != "vert" && stage != "frag" && stage != "geom" && stage != "tesc" && stage != "tese" && stage != "comp") { setCommandStatus("Open a .vert, .frag, .geom, .tesc, .tese or .comp shader", true); return; }
+            m_shaderRoot = m_project.root().generic_string(); m_shaderFile = m_filePath; m_shaderStage = stage; m_shaderRevision = m_document.revision(); m_shaderModule = current.id;
+            m_searchBar.open(ui::PromptKind::ModuleShaderCompiler); clearCommandFeedback(); setCommandStatus("Enter the absolute glslangValidator executable path", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "configured-container-actions") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_containerFuture.valid() || m_containerActionPrepareFuture.valid()) { setCommandStatus("A container operation is still finishing", false); return; }
+            m_containerActionMode = true; m_containerProjectRoot = m_project.root().generic_string(); m_containerModule = current.id; m_searchBar.open(ui::PromptKind::ModuleContainerPath); clearCommandFeedback(); setCommandStatus("Enter the absolute Docker or Podman executable path", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "inspect-containers") {
+            if (m_containerFuture.valid()) { setCommandStatus("A container operation is still finishing", false); return; }
+            m_containerActionMode = false; m_containerModule = current.id; m_searchBar.open(ui::PromptKind::ModuleContainerPath); clearCommandFeedback(); setCommandStatus("Enter the absolute Docker or Podman executable path", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "review-dependency-risk") {
+            if (!m_hasDocument) { setCommandStatus("Open package-lock.json, go.sum or Cargo.lock first", true); return; }
+            const auto filename = std::filesystem::path(m_filePath).filename();
+            const bool isGo = filename == "go.sum", isCargo = filename == "Cargo.lock";
+            if (!isGo && !isCargo && filename != "package-lock.json") { setCommandStatus("Open package-lock.json, go.sum or Cargo.lock first", true); return; }
+            if (isGo && std::find(found->requirements.begin(), found->requirements.end(), "dependency-risk-go-v1") == found->requirements.end()) { setCommandStatus("Update this module to review Go checksums", true); return; }
+            if (isCargo && std::find(found->requirements.begin(), found->requirements.end(), "dependency-risk-cargo-v1") == found->requirements.end()) { setCommandStatus("Update this module to review Cargo.lock", true); return; }
+            if (m_dependencyFuture.valid() || m_dependencyDetailFuture.valid()) { setCommandStatus("A dependency review is still finishing", false); return; }
+            const auto source = m_document.toUtf8(); if (source.size() > 8U * 1024U * 1024U) { setCommandStatus("Lockfile exceeds 8 MiB", true); return; }
+            m_dependencyDocumentSnapshot = source; m_dependencyArtifactStage = 0; m_dependencyArtifactResult = {}; m_dependencyFile = m_filePath; m_dependencyRevision = m_document.revision(); m_dependencyGeneration = m_searchBar.generation(); m_dependencyModule = current.id;
+            m_dependencyProvenanceShowing = false; m_dependencyProvenanceSelected.reset(); m_dependencyShowing = true; m_dependencyReady = false; m_dependencyQuerying = false; m_dependencyQueried = false; m_dependencyReport = {}; m_dependencyDetail = {}; m_dependencyIds.clear(); m_dependencySelectedId.clear(); m_dependencyDetailReady = false; m_dependencyError.clear(); m_dependencyCancel = std::make_shared<std::atomic_bool>(false);
+            m_dependencyFuture = std::async(std::launch::async, [source, isGo, isCargo] { DependencyResult result; if (isGo) (void)modules::parseGoSumDependencyRisk(source, result.report, result.error); else if (isCargo) (void)modules::parseCargoDependencyRisk(source, result.report, result.error); else (void)modules::parseNpmDependencyRisk(source, result.report, result.error); return result; });
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Reading lockfile locally…", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "compare-visual-images" || found->commands[static_cast<std::size_t>(choice)].action == "compare-visual-configured") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_visualFuture.valid() || m_visualApprovalFuture.valid()) { setCommandStatus("Visual review is still finishing", false); return; }
+            m_visualRoot = m_project.root().generic_string(); m_visualModule = current.id; m_visualBaseline.clear(); m_visualConfigPath.clear();
+            m_visualConfigured = found->commands[static_cast<std::size_t>(choice)].action == "compare-visual-configured";
+            m_searchBar.open(ui::PromptKind::ModuleVisualPath); clearCommandFeedback(); setCommandStatus(m_visualConfigured ? "Enter a project-relative visual configuration JSON path" : "Enter the baseline PNG path", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "edit-api-collection") {
+            if (!m_hasDocument) { setCommandStatus("Open an API collection JSON document first", true); return; }
+            const auto source = m_document.toUtf8(); std::vector<std::string> names; std::string error;
+            if (!modules::listApiRequestTemplates(source, names, error)) { setCommandStatus(error, true); return; }
+            m_apiEditBaseline = source; m_apiEditNames = std::move(names); m_apiEditSelected.reset(); m_apiEditConfirm = false; m_apiEditMode = true; m_apiShowing = true; m_apiFile = m_filePath; m_apiRevision = m_document.revision(); m_apiModule = current.id;
+            m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; refreshSuggestions(); setCommandStatus("Edit templates in the open document; no request is sent", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "open-api-environment") {
+            if (!m_hasProject || !m_hasDocument) { setCommandStatus("Open a project and API collection JSON first", true); return; }
+            if (m_apiFuture.valid()) { setCommandStatus("A request is still finishing", false); return; }
+            m_apiEditMode = false; m_apiEditNames.clear(); m_apiEditBaseline.clear(); m_apiRoot = m_project.root().generic_string(); m_apiFile = m_filePath; m_apiRevision = m_document.revision(); m_apiModule = current.id; m_apiProfileMode = true;
+            m_apiEnvironments.clear(); m_apiRequests.clear(); m_searchBar.open(ui::PromptKind::ModuleApiEnvironmentPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative environment file; values are plaintext", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "open-api-requests") {
+            if (!m_hasDocument) { setCommandStatus("Open an API collection JSON file first", true); return; }
+            if (m_apiFuture.valid()) { setCommandStatus("A request is still finishing", false); return; }
+            const auto source = m_document.toUtf8(); if (source.size() > 1024U * 1024U) { setCommandStatus("API collection exceeds 1 MiB", true); return; } editor::JsonError parseError; auto root = editor::parseJson(source, parseError);
+            std::map<std::string, std::string> variables;
+            if (root && root->type == editor::JsonType::Object) if (const auto* values = root->find("variables")) {
+                if (values->type != editor::JsonType::Object || values->children.size() > 100) { setCommandStatus("Variables must be a JSON object with at most 100 string values", true); return; }
+                for (const auto& item : values->children) if (item.type != editor::JsonType::String || !variables.emplace(item.key, item.stringValue).second) { setCommandStatus("Variables must have unique names and string values", true); return; }
+            }
+            std::string error; std::vector<modules::ApiRequest> requests;
+            if (!modules::parseApiRequests(source, variables, requests, error) || requests.empty()) { setCommandStatus(error.empty() ? "No requests in this collection" : error, true); return; }
+            for (const auto& request : requests) {
+                const auto start = request.url.find("://") + 3;
+                const auto end = request.url.find_first_of("/?#", start);
+                if (request.url.substr(start, end - start).find('@') != std::string::npos) { setCommandStatus("Credentials in URL authority are not supported", true); return; }
+            }
+            m_apiRequests = std::move(requests); m_apiFile = m_filePath; m_apiRevision = m_document.revision(); m_apiModule = current.id; m_apiRoot = m_hasProject ? m_project.root().generic_string() : std::string{};
+            m_apiEditMode = false; m_apiEditNames.clear(); m_apiEditBaseline.clear(); m_apiAssertionStage=0; m_apiAssertions={}; m_apiProfileMode = false; m_apiChoosingEnvironment = false; m_apiEnvironments.clear(); m_apiSelected.reset(); m_apiResponse = {}; m_apiShowing = true; m_apiConfirmed = false; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+            refreshSuggestions(); setCommandStatus("Choose a request; nothing is sent until you confirm", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "sql-change-bound" || found->commands[static_cast<std::size_t>(choice)].action == "sql-change-preview" || found->commands[static_cast<std::size_t>(choice)].action == "sql-query" || found->commands[static_cast<std::size_t>(choice)].action == "sql-explain" || found->commands[static_cast<std::size_t>(choice)].action == "sql-query-bound" || found->commands[static_cast<std::size_t>(choice)].action == "sql-explain-bound") {
+            if (!m_hasProject || !m_hasDocument) { setCommandStatus("Open a project and an SQL document first", true); return; }
+            if (m_sqlFuture.valid()) { setCommandStatus("A query is still finishing", false); return; }
+            m_sqlQuery = m_document.hasSelection() ? m_document.selectionUtf8() : m_document.toUtf8();
+            if (m_sqlQuery.empty() || m_sqlQuery.size() > 1024U * 1024U) { setCommandStatus("Select or open one SQL statement of at most 1 MiB", true); return; }
+            m_sqlRoot = m_project.root().generic_string(); m_sqlFile = m_filePath; m_sqlRevision = m_document.revision(); m_sqlModule = current.id;
+            const auto& sqlAction = found->commands[static_cast<std::size_t>(choice)].action;
+            m_sqlChangeMode = sqlAction == "sql-change-preview" || sqlAction == "sql-change-bound"; m_sqlChangeStage=0; m_sqlChange={}; m_sqlChangeBindingsSnapshot.reset(); m_sqlChangeBindingsPath.clear();
+            m_sqlExplain = sqlAction == "sql-explain" || sqlAction == "sql-explain-bound"; m_sqlBound = sqlAction == "sql-query-bound" || sqlAction == "sql-explain-bound" || sqlAction == "sql-change-bound"; m_sqlDatabase.clear();
+            m_searchBar.open(ui::PromptKind::ModuleSqlPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative standalone SQLite database (read-only snapshot)", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "release-note-builder") {
+            if (!m_hasProject || !m_hasDocument) { setCommandStatus("Open a project and a Markdown document first", true); return; }
+            auto extension = std::filesystem::path(m_filePath).extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (extension != ".md" && extension != ".markdown") { setCommandStatus("Open a Markdown document for the draft", true); return; }
+            if (m_document.hasSelection()) { setCommandStatus("Clear the selection before building release notes", true); return; }
+            if (m_releaseNotesFuture.valid()) { setCommandStatus("A release-note read is still finishing", false); return; }
+            m_releaseNotesRoot = m_project.root().generic_string(); m_releaseNotesFile = m_filePath; m_releaseNotesRevision = m_document.revision(); m_releaseNotesModule = current.id;
+            m_releaseNotesGeneration = m_searchBar.generation(); m_releaseNotesEntries.clear(); m_releaseNotesDraft={}; m_releaseNotesPreview=false; m_releaseNotesFilter=0; m_releaseNotesShowing = true; m_modulePage = 0; m_selectedSuggestion = -1;
+            const auto project = m_project;
+            m_releaseNotesFuture = std::async(std::launch::async, [project] {
+                ReleaseNotesResult result;
+                try {
+                    workspace::TaskBoard board; std::string taskError;
+                    if (workspace::loadTasks(project, board, taskError)) {
+                        for (const auto& task : board.tasks) {
+                            if (result.entries.size() >= 1000) { result.warning = "Task list limited to 1000 entries"; break; }
+                            std::string textError;
+                            if (task.title.size() > 4096 || !editor::Document::canEditLosslessly(task.title, textError)) continue;
+                            result.entries.push_back({task.title, {}, "task " + task.id, task.done ? "changes" : "other", false});
+                        }
+                    } else result.warning = "Tasks could not be loaded: " + taskError;
+                    std::vector<workspace::GitHistoryEntry> commits; std::string gitError;
+                    if (workspace::gitHistory(project.root(), commits, gitError)) {
+                        for (const auto& commit : commits) {
+                            std::string textError;
+                            if (commit.subject.empty() || commit.subject.size() > 4096 || !editor::Document::canEditLosslessly(commit.subject, textError)) continue;
+                            const auto category = commit.subject.starts_with("feat:") || commit.subject.starts_with("feat(") ? "features" : commit.subject.starts_with("fix:") || commit.subject.starts_with("fix(") ? "fixes" : "changes";
+                            result.entries.push_back({commit.subject, {}, commit.hash, category, false});
+                        }
+                    } else { if (!result.warning.empty()) result.warning += "; "; result.warning += "Git history unavailable: " + gitError; }
+                } catch (const std::exception& e) { result.warning = e.what(); }
+                return result;
+            });
+            refreshSuggestions(); setCommandStatus("Loading saved tasks and up to 50 Git commits…", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "diagram-preview") {
+            if (!m_hasDocument) { setCommandStatus("Open a Mermaid diagram file first", true); return; }
+            if (m_diagramPreviewFuture.valid()) { setCommandStatus("A diagram preview is still loading", false); return; }
+            auto extension = std::filesystem::path(m_filePath).extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (extension != ".mmd" && extension != ".mermaid") { setCommandStatus("Open a .mmd or .mermaid file first", true); return; }
+            const auto source = m_document.toUtf8(); m_diagramPreviewFile = m_filePath; m_diagramPreviewRevision = m_document.revision();
+            m_diagramPreviewPromptGeneration = m_searchBar.generation(); m_diagramPreviewModule = found->id;
+            m_diagramPreviewCancel=std::make_shared<std::atomic_bool>(false);
+            m_diagramPreviewFuture = std::async(std::launch::async, [source,cancel=m_diagramPreviewCancel] {
+                DiagramPreviewResult result; modules::DiagramGraph graph;
+                try {
+                    if (modules::parseMermaidFlowchart(source, graph, result.error,cancel.get())) {
+                        if (graph.nodes.empty() || graph.nodes.size() > 24 || graph.edges.size() > 48) result.error = "Preview supports 1–24 nodes and up to 48 edges";
+                        else {
+                            for (const auto& node : graph.nodes) {
+                                std::string textError;
+                                if (node.label.size() > 200 || !editor::Document::canEditLosslessly(node.label, textError)) {
+                                    result.error = "Diagram labels must be valid text of at most 200 bytes";
+                                    break;
+                                }
+                            }
+                            if (result.error.empty()) (void)modules::layoutMermaidFlowchart(graph, result.layout, result.error,cancel.get());
+                        }
+                    }
+                } catch (const std::exception& e) { result.error = e.what(); }
+                return result;
+            });
+            setCommandStatus("Laying out the diagram locally…", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "accessibility-audit") {
+            if (!m_hasDocument) { setCommandStatus("Open an HTML file first", true); return; }
+            if (m_accessibilityFuture.valid()) { setCommandStatus("An accessibility audit is still finishing", false); return; }
+            auto extension = std::filesystem::path(m_filePath).extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (extension != ".html" && extension != ".htm") { setCommandStatus("Open an .html or .htm file first", true); return; }
+            const auto source = m_document.toUtf8(); m_accessibilityFile = m_filePath; m_accessibilityRevision = m_document.revision();
+            m_accessibilityPromptGeneration = m_searchBar.generation(); m_accessibilityModule = found->id;
+            m_accessibilityAudit = {}; m_accessibilityAudit.limitation = "Static checks only; no rendered page, CSS, scripts or accessibility tree.";
+            m_accessibilityShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+            m_accessibilityFuture = std::async(std::launch::async, [source] { return modules::auditHtml(source); });
+            refreshSuggestions(); setCommandStatus("Checking HTML locally…", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "markdown-outline" || found->commands[static_cast<std::size_t>(choice)].action == "markdown-preview" || found->commands[static_cast<std::size_t>(choice)].action == "markdown-local-links" || found->commands[static_cast<std::size_t>(choice)].action == "markdown-external-links") {
+            if (!m_hasDocument) { setCommandStatus("Open a Markdown file first", true); return; }
+            auto extension = std::filesystem::path(m_filePath).extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (extension != ".md" && extension != ".markdown" && extension != ".mdown") { setCommandStatus("Open a Markdown file first", true); return; }
+            if (found->commands[static_cast<std::size_t>(choice)].action == "markdown-local-links" || found->commands[static_cast<std::size_t>(choice)].action == "markdown-external-links") {
+                if (!m_hasProject) { setCommandStatus("Open a project to check local links", true); return; }
+                if (m_markdownLinksFuture.valid()) { setCommandStatus("The previous link check is still finishing", false); return; }
+                m_moduleMarkdownFile = m_filePath; m_moduleMarkdownRevision = m_document.revision(); m_markdownLinksRoot = m_project.root().generic_string();
+                m_markdownExternalMode = found->commands[static_cast<std::size_t>(choice)].action == "markdown-external-links"; m_markdownExternalSelected.reset(); m_markdownExternalGeneration = m_searchBar.generation(); m_markdownExternalModule = found->id;
+                m_markdownLinksResults = {}; m_markdownLinksFilter = 0; m_markdownLinksShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+                m_markdownLinksCancel = std::make_shared<std::atomic_bool>(false); auto project = m_project; const auto path = m_filePath; const auto source = m_document.toUtf8();
+                m_markdownLinksFuture = std::async(std::launch::async, [project, path, source, cancel = m_markdownLinksCancel] { return modules::checkMarkdownLinks(project, path, source, cancel.get()); });
+                refreshSuggestions(); setCommandStatus("Checking local links; external links are not fetched", false); return;
+            }
+            if (found->commands[static_cast<std::size_t>(choice)].action == "markdown-preview") {
+                if (m_markdownPreviewFuture.valid()) { setCommandStatus("Markdown preview is still loading", false); return; }
+                m_moduleMarkdownFile = m_filePath; m_moduleMarkdownRevision = m_document.revision(); m_markdownPreviewLines.clear(); m_markdownPreviewShowing = true;
+                m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+                const auto source = m_document.toUtf8();
+                m_markdownPreviewFuture = std::async(std::launch::async, [source] { MarkdownPreviewResult result; try { (void)modules::parseMarkdownPreview(source, result.preview, result.error); } catch (const std::exception& e) { result.error = e.what(); } return result; });
+                refreshSuggestions(); setCommandStatus("Rendering Markdown preview…", false); return;
+            }
+            m_moduleMarkdownOutline = modules::markdownOutline(m_document); m_moduleMarkdownShowing = true;
+            m_moduleMarkdownFile = m_filePath; m_moduleMarkdownRevision = m_document.revision();
+            m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; refreshSuggestions();
+            setCommandStatus(m_moduleMarkdownOutline.headings.empty() ? "No supported headings found" : m_moduleMarkdownOutline.truncated ? "Outline incomplete or limited to 1000 headings" : "Select a heading to navigate", m_moduleMarkdownOutline.truncated); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "browse-cmake" || found->commands[static_cast<std::size_t>(choice)].action == "prepare-cmake-query" || found->commands[static_cast<std::size_t>(choice)].action == "edit-cmake-options") {
+            if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
+            if (m_moduleCMakeFuture.valid()) { setCommandStatus("CMake metadata is still loading", false); return; }
+            m_moduleCMakeRoot = m_project.root().generic_string(); m_moduleCMakePrepare = found->commands[static_cast<std::size_t>(choice)].action == "prepare-cmake-query"; m_moduleCMakeEditing = found->commands[static_cast<std::size_t>(choice)].action == "edit-cmake-options";
+            m_searchBar.open(ui::PromptKind::ModuleCMakePath); m_searchBar.setQuery(m_moduleCMakeBuild); clearCommandFeedback();
+            setCommandStatus(m_moduleCMakePrepare ? "Enter creates a CMake query; reconfigure afterwards" : "Choose a project-relative build directory; Enter browses", false); return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "explain-diagnostic-local") {
+            if (!m_hasDocument || m_activeDiagnosticMessage.empty()) { setCommandStatus("Select a diagnostic in an open file first", true); return; }
+            if (m_aiFuture.valid()) { setCommandStatus("An AI request is still running", true); return; }
+            const auto diagnostic = m_activeDiagnosticMessage;
+            openAiPrompt();
+            if (m_searchBar.kind() == ui::PromptKind::Ai) {
+                m_aiDebugExplanation = true; m_aiDebugOpenRouter = false;
+                auto count = std::min<std::size_t>(diagnostic.size(), 2048);
+                while (count > 0 && count < diagnostic.size() && (static_cast<unsigned char>(diagnostic[count]) & 0xc0U) == 0x80U) --count;
+                m_aiDebugContext = "Diagnostic (untrusted compiler output): " + diagnostic.substr(0, count);
+                m_searchBar.setQuery("Explain this diagnostic clearly and suggest how to investigate it. State uncertainty.");
+                setCommandStatus("Local model sees the diagnostic; first use may download it. Enter explains", false);
+            }
+            return;
+        }
+        if (found->commands[static_cast<std::size_t>(choice)].action == "explain-debug-local") {
+            if (m_debugSession.state() != debug::State::Stopped && m_debugSession.state() != debug::State::Failed) { setCommandStatus("Pause the debugger or select a debugger error first", true); return; }
+            if (m_aiFuture.valid()) { setCommandStatus("An AI request is still running", true); return; }
+            auto context = debugExplanationContext(m_debugSession);
+            openAiPrompt();
+            if (m_searchBar.kind() == ui::PromptKind::Ai) {
+                m_aiDebugExplanation = true; m_aiDebugOpenRouter = false; m_aiDebugContext = std::move(context);
+                m_searchBar.setQuery("Explain this debugger state or error in at most three sentences. Suggest one next step and state uncertainty.");
+                setCommandStatus("Local model sees debugger state and variables; first use may download it. Enter explains", false);
+            }
+            return;
+        }
         if (!m_hasDocument) { setCommandStatus("Open a file before inserting text", true); return; }
-        m_document.pasteUtf8(found->commands[static_cast<std::size_t>(choice)].insert);
-        m_searchBar.close(); m_followCursor = true; setStatus("Inserted text from " + current.name, false); return;
+        modules::ExpandedSnippet expanded;
+        const auto& command = found->commands[static_cast<std::size_t>(choice)];
+        const bool multiple = std::find(found->requirements.begin(), found->requirements.end(), "snippet-placeholders-v2") != found->requirements.end();
+        const bool placeholders = multiple || std::find(found->requirements.begin(), found->requirements.end(), "snippet-placeholder-v1") != found->requirements.end();
+        if (command.snippet && !modules::expandSnippet(command.insert, m_document.selectionUtf8(), expanded, error, placeholders, multiple)) {
+            setCommandStatus(error, true); return;
+        }
+        if (!command.snippet) expanded.text = command.insert;
+        if (expanded.text.empty()) {
+            setCommandStatus(error.empty() ? "Snippet expands to empty text" : error, true); return;
+        }
+        const auto start = m_document.hasSelection() ? m_document.selectionStart() : editor::TextPosition{m_document.cursorLine(), m_document.cursorColumn()};
+        const auto before = multiple && !expanded.fields.empty() ? m_document.toUtf8() : std::string{};
+        const auto insertionOffset = before.empty() ? 0 : snippetByteOffset(before, start);
+        m_snippetSession.reset();
+        m_document.pasteUtf8(expanded.text);
+        if (expanded.hasCursor || expanded.hasPlaceholder) {
+            m_document.setCursor(start.line + expanded.cursorLine, expanded.cursorLine ? expanded.cursorColumn : start.column + expanded.cursorColumn);
+            if (expanded.hasPlaceholder) m_document.extendSelectionTo(start.line + expanded.endLine,
+                expanded.endLine ? expanded.endColumn : start.column + expanded.endColumn);
+        }
+        if (multiple && !expanded.fields.empty()) {
+            auto snapshot = m_document.toUtf8();
+            if (snapshot.size() <= 16U * 1024U * 1024U) {
+                for (auto& field : expanded.fields) { field.start += insertionOffset; field.end += insertionOffset; }
+                m_snippetSession = SnippetSession{m_filePath, m_hasProject ? m_project.root().generic_string() : std::string{}, std::move(snapshot), std::move(expanded.fields), 0, insertionOffset + expanded.finalOffset, expanded.finalFieldIndex};
+            }
+        }
+        m_searchBar.close(); m_followCursor = true;
+        setStatus(m_snippetSession ? "Snippet field 1/" + std::to_string(m_snippetSession->fields.size()) + " · Tab next · Shift+Tab previous · Escape ends" : "Inserted text from " + current.name, false); return;
     }
-    if (choice == 1) { m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleCommands); clearCommandFeedback(); refreshSuggestions(); return; }
+    if (choice == 1) {
+        if (m_sqlChangeSaveFuture.valid()) { if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); setCommandStatus("Cancelling database copy; it may already have been created",true); return; }
+        if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); m_sqlChange = {}; m_sqlRowShowing=false; m_sqlRowDiff={}; m_sqlChangeBindingsSnapshot.reset(); m_sqlChangeBindingsPath.clear(); m_sqlChangeStage = 0; m_sqlChangeMode = false;
+#if defined(__APPLE__)
+        if (m_webRenderer) m_webRenderer->cancel();
+#elif defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+        if (m_windowsWebPresentation) { m_windowsWebPresentation->cancel(); }
+                m_webPresentationActive = false;
+#endif
+        m_webShowing = false; m_webReady = false; m_modulePage = 0; if (m_serialCancel) m_serialCancel->store(true); m_serialShowing = false; m_usbBoardShowing = false; m_usbBoardMappings = {}; m_shaderShowing = false; m_pullRequestShowing = false; m_containerShowing = false; m_visualShowing = false; m_dependencyShowing = false; if (m_apiAssertionCancel) m_apiAssertionCancel->store(true); m_apiAssertionStage=0; m_apiAssertions={}; m_apiShowing = false; m_apiEditMode = false; m_apiEditNames.clear(); m_apiEditBaseline.clear(); m_apiChoosingEnvironment = false; m_apiEnvironments.clear(); m_apiRequests.clear(); if (m_sqlSchemaCancel) m_sqlSchemaCancel->store(true); m_sqlSchemaShowing=false; m_sqlSchemaSelected.reset(); m_sqlSnapshot.reset(); m_sqlShowing = false; m_releaseNotesShowing = false; m_accessibilityShowing = false; if(m_rustRunCancel)m_rustRunCancel->store(true); m_rustOwnershipShowing = false; m_crashShowing = false; if(m_targetConfigureCancel) m_targetConfigureCancel->store(true); m_toolchainShowing = false; m_toolchainProfiles.clear(); m_linkerShowing = false; m_svdShowing = false; if (m_svdCancel) m_svdCancel->store(true); m_hexShowing = false; m_ctestShowing = false; m_pythonShowing = false; m_logShowing = false; m_logSnapshots.clear(); m_designTokenShowing = false; m_localizationShowing = false; m_binaryShowing = false; m_binarySnapshot.reset(); if (m_binaryCancel) m_binaryCancel->store(true); m_benchmarkShowing = false; m_moduleHistoryShowing = false; m_coverageShowing = false; m_markdownLinksShowing = false; if (m_markdownExternalCancel) m_markdownExternalCancel->store(true); m_markdownExternalSelected.reset(); m_markdownPreviewShowing = false; m_moduleMarkdownShowing = false; if(m_cmakeBuildCancel)m_cmakeBuildCancel->store(true); m_moduleCMakeShowing = false; m_moduleScanShowingResults = false; m_searchBar.open(ui::PromptKind::ModuleCommands); clearCommandFeedback(); refreshSuggestions(); return; }
     if (choice == 3) return;
     std::string error;
     if (choice == 2 && !platform::confirmDestructiveAction("Remove module", "Remove " + current.name + " and its module folder?", "Remove")) return;
     const bool ok = choice == 2 ? modules::remove(m_moduleRoot, current.id, error) : modules::setEnabled(m_moduleRoot, current.id, !current.enabled, error);
     if (!ok) { setCommandStatus(error, true); return; }
+    if ((choice == 2 || current.enabled) && std::any_of(current.commands.begin(), current.commands.end(), [](const modules::Command& command) { return command.action == "coverage-lcov" || command.action == "coverage-cobertura"; })) { m_coverageReport = {}; m_coverageBaselines.clear(); }
     if (!modules::list(m_moduleRoot, m_modules, error)) {
         setCommandStatus("Module changed, but the list could not be refreshed: " + error, true); return;
     }
@@ -2540,7 +6158,10 @@ void Application::refreshModuleCatalog() {
         ModuleFetchResult result; result.catalog = true; result.generation = generation;
         std::string catalog;
         try {
-            if (modules::fetchPackage("initializeddd/lucid-module-catalog", "latest", "application/vnd.lucid.catalog.v1+json", catalog, result.error))
+            bool fetched = modules::fetchPackage("initializeddd/lucid-module-catalog", "v2", "application/vnd.lucid.catalog.v1+json", catalog, result.error);
+            if (!fetched && result.error == "GitHub package is private, unavailable, or was not found")
+                fetched = modules::fetchPackage("initializeddd/lucid-module-catalog", "latest", "application/vnd.lucid.catalog.v1+json", catalog, result.error);
+            if (fetched)
                 (void)modules::parseCatalog(catalog, result.entries, result.error);
         } catch (const std::exception& e) { result.error = std::string("Module catalog failed: ") + e.what(); }
         return result;
@@ -2548,7 +6169,722 @@ void Application::refreshModuleCatalog() {
     setCommandStatus("Loading GitHub module catalog…", false);
 }
 
+bool Application::visualConfigAuthorized() const {
+    if(m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_visualModule) return false;
+    std::vector<modules::Module> fresh; std::string error;
+    return modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[this](const auto& m) { return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-config-edit-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action=="compare-visual-configured"; }); });
+}
+
+void Application::requestVisualCrop(std::size_t x, std::size_t y) {
+    if (!m_visualShowing || !m_visualReview || m_visualCropFuture.valid() || m_visualApprovalFuture.valid() || !m_hasProject || m_project.root().generic_string()!=m_visualRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_visualModule) { setCommandStatus("Visual review changed or is busy",true); return; }
+    std::vector<modules::Module> fresh; std::string error; const char* action=m_visualConfigured?"compare-visual-configured":"compare-visual-images";
+    if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-review-crop-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c){return c.action==action;}); })) { setCommandStatus("Module changed; reopen the review",true); return; }
+    auto review=m_visualReview; const auto& image=review->baselineImage(); const auto width=std::min<std::size_t>(512,image.width), height=std::min<std::size_t>(512,image.height);
+    if(!width || !height || x>image.width-width || y>image.height-height) { setCommandStatus("Crop is outside the image",true); return; }
+    m_visualCropReview=review; m_visualCropCancel=std::make_shared<std::atomic_bool>(false);
+    m_visualCropFuture=std::async(std::launch::async,[review,x,y,width,height,cancel=m_visualCropCancel] { VisualCropResult result; result.x=x; result.y=y; (void)ui::makeVisualReviewCrop(review->baselineImage(),review->candidateImage(),review->comparison(),{x,y,width,height},result.preview,result.error,cancel.get()); return result; });
+    setCommandStatus("Preparing source-pixel crop…",false); refreshSuggestions();
+}
+
+#if defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+platform::WebPreviewContext Application::windowsWebPreviewContext(bool& authorized) const {
+    authorized=false; platform::WebPreviewContext context;
+    const char* enabled=std::getenv("LUCID_WEBVIEW2_UI_TEST");
+    if (!enabled || std::string_view(enabled)!="1" || !m_webShowing || !m_hasProject || !m_hasDocument || !m_searchBar.isOpen() || m_searchBar.kind()!=ui::PromptKind::ModuleCommands || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_webModule) return context;
+    context.project=m_project.root().generic_string(); context.document=m_filePath; context.module=m_webModule;
+    context.documentRevision=m_document.revision(); context.uiGeneration=m_searchBar.generation();
+    std::vector<modules::Module> fresh; std::string error;
+    if (!modules::list(m_moduleRoot,fresh,error)) return context;
+    const auto found=std::find_if(fresh.begin(),fresh.end(),[this](const auto& m) { return m.id==m_webModule; });
+    if (found==fresh.end()) return context;
+    context.moduleFingerprint=modules::moduleFingerprint(*found);
+    authorized=found->enabled && found->valid && found->error.empty() && found->project && found->network &&
+        std::any_of(found->commands.begin(),found->commands.end(),[](const auto& command) { return command.action=="web-preview"; });
+    return context;
+}
+#endif
 void Application::pollModules() {
+    const auto moduleStillEnabled = [this](const std::string& id, const char* action) {
+        if (m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != id) return false;
+        std::vector<modules::Module> current; std::string error;
+        if (!modules::list(m_moduleRoot, current, error)) return false;
+        const auto found = std::find_if(current.begin(), current.end(), [&id](const auto& m) { return m.id == id && m.enabled && m.valid; });
+        return found != current.end() && std::any_of(found->commands.begin(), found->commands.end(), [action](const auto& command) { return command.action == action; });
+    };
+    if (m_webBundleFuture.valid() && m_webBundleFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        WebBundleResult result; try { result = m_webBundleFuture.get(); } catch (const std::exception&) { result.error = "Could not load preview assets"; }
+        if (m_webShowing && m_hasProject && m_project.root().generic_string() == m_webRoot && m_hasDocument && m_filePath == m_webFile && m_document.revision() == m_webRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_webGeneration && moduleStillEnabled(m_webModule, "web-preview")) {
+            if (!result.error.empty()) { m_webError = result.error; m_webStarted = false; refreshSuggestions(); setCommandStatus(m_webError, true); }
+#if defined(__APPLE__)
+            else {
+                if (!m_webRenderer) m_webRenderer = std::make_unique<platform::MacWebPreview>();
+                std::string error;
+                if (!m_webRenderer->start(std::move(result.bundle.assets), result.bundle.target, result.bundle.width, result.bundle.height, [this](platform::MacWebPreviewResult capture) {
+                    if (!m_webShowing || !m_hasProject || m_project.root().generic_string() != m_webRoot || !m_hasDocument || m_filePath != m_webFile || m_document.revision() != m_webRevision || !m_searchBar.isOpen() || m_searchBar.kind() != ui::PromptKind::ModuleCommands || m_searchBar.generation() != m_webGeneration) return;
+                    std::vector<modules::Module> fresh; std::string moduleError;
+                    if (!modules::list(m_moduleRoot, fresh, moduleError) || std::none_of(fresh.begin(), fresh.end(), [this](const auto& m) { return m.id == m_webModule && m.enabled && m.valid && m.project && m.network && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "web-preview"; }); })) { m_webShowing = false; refreshSuggestions(); setCommandStatus("Preview module changed or was disabled", true); return; }
+                    modules::VisualImage image; modules::VisualComparison comparison; std::string error = std::move(capture.error);
+                    if (error.empty() && modules::decodeVisualPng(capture.png, image, error) && modules::compareVisualImages(image, image, 0, {}, comparison, error) && ui::makeVisualReviewPreview(image, image, comparison, 1024, 1024, m_visualPreview, error)) m_webReady = true;
+                    else { m_webError = error.empty() ? "Could not render preview" : error; m_webStarted = false; }
+                    m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_webReady ? "Preview ready" : m_webError, !m_webReady);
+                }, error)) { m_webError = error; m_webStarted = false; refreshSuggestions(); setCommandStatus(error, true); }
+                else setCommandStatus("Rendering trusted project code…", false);
+            }
+#elif defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+            else {
+                bool authorized=false; const auto context=windowsWebPreviewContext(authorized); std::string error;
+                if (!m_windowsWebPresentation) m_windowsWebPresentation=std::make_unique<platform::WebPreviewPresentation>(platform::decodeWebPreviewPng);
+                if (!m_windowsWebPresentation->start(m_window.handle(),context,authorized,true,std::move(result.bundle.assets),result.bundle.target,result.bundle.width,result.bundle.height,error)) {
+                    m_webError=error; m_webStarted=false; refreshSuggestions(); setCommandStatus(error,true);
+                } else { m_webPresentationActive=true; m_webCleanupReported=false; m_webCleanupSince={}; setCommandStatus("Rendering trusted project code in test-only WebView2…",false); }
+            }
+#endif
+        }
+    }
+#if defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+    if (m_windowsWebPresentation) {
+        bool authorized=false; const auto context=m_webPresentationActive ? windowsWebPreviewContext(authorized) : platform::WebPreviewContext{};
+        auto event=m_windowsWebPresentation->poll(context,authorized);
+        if (event.status!=platform::WebPreviewPresentationStatus::None) {
+            m_webPresentationActive=false;
+            if (event.status==platform::WebPreviewPresentationStatus::Ready) {
+                modules::VisualComparison comparison; std::string error;
+                if (modules::compareVisualImages(event.image,event.image,0,{},comparison,error) && ui::makeVisualReviewPreview(event.image,event.image,comparison,1024,1024,m_visualPreview,error)) { m_webReady=true; setCommandStatus("Preview ready",false); }
+                else { m_webStarted=false; m_webError=error.empty()?"Cannot display preview":error; setCommandStatus(m_webError,true); }
+            } else { m_webStarted=false; m_webError=event.error.empty()?"Preview was discarded":event.error; setCommandStatus(m_webError,true); }
+            m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions();
+        }
+        const auto& retained=m_windowsWebPresentation->retainedProfile();
+        if (!m_webPresentationActive && !retained.empty()) {
+            const auto now=std::chrono::steady_clock::now(); if (m_webCleanupSince==std::chrono::steady_clock::time_point{}) m_webCleanupSince=now;
+            if (!m_webCleanupReported && now-m_webCleanupSince>=std::chrono::seconds(5)) {
+                const auto encoded=retained.generic_u8string(); std::string path(encoded.begin(),encoded.end()); std::string error;
+                if (path.size()>4096 || std::any_of(path.begin(),path.end(),[](unsigned char c) { return c<32 || c==127; }) || !editor::Document::canEditLosslessly(path,error)) path="[path unavailable]";
+                setStatus("Web preview profile retained: "+path+"; remove only after WebView2 exits",true); m_webCleanupReported=true;
+            }
+        } else if (retained.empty()) { if (m_webCleanupReported) setStatus("Temporary web preview profile removed",false); m_webCleanupReported=false; m_webCleanupSince={}; }
+    }
+#endif
+    if (m_pullPatchFuture.valid() && m_pullPatchFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        PullPatchResult result; try { result = m_pullPatchFuture.get(); } catch (const std::exception&) { result.error = "Could not read patch"; }
+        if (m_pullRequestShowing && m_pullRequestFetched && m_pullPatchSelected && *m_pullPatchSelected == m_pullPatchPending &&
+            m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_pullPatchGeneration &&
+            moduleStillEnabled(m_pullRequestModule, "fetch-pull-request")) {
+            m_pullPatchHunks = std::move(result.hunks); m_pullPatchError = std::move(result.error);
+            m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus(m_pullPatchError.empty() ? "Patch ready" : "Patch unavailable: " + m_pullPatchError, !m_pullPatchError.empty());
+        } else if (m_pullRequestShowing && m_pullPatchSelected && m_searchBar.isOpen() &&
+                   m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_pullPatchGeneration) {
+            m_pullPatchSelected.reset(); m_pullPatchHunks.clear(); m_pullPatchError.clear();
+            m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Pull request context changed; reopen the module", true);
+        }
+    }
+    if (m_pullCommentFuture.valid() && m_pullCommentFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        std::string error; try { error = m_pullCommentFuture.get(); } catch (const std::exception&) { error = "Submission result unknown; refresh before retrying"; }
+        const bool review = m_pullReviewPosting; m_pullReviewPosting = false; m_pullReviewMode = 0;
+        m_pullRequestCancel.reset(); m_pullRequestData = {}; m_pullRequestFetched = false; m_pullPatchSelected.reset(); m_pullPatchHunks.clear(); m_pullCommentBody.clear();
+        if (m_pullRequestShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_pullRequestGeneration) {
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(error.empty() ? (review ? "Review submitted; refresh to review" : "Comment posted; refresh to review") : error, !error.empty());
+        }
+    }
+    if (m_pullRequestFuture.valid() && m_pullRequestFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_pullRequestCancel && m_pullRequestCancel->load(); m_pullRequestCancel.reset(); PullRequestResult result;
+        try { result = m_pullRequestFuture.get(); } catch (const std::exception&) { result.error = "GitHub request failed"; }
+        if (!cancelled && m_pullRequestShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_pullRequestGeneration && moduleStillEnabled(m_pullRequestModule, "fetch-pull-request")) {
+            m_pullRequestError = std::move(result.error); if (m_pullRequestError.empty()) { m_pullRequestData = std::move(result.data); m_pullRequestFetched = true; }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_pullRequestError.empty() ? "Pull request loaded" : m_pullRequestError, !m_pullRequestError.empty());
+        }
+    }
+    if (m_flashPrepareFuture.valid() && m_flashPrepareFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        FlashPrepareResult result; try { result = m_flashPrepareFuture.get(); } catch (const std::exception&) { result.error = "Could not prepare firmware snapshot"; }
+        const bool cancelled = m_flashCancel && m_flashCancel->load(); m_flashCancel.reset();
+        if (!cancelled && m_serialShowing && m_serialStage == 5 && m_hasProject && m_hasDocument && m_project.root().generic_string() == m_flashRoot && m_filePath == m_flashFile && m_document.revision() == m_flashRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_flashGeneration && moduleStillEnabled(m_serialModule, "flash-firmware")) {
+            if (!result.error.empty()) { m_serialShowing = false; refreshSuggestions(); setCommandStatus(result.error, true); }
+            else { m_flashSnapshot = std::move(result.snapshot); m_serialStage = 6; m_searchBar.open(ui::PromptKind::ModuleFlashExecutable); clearCommandFeedback(); setCommandStatus("Enter the OpenOCD executable; no hardware has been accessed", false); }
+        } else if (!cancelled && m_serialShowing && m_serialStage == 5) {
+            m_serialShowing = false; refreshSuggestions(); setCommandStatus("Project, profile or module changed; prepare firmware again", true);
+        }
+    }
+    if (m_flashFuture.valid() && m_flashFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::ModuleProcessResult result; try { result = m_flashFuture.get(); } catch (const std::exception&) { result.error = "OpenOCD operation failed"; }
+        m_flashCancel.reset(); m_flashSnapshot = {};
+        const bool ok = result.error.empty() && !result.cancelled && !result.timedOut && result.exitCode == 0;
+        if (m_serialShowing && m_serialStage == 8 && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_flashGeneration) {
+            m_flashResult = std::move(result); m_serialStage = 9; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus(ok ? "OpenOCD reported success; verify hardware" : "Flash failed or was cancelled; hardware may be partially written", !ok);
+        } else setStatus(ok ? "OpenOCD reported success; verify hardware" : "Flash result uncertain; hardware may be partially written", !ok);
+    }
+    if (m_serialScanFuture.valid() && m_serialScanFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::SerialDeviceScan result; try { result = m_serialScanFuture.get(); } catch (const std::exception&) { result.error = "Serial device scan failed"; }
+        if (m_serialShowing && m_serialStage == 0 && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_serialGeneration && moduleStillEnabled(m_serialModule, "serial-monitor")) { m_serialScan = std::move(result); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_serialScan.error.empty() ? "Select a device; none has been opened" : m_serialScan.error, !m_serialScan.error.empty()); }
+    }
+    if (m_serialShowing && m_serialStage==10 && m_serialFuture.valid() && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && std::chrono::steady_clock::now()-m_serialMonitorRefresh>=std::chrono::milliseconds(250)) {m_serialMonitorRefresh=std::chrono::steady_clock::now();refreshSuggestions();}
+    if (m_serialFuture.valid() && m_serialFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_serialCancel && m_serialCancel->load(); m_serialCancel.reset(); modules::SerialCaptureResult result;
+        try { result = m_serialFuture.get(); } catch (const std::exception&) { result.error = "Serial capture failed"; }
+        if (m_serialShowing && m_serialStage==10 && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_serialGeneration) {m_serialResult=std::move(result);m_serialStage=11;m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus(m_serialResult.error.empty()?"Serial monitor stopped; settings restored best-effort":m_serialResult.error,!m_serialResult.error.empty() || m_serialResult.restoreFailed);}
+        else if (!cancelled && m_serialShowing && m_serialStage == 2 && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_serialGeneration && moduleStillEnabled(m_serialModule, "serial-monitor")) { m_serialResult = std::move(result); m_serialStage = 3; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_serialResult.error.empty() ? "Serial capture complete" : m_serialResult.error, !m_serialResult.error.empty()); }
+    }
+    if (m_shaderPreviewFuture.valid() && m_shaderPreviewFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        ShaderPreviewResult result; try { result = m_shaderPreviewFuture.get(); } catch (const std::exception&) { result.error = "Shader preview failed"; }
+        const bool cancelled = m_shaderPreviewCancel && m_shaderPreviewCancel->load(); m_shaderPreviewCancel.reset();
+        if (!cancelled && m_shaderShowing && m_shaderPreviewStage == 2 && m_hasProject && m_project.root().generic_string() == m_shaderRoot && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_shaderGeneration && moduleStillEnabled(m_shaderModule, "compile-shader")) {
+            if (result.error.empty()) {
+                modules::VisualImage image; image.width = result.image.width; image.height = result.image.height; image.rgba.reserve(image.width * image.height * 4);
+                for (std::size_t i = 0; i + 2 < result.image.rgb.size(); i += 3) { image.rgba.push_back(result.image.rgb[i]); image.rgba.push_back(result.image.rgb[i+1]); image.rgba.push_back(result.image.rgb[i+2]); image.rgba.push_back(255); }
+                modules::VisualComparison comparison;
+                if (!modules::compareVisualImages(image, image, 0, {}, comparison, result.error) || !ui::makeVisualReviewPreview(image, image, comparison, 1024, 1024, m_visualPreview, result.error)) { if (result.error.empty()) result.error = "Cannot display shader preview"; }
+            }
+            m_shaderPreviewBytes.clear(); m_shaderPreviewStage = result.error.empty() ? 3 : 4; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(result.error.empty() ? "GPU preview ready" : result.error, !result.error.empty());
+        }
+    }
+    if (m_spirvFuture.valid() && m_spirvFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        SpirvResult result; try { result = m_spirvFuture.get(); } catch (const std::exception&) { result.error = "Artifact could not be inspected"; }
+        const bool cancelled = m_spirvCancel && m_spirvCancel->load(); m_spirvCancel.reset();
+        if (!cancelled && m_shaderShowing && m_spirvShowing && m_hasProject && m_project.root().generic_string() == m_shaderRoot && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_shaderGeneration && moduleStillEnabled(m_shaderModule, "compile-shader")) {
+            m_spirvResult = std::move(result); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_spirvResult.error.empty() ? "Metadata captured; this is not a rendered preview" : m_spirvResult.error, !m_spirvResult.error.empty());
+        }
+    }
+    if (m_shaderIncludesFuture.valid() && m_shaderIncludesFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::ShaderIncludeGraph graph; try { graph = m_shaderIncludesFuture.get(); } catch (const std::exception&) { graph.incomplete = true; }
+        const bool cancelled = graph.cancelled || (m_shaderIncludesCancel && m_shaderIncludesCancel->load()); m_shaderIncludesCancel.reset();
+        if (!cancelled && m_shaderShowing && m_shaderIncludesShowing && m_hasProject && m_project.root().generic_string() == m_shaderRoot && m_hasDocument && m_filePath == m_shaderFile && !m_document.dirty() && m_document.revision() == m_shaderRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_shaderGeneration && moduleStillEnabled(m_shaderModule, "compile-shader")) {
+            const auto root = graph.snapshots.find(m_shaderFile);
+            if (root == graph.snapshots.end() || root->second != m_diskContents) { m_shaderIncludesShowing = false; setCommandStatus("Shader changed or could not be read; inspect again", true); }
+            else { m_shaderIncludes = std::move(graph); setCommandStatus("Advisory graph; macros and conditions are not evaluated", false); }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_shaderFuture.valid() && m_shaderFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_shaderCancel && m_shaderCancel->load(); m_shaderCancel.reset(); modules::ShaderCompilation result;
+        try { result = m_shaderFuture.get(); } catch (const std::exception&) { result.error = "Shader compilation failed"; }
+        if (!cancelled && m_shaderShowing && m_hasProject && m_project.root().generic_string() == m_shaderRoot && m_hasDocument && m_filePath == m_shaderFile && m_document.revision() == m_shaderRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_shaderGeneration && moduleStillEnabled(m_shaderModule, "compile-shader")) {
+            m_shaderResult = std::move(result); m_shaderCompleted = true; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus(m_shaderResult.error.empty() ? (m_shaderResult.succeeded ? "Shader compiled" : "Compiler reported errors") : m_shaderResult.error, !m_shaderResult.succeeded);
+        }
+    }
+    if (m_containerActionPrepareFuture.valid() && m_containerActionPrepareFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_containerCancel && m_containerCancel->load(); m_containerCancel.reset(); ContainerActionPrepareResult result;
+        try { result = m_containerActionPrepareFuture.get(); } catch (const std::exception&) { result.error = "Action review failed"; }
+        if (!cancelled && m_containerShowing && m_containerActionMode && m_containerStage == 5 && m_hasProject && m_project.root().generic_string() == m_containerProjectRoot && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_containerGeneration && moduleStillEnabled(m_containerModule, "configured-container-actions")) {
+            if (result.error.empty() && result.review.configSnapshot != m_containerActionConfigSnapshot) result.error = "Action configuration changed; reopen it";
+            if (result.error.empty()) { m_containerActionReview = std::move(result.review); m_containerStage = 6; }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(result.error.empty() ? "Review privileges and destination before confirming" : result.error, !result.error.empty());
+        }
+    }
+    if (m_containerFuture.valid() && m_containerFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_containerCancel && m_containerCancel->load(); m_containerCancel.reset(); ContainerResult result;
+        try { result = m_containerFuture.get(); } catch (const std::exception&) { result.error = "Container operation failed"; }
+        if (!cancelled && m_containerShowing && (m_containerProjectRoot.empty() || (m_hasProject && m_project.root().generic_string() == m_containerProjectRoot)) && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_containerGeneration && moduleStillEnabled(m_containerModule, m_containerActionMode ? "configured-container-actions" : "inspect-containers")) {
+            if (m_containerActionMode && m_containerStage == 7) {
+                m_containerOutput = std::move(result.process.output); if (result.process.outputTruncated) m_containerOutput += "\n[Output truncated]";
+                m_containerStage = 8; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(result.error.empty() ? "Configured action completed" : result.error, !result.error.empty());
+                return;
+            }
+            const bool lifecycle = !m_containerOperation.empty() && m_containerStage == 4;
+            if (result.error.empty()) { if (m_containerRunningLogs) { m_containerOutput = std::move(result.process.output); if (result.process.outputTruncated) m_containerOutput += "\n[Output truncated]"; m_containerStage = 3; } else if (lifecycle) { m_containerStage = 0; m_containerListing = {}; m_containerSelected.reset(); } else { m_containerListing = std::move(result.listing); m_containerStage = 1; } }
+            if (lifecycle && !result.error.empty()) m_containerStage = 2;
+            m_containerOperation.clear(); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(result.error.empty() ? (lifecycle ? "Container action completed; refresh the listing" : "Container data loaded") : result.error, !result.error.empty());
+        } else if (!m_containerProjectRoot.empty() && m_containerShowing && (!m_hasProject || m_project.root().generic_string() != m_containerProjectRoot)) {
+            m_containerShowing = false; m_containerListing = {}; m_containerSelected.reset(); m_containerProjectRoot.clear();
+            if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) { refreshSuggestions(); setCommandStatus("Project changed; reopen container tools", true); }
+        }
+    }
+    if (m_dependencyArtifactFuture.valid() && m_dependencyArtifactFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_dependencyArtifactCancel && m_dependencyArtifactCancel->load(); m_dependencyArtifactCancel.reset(); modules::DependencyArtifactVerification result;
+        try { result = m_dependencyArtifactFuture.get(); } catch (const std::exception&) { result.status = modules::DependencyArtifactStatus::Error; result.error = "Artifact verification failed"; }
+        std::string error;
+        if (!cancelled && m_dependencyArtifactStage == 2 && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_dependencyGeneration && dependencyArtifactReady(error)) {
+            m_dependencyArtifactResult = std::move(result); m_dependencyArtifactStage = 3; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            const bool matched = m_dependencyArtifactResult.status == modules::DependencyArtifactStatus::Matched;
+            setCommandStatus(matched ? "Checksum matches the lockfile; publisher is not verified" : "Artifact did not verify; inspect the result", !matched);
+        } else if (m_dependencyArtifactStage == 2 && m_dependencyShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_dependencyGeneration) {
+            m_dependencyArtifactStage = 0; m_dependencyArtifactResult = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(error.empty() ? "Artifact verification cancelled" : error, true);
+        }
+    }
+    if (m_dependencyDetailFuture.valid() && m_dependencyDetailFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_dependencyCancel && m_dependencyCancel->load(); m_dependencyCancel.reset(); DependencyDetailResult result;
+        try { result = m_dependencyDetailFuture.get(); } catch (const std::exception&) { result.error = "Advisory request failed"; }
+        if (!cancelled && m_dependencyShowing && !m_dependencySelectedId.empty() && m_hasDocument && m_filePath == m_dependencyFile && m_document.revision() == m_dependencyRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_dependencyGeneration && moduleStillEnabled(m_dependencyModule, "review-dependency-risk")) {
+            m_dependencyError = std::move(result.error); if (m_dependencyError.empty() && result.detail.id == m_dependencySelectedId) { m_dependencyDetail = std::move(result.detail); m_dependencyDetailReady = true; }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_dependencyError.empty() ? "Advisory loaded" : m_dependencyError, !m_dependencyError.empty());
+        }
+    }
+    if (m_dependencyFuture.valid() && m_dependencyFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_dependencyCancel && m_dependencyCancel->load(); m_dependencyCancel.reset(); DependencyResult result;
+        try { result = m_dependencyFuture.get(); } catch (const std::exception&) { result.error = "Dependency review failed"; }
+        if (!cancelled && m_dependencyShowing && m_hasDocument && m_filePath == m_dependencyFile && m_document.revision() == m_dependencyRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_dependencyGeneration && moduleStillEnabled(m_dependencyModule, "review-dependency-risk")) {
+            m_dependencyError = std::move(result.error);
+            if (m_dependencyError.empty()) { m_dependencyReport = std::move(result.report); m_dependencyReady = true; m_dependencyQueried = m_dependencyQuerying; }
+            m_dependencyQuerying = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus(m_dependencyError.empty() ? (m_dependencyQueried ? "OSV review complete; coverage limits apply" : "Review what will be sent to OSV before confirming") : m_dependencyError, !m_dependencyError.empty());
+        } else if (m_dependencyShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_dependencyGeneration) {
+            m_dependencyShowing = false; m_dependencyReport = {}; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Review cancelled or context changed", true);
+        }
+    }
+    if (m_visualConfigFuture.valid() && m_visualConfigFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const bool cancelled=m_visualConfigCancel && m_visualConfigCancel->load(); m_visualConfigCancel.reset(); VisualConfigResult result; try {result=m_visualConfigFuture.get();} catch (...) {result.error="Could not prepare config draft";}
+        if(!cancelled && m_visualShowing && m_visualConfigStage==3 && m_visualReview==m_visualConfigReview && m_hasProject && m_project.root().generic_string()==m_visualRoot && m_hasDocument && m_filePath==m_visualConfigFile && m_document.revision()==m_visualConfigRevision && m_document.toUtf8()==m_visualConfigOriginal && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_visualConfigGeneration && visualConfigAuthorized()) { if(result.error.empty()) {m_visualConfigDraft=std::move(result.draft);m_visualConfigStage=4;} else m_visualConfigStage=1; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus(result.error.empty()?"Review counts and formatting before applying":result.error,!result.error.empty()); }
+        else if(m_visualConfigStage==3) {m_visualConfigStage=0;m_visualConfigDraft={};m_visualConfigOriginal.clear();m_visualConfigReview.reset();refreshSuggestions();setCommandStatus("Config draft cancelled or context changed",true);}
+    }
+    if (m_visualConfigApplyFuture.valid() && m_visualConfigApplyFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const bool cancelled=m_visualConfigCancel && m_visualConfigCancel->load(); m_visualConfigCancel.reset(); std::string error; try {error=m_visualConfigApplyFuture.get();} catch (...) {error="Screenshot validation failed";}
+        if(!cancelled && error.empty() && m_visualShowing && m_visualConfigStage==5 && m_visualReview==m_visualConfigReview && m_hasProject && m_project.root().generic_string()==m_visualRoot && m_hasDocument && m_filePath==m_visualConfigFile && m_document.revision()==m_visualConfigRevision && m_document.toUtf8()==m_visualConfigOriginal && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_visualConfigGeneration && visualConfigAuthorized()) {
+            std::string replacement; if(modules::applyVisualConfigDraft(m_visualConfigDraft,m_document.toUtf8(),replacement,error) && m_document.replaceAllUtf8(replacement)) {m_visualConfigStage=0;m_visualConfigDraft={};m_visualConfigOriginal.clear();m_visualConfigReview.reset();m_visualShowing=false;m_visualReview.reset();m_searchBar.close();setStatus("Visual configuration updated; save to apply it",false);} else {m_visualConfigStage=4;setCommandStatus(error.empty()?"Could not update document":error,true);refreshSuggestions();}
+        } else if(m_visualConfigStage==5) {m_visualConfigStage=4;setCommandStatus(error.empty()?"Config edit cancelled or context changed":error,true);refreshSuggestions();}
+    }
+    if (m_visualCropFuture.valid() && m_visualCropFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const bool cancelled=m_visualCropCancel && m_visualCropCancel->load(); m_visualCropCancel.reset(); VisualCropResult result; try { result=m_visualCropFuture.get(); } catch (...) { result.error="Visual crop failed"; }
+        std::vector<modules::Module> fresh; std::string error; const char* action=m_visualConfigured?"compare-visual-configured":"compare-visual-images";
+        const bool valid=m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_visualModule && modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-review-crop-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c){return c.action==action;}); });
+        if (!cancelled && valid && m_visualShowing && m_visualReview && m_visualReview==m_visualCropReview && m_hasProject && m_project.root().generic_string()==m_visualRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_visualGeneration) {
+            if(result.error.empty()) { m_visualCropPreview=std::move(result.preview); m_visualCropX=result.x; m_visualCropY=result.y; m_visualCropMode=true; m_visualVisible=true; setStatus("Source crop at " + std::to_string(m_visualCropX) + "," + std::to_string(m_visualCropY) + " · arrows move · 0 overview · display may scale",false); }
+            else setCommandStatus(result.error,true);
+            refreshSuggestions();
+        }
+        m_visualCropReview.reset();
+    }
+    if (m_visualFuture.valid() && m_visualFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        VisualResult result; try { result = m_visualFuture.get(); } catch (const std::exception&) { result.error = "Visual comparison failed"; }
+        const bool cancelled = m_visualCancel && m_visualCancel->load(); m_visualCancel.reset();
+        if (!cancelled && m_visualShowing && m_hasProject && m_project.root().generic_string() == m_visualRoot && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_visualGeneration && moduleStillEnabled(m_visualModule, m_visualConfigured ? "compare-visual-configured" : "compare-visual-images")) {
+            if (!result.error.empty()) { m_visualShowing = false; setCommandStatus(result.error, true); }
+            else { m_visualReview = std::move(result.review); m_visualPreview = std::move(result.preview); setCommandStatus("Comparison ready; inspect before approving", false); }
+            m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_visualApprovalFuture.valid() && m_visualApprovalFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        std::string error; try { error = m_visualApprovalFuture.get(); } catch (const std::exception&) { error = "Baseline replacement failed"; }
+        m_visualCancel.reset(); m_visualReview.reset(); m_visualShowing = false;
+        if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_visualGeneration) { refreshSuggestions(); setCommandStatus(error.empty() ? "Baseline replaced" : error, !error.empty()); }
+    }
+    if (m_apiAssertionFuture.valid() && m_apiAssertionFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const bool cancelled=m_apiAssertionCancel && m_apiAssertionCancel->load(); m_apiAssertionCancel.reset(); modules::ApiAssertionReport result; try { result=m_apiAssertionFuture.get(); } catch (...) { result.error="Assertion evaluation failed"; }
+        std::vector<modules::Module> fresh; std::string error;
+        const bool valid=m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_apiModule && modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_apiModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"api-response-assertions-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c) { return c.action==(m_apiProfileMode?"open-api-environment":"open-api-requests"); }); });
+        if (!cancelled && valid && m_apiShowing && m_apiConfirmed && m_apiAssertionStage==2 && m_apiGeneration==m_apiAssertionResponseGeneration && m_hasProject && m_project.root().generic_string()==m_apiRoot && m_hasDocument && m_filePath==m_apiFile && m_document.revision()==m_apiRevision && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_apiAssertionGeneration) { m_apiAssertions=std::move(result); m_apiAssertionStage=3; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus(m_apiAssertions.error.empty()?"Assertion check complete":m_apiAssertions.error,!m_apiAssertions.error.empty()); }
+        else if (m_apiShowing && m_apiAssertionStage==2) { m_apiAssertionStage=0; m_apiAssertions={}; refreshSuggestions(); setCommandStatus("Assertion check cancelled or context changed",true); }
+    }
+    if (m_apiSaveFuture.valid() && m_apiSaveFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        std::string error; try { error=m_apiSaveFuture.get(); } catch (const std::exception&) { error="Could not save response"; }
+        const bool cancelled=m_apiSaveCancel && m_apiSaveCancel->load(); m_apiSaveCancel.reset();
+        if (m_apiShowing && m_apiSaveStage==3 && m_hasProject && m_project.root().generic_string()==m_apiRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_apiSaveGeneration) {
+            m_apiSaveStage=error.empty() ? 4 : 0; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus(error.empty() ? "Response saved; it may contain sensitive data" : (cancelled ? "Save cancelled: " : "Save failed: ") + error,!error.empty());
+        }
+    }
+    if (m_apiFuture.valid() && m_apiFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_apiCancel && m_apiCancel->load(); m_apiCancel.reset(); modules::ApiResponse result;
+        try { result = m_apiFuture.get(); } catch (const std::exception&) { result.error = "HTTP request failed"; }
+        if (!cancelled && m_apiShowing && m_hasDocument && m_filePath == m_apiFile && m_document.revision() == m_apiRevision && (!m_apiProfileMode || (m_hasProject && m_project.root().generic_string() == m_apiRoot)) && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_apiGeneration && moduleStillEnabled(m_apiModule, m_apiProfileMode ? "open-api-environment" : "open-api-requests")) {
+            m_apiResponse = std::move(result); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_apiResponse.error.empty() ? "Response received" : m_apiResponse.error, !m_apiResponse.error.empty());
+        } else if (m_apiShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_apiGeneration) {
+            m_apiShowing = false; m_apiResponse = {}; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus("Request cancelled or context changed", true);
+        }
+    }
+    if (m_sqlRowFuture.valid() && m_sqlRowFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const bool cancelled=m_sqlRowCancel && m_sqlRowCancel->load(); m_sqlRowCancel.reset(); modules::SqlRowDiff result; try { result=m_sqlRowFuture.get(); } catch (...) { result.error="Row comparison failed"; }
+        std::vector<modules::Module> fresh; std::string error; const bool valid=m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_sqlModule && modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_sqlModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"sql-change-row-diff-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c) { return c.action==(m_sqlBound?"sql-change-bound":"sql-change-preview"); }); });
+        if (!cancelled && valid && m_sqlShowing && m_sqlChangeMode && m_sqlRowShowing && m_sqlRowIndex<m_sqlChange.observedRows.size() && m_hasProject && m_project.root().generic_string()==m_sqlRoot && m_hasDocument && m_filePath==m_sqlFile && m_document.revision()==m_sqlRevision && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_sqlRowGeneration) { m_sqlRowDiff=std::move(result); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus(m_sqlRowDiff.error.empty()?"Row values may contain secrets":m_sqlRowDiff.error,!m_sqlRowDiff.error.empty()); }
+        else if (m_sqlRowShowing) { m_sqlRowShowing=false; m_sqlRowDiff={}; refreshSuggestions(); setCommandStatus("Row comparison cancelled or context changed",true); }
+    }
+    if (m_sqlChangeFuture.valid() && m_sqlChangeFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled=m_sqlChangeCancel && m_sqlChangeCancel->load(); m_sqlChangeCancel.reset(); modules::SqlChangePreview result; try { result=m_sqlChangeFuture.get(); } catch (...) { result.error="Database preview failed"; }
+        if (!cancelled && m_sqlShowing && m_sqlChangeMode && m_hasProject && m_project.root().generic_string()==m_sqlRoot && m_hasDocument && m_filePath==m_sqlFile && m_document.revision()==m_sqlRevision && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_sqlGeneration && moduleStillEnabled(m_sqlModule,m_sqlBound?"sql-change-bound":"sql-change-preview")) { m_sqlChange=std::move(result); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus(m_sqlChange.error.empty()?"Review the isolated change before creating a copy":m_sqlChange.error,!m_sqlChange.error.empty()); }
+        else if (m_sqlShowing && m_sqlChangeMode) { m_sqlShowing=false; m_sqlChange={}; m_sqlChangeBindingsSnapshot.reset(); m_sqlChangeBindingsPath.clear(); refreshSuggestions(); setCommandStatus("Preview cancelled or context changed",true); }
+    }
+    if (m_sqlChangeSaveFuture.valid() && m_sqlChangeSaveFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        std::string error; try { error=m_sqlChangeSaveFuture.get(); } catch (...) { error="Database copy failed"; } m_sqlChangeCancel.reset();
+        if (m_sqlShowing && m_sqlChangeMode && m_sqlChangeStage==4 && m_hasProject && m_project.root().generic_string()==m_sqlRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands) { m_sqlChangeStage=error.empty()?5:0; m_modulePage=0; refreshSuggestions(); setCommandStatus(error.empty()?"Database copy created":error,!error.empty()); }
+    }
+    if (m_sqlCsvFuture.valid() && m_sqlCsvFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::SqlCsvExport csv; try { csv=m_sqlCsvFuture.get(); } catch (const std::exception&) { csv.error="CSV preparation failed"; }
+        const bool cancelled = m_sqlCsvCancel && m_sqlCsvCancel->load(); m_sqlCsvCancel.reset();
+        if (!cancelled && m_sqlShowing && m_sqlCsvStage==1 && m_hasProject && m_project.root().generic_string()==m_sqlRoot && m_hasDocument && m_filePath==m_sqlFile && m_document.revision()==m_sqlRevision && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands) {
+            if (!csv.error.empty()) { m_sqlCsvStage=0; setCommandStatus("CSV preparation failed: " + csv.error,true); refreshSuggestions(); }
+            else { m_sqlCsv=std::move(csv); m_sqlCsvStage=2; m_searchBar.open(ui::PromptKind::ModuleSqlExportPath); setCommandStatus(m_sqlCsv.partial ? "Partial results; enter a new CSV path" : "Enter a new project-relative CSV path",false); }
+        } else if (m_sqlShowing && m_sqlCsvStage==1) { m_sqlCsvStage=0; setCommandStatus("Query context changed or export was cancelled",true); refreshSuggestions(); }
+    }
+    if (m_sqlCsvSaveFuture.valid() && m_sqlCsvSaveFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        std::string error; try { error=m_sqlCsvSaveFuture.get(); } catch (const std::exception&) { error="CSV write failed"; }
+        const bool cancelled = m_sqlCsvCancel && m_sqlCsvCancel->load(); m_sqlCsvCancel.reset();
+        if (m_sqlShowing && m_sqlCsvStage==4 && m_hasProject && m_project.root().generic_string()==m_sqlRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands) {
+            m_sqlCsvStage = error.empty() ? 5 : 0; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions();
+            setCommandStatus(error.empty() ? "CSV created; it contains plaintext results" : (cancelled ? "CSV export cancelled: " : "CSV export failed: ") + error, !error.empty());
+        }
+    }
+    if (m_sqlFuture.valid() && m_sqlFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_sqlCancel && m_sqlCancel->load(); m_sqlCancel.reset(); modules::SqlQueryResult result;
+        try { result = m_sqlFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_sqlShowing && m_hasProject && m_project.root().generic_string() == m_sqlRoot && m_hasDocument && m_filePath == m_sqlFile && m_document.revision() == m_sqlRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_sqlGeneration && moduleStillEnabled(m_sqlModule, m_sqlBound ? (m_sqlExplain ? "sql-explain-bound" : "sql-query-bound") : (m_sqlExplain ? "sql-explain" : "sql-query"))) {
+            m_sqlResult = std::move(result); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus(m_sqlResult.error.empty() ? (m_sqlResult.truncated ? "Results truncated by safety limits" : "Read-only query complete") : m_sqlResult.error, !m_sqlResult.error.empty() || m_sqlResult.truncated);
+        } else if (!cancelled && m_sqlShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_sqlGeneration) {
+            m_sqlShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus("Project, document or module changed; run the query again", true);
+        }
+    }
+    if (m_sqlColumnsFuture.valid() && m_sqlColumnsFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_sqlColumnsCancel && m_sqlColumnsCancel->load(); m_sqlColumnsCancel.reset(); modules::SqlColumnsResult result;
+        try { result = m_sqlColumnsFuture.get(); } catch (const std::exception&) { result.error = "Column inspection failed"; }
+        const char* action = m_sqlBound ? (m_sqlExplain ? "sql-explain-bound" : "sql-query-bound") : (m_sqlExplain ? "sql-explain" : "sql-query");
+        std::vector<modules::Module> fresh; std::string moduleError;
+        const bool moduleAllowed = m_moduleSelected < m_modules.size() && m_modules[m_moduleSelected].id == m_sqlModule && modules::list(m_moduleRoot, fresh, moduleError) &&
+            std::any_of(fresh.begin(), fresh.end(), [&](const auto& module) { return module.id == m_sqlModule && module.enabled && module.valid && module.project && std::find(module.requirements.begin(), module.requirements.end(), "sql-columns-v1") != module.requirements.end() && std::any_of(module.commands.begin(), module.commands.end(), [&](const auto& command) { return command.action == action; }); });
+        if (!cancelled && m_sqlShowing && m_sqlSchemaShowing && m_sqlSchemaSelected && *m_sqlSchemaSelected == m_sqlColumnsObject && m_sqlSnapshot && m_sqlSnapshot == m_sqlColumnsSnapshot && m_hasProject && m_project.root().generic_string() == m_sqlRoot && m_hasDocument && m_filePath == m_sqlFile && m_document.revision() == m_sqlRevision && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_sqlSchemaGeneration && moduleAllowed) {
+            m_sqlColumns = std::move(result); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_sqlColumns.error.empty() ? (m_sqlColumns.truncated ? "Columns truncated by safety limits" : "Column metadata ready") : m_sqlColumns.error, !m_sqlColumns.error.empty() || m_sqlColumns.truncated);
+        } else if (m_sqlShowing && m_sqlSchemaShowing && m_sqlSchemaSelected && *m_sqlSchemaSelected == m_sqlColumnsObject && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_sqlSchemaGeneration) {
+            m_sqlColumns = {}; m_sqlColumns.error = "Column inspection cancelled or context changed"; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_sqlColumns.error, true);
+        }
+        m_sqlColumnsSnapshot.reset();
+    }
+    if (m_sqlSchemaFuture.valid() && m_sqlSchemaFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled=m_sqlSchemaCancel && m_sqlSchemaCancel->load(); m_sqlSchemaCancel.reset(); modules::SqlSchemaResult result;
+        try { result=m_sqlSchemaFuture.get(); } catch (const std::exception&) { result.error="Schema inspection failed"; }
+        const char* action=m_sqlBound ? (m_sqlExplain ? "sql-explain-bound" : "sql-query-bound") : (m_sqlExplain ? "sql-explain" : "sql-query");
+        std::vector<modules::Module> fresh; std::string moduleError;
+        const bool moduleAllowed=m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_sqlModule && modules::list(m_moduleRoot,fresh,moduleError) &&
+            std::any_of(fresh.begin(),fresh.end(),[&](const auto& module) { return module.id==m_sqlModule && module.enabled && module.valid && module.project &&
+                std::any_of(module.commands.begin(),module.commands.end(),[&](const auto& command) { return command.action==action; }); });
+        if (!cancelled && m_sqlShowing && m_sqlSchemaShowing && m_hasProject && m_project.root().generic_string()==m_sqlRoot && m_hasDocument && m_filePath==m_sqlFile && m_document.revision()==m_sqlRevision && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_sqlSchemaGeneration && moduleAllowed) {
+            m_sqlSchema=std::move(result); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions();
+            setCommandStatus(m_sqlSchema.error.empty() ? (m_sqlSchema.truncated ? "Schema truncated by safety limits" : "Schema snapshot ready") : m_sqlSchema.error, !m_sqlSchema.error.empty() || m_sqlSchema.truncated);
+        } else if (m_sqlShowing && m_sqlSchemaShowing) { m_sqlSchemaShowing=false; m_sqlSchema={}; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus("Schema inspection cancelled or context changed",true); }
+    }
+    if (m_releaseNotesFuture.valid() && m_releaseNotesFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        ReleaseNotesResult result; try { result = m_releaseNotesFuture.get(); } catch (const std::exception& e) { result.warning = e.what(); }
+        if (m_releaseNotesShowing && m_hasProject && m_project.root().generic_string() == m_releaseNotesRoot && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_releaseNotesGeneration && moduleStillEnabled(m_releaseNotesModule, "release-note-builder")) {
+            m_releaseNotesEntries = std::move(result.entries); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus(result.warning.empty() ? "Select commits and tasks, then insert the draft" : result.warning, !result.warning.empty());
+        }
+    }
+    if (m_diagramPreviewFuture.valid() && m_diagramPreviewFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        DiagramPreviewResult result; try { result = m_diagramPreviewFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        const bool cancelled=m_diagramPreviewCancel && m_diagramPreviewCancel->load(); m_diagramPreviewCancel.reset();
+        if (cancelled && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_diagramPreviewPromptGeneration) setCommandStatus("Diagram preview cancelled",false);
+        else if (!cancelled && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_diagramPreviewPromptGeneration && moduleStillEnabled(m_diagramPreviewModule, "diagram-preview")) {
+            if (!m_hasDocument || m_filePath != m_diagramPreviewFile || m_document.revision() != m_diagramPreviewRevision) result.error = "Document changed; reopen the diagram preview";
+            if (!result.error.empty()) setCommandStatus("Diagram preview failed: " + result.error, true);
+            else { m_diagramPreview = std::move(result.layout); m_diagramPreviewVisible = true; m_diagramZoom=1.0; m_diagramPanX=0; m_diagramPanY=0; m_diagramDragging=false; m_searchBar.close(); setStatus("Diagram preview · arrows pan · +/- zoom · 0 fit · Escape closes", false); }
+        }
+    }
+    if (m_accessibilityFuture.valid() && m_accessibilityFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::AccessibilityAudit result;
+        try { result = m_accessibilityFuture.get(); }
+        catch (const std::exception& e) { result.incomplete = true; result.limitation = std::string("Audit failed: ") + e.what(); }
+        if (m_accessibilityShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_accessibilityPromptGeneration && moduleStillEnabled(m_accessibilityModule, "accessibility-audit")) {
+            if (!m_hasDocument || m_filePath != m_accessibilityFile || m_document.revision() != m_accessibilityRevision) { m_accessibilityShowing = false; setCommandStatus("Document changed; rerun the accessibility audit", true); }
+            else { m_accessibilityAudit = std::move(result); setCommandStatus(m_accessibilityAudit.incomplete ? "Audit incomplete; inspect findings and limitations" : "Static checks complete; select a finding to navigate", m_accessibilityAudit.incomplete); }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if(m_rustRunFuture.valid() && m_rustRunFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready){modules::RustDiagnosticRun result;try{result=m_rustRunFuture.get();}catch(const std::exception&){result.error="Cargo execution failed";}m_rustRunCancel.reset();if(m_rustOwnershipShowing && m_rustRunStage==3 && m_hasProject && m_project.root().generic_string()==m_rustOwnershipRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_rustRunGeneration && moduleStillEnabled(m_rustRunModule,"run-rust-ownership")){m_rustRunResult=std::move(result);m_rustOwnershipDiagnostics=std::move(m_rustRunResult.diagnostics);m_rustRunStage=4;m_rustOwnershipSelected.reset();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();const bool issue=!m_rustRunResult.error.empty() || !m_rustRunResult.process.error.empty() || m_rustRunResult.incomplete;setCommandStatus(!m_rustRunResult.error.empty()?m_rustRunResult.error:!m_rustRunResult.process.error.empty()?m_rustRunResult.process.error:std::to_string(m_rustOwnershipDiagnostics.size())+" ownership diagnostics · exit " + std::to_string(m_rustRunResult.process.exitCode)+(m_rustRunResult.incomplete?" · results incomplete":""),issue);} else if(m_rustOwnershipShowing && m_rustRunStage==3 && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_rustRunGeneration){m_rustOwnershipShowing=false;m_rustRunStage=0;refreshSuggestions();setCommandStatus("Rust context changed; results discarded; Cargo may have changed files",true);}}
+    if (m_rustOwnershipFuture.valid() && m_rustOwnershipFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_rustOwnershipCancel && m_rustOwnershipCancel->load(); m_rustOwnershipCancel.reset(); RustOwnershipResult result;
+        try { result = m_rustOwnershipFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_rustOwnershipRoot && m_rustOwnershipShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (!result.error.empty()) setCommandStatus("Rust diagnostics failed: " + result.error, true);
+            else { m_rustOwnershipDiagnostics = std::move(result.diagnostics); setCommandStatus(std::to_string(m_rustOwnershipDiagnostics.size()) + " ownership diagnostics; compiler output may be stale", false); }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_crashFuture.valid() && m_crashFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_crashCancel && m_crashCancel->load(); m_crashCancel.reset(); CrashInspectionResult result;
+        try { result = m_crashFuture.get(); } catch (const std::exception& e) { result.dump.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_crashRoot && m_crashShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            m_crashIsGdb=result.isGdb; m_crashGdb=std::move(result.gdb); m_crashDump=std::move(result.dump);
+            if(m_crashIsGdb) {if(!m_crashGdb.error.empty()) setCommandStatus("Crash inspection failed: "+m_crashGdb.error,true);else setCommandStatus(m_crashGdb.incomplete?"GDB text incomplete; supplied frames are unverified":"GDB text is unverified; no source navigation",m_crashGdb.incomplete);}
+            else if (!m_crashDump.error.empty()) setCommandStatus("Crash inspection failed: " + m_crashDump.error, true);
+            else setCommandStatus(m_crashDump.incomplete ? "Dump incomplete; frame candidates are heuristic" : "Frame candidates are heuristic; no symbolication or source navigation", m_crashDump.incomplete);
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if(m_targetConfigureFuture.valid() && m_targetConfigureFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready){modules::ModuleProcessResult result;try{result=m_targetConfigureFuture.get();}catch(const std::exception&){result.error="CMake configure failed";}m_targetConfigureCancel.reset();if(m_toolchainShowing && m_targetConfigureStage==4 && m_hasProject && m_project.root().generic_string()==m_toolchainRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_toolchainGeneration){m_targetConfigureResult=std::move(result);m_targetConfigureStage=5;m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus(m_targetConfigureResult.error.empty()?"CMake finished; review its exit code and output":m_targetConfigureResult.error,!m_targetConfigureResult.error.empty() || m_targetConfigureResult.exitCode!=0);}}
+    if(m_toolchainSaveFuture.valid() && m_toolchainSaveFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        std::string error;try{error=m_toolchainSaveFuture.get();}catch(const std::exception&){error="Could not save target profiles";} m_toolchainSaveCancel.reset();
+        if(m_toolchainShowing && m_hasProject && m_project.root().generic_string()==m_toolchainRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_toolchainGeneration){if(error.empty()){m_toolchainSnapshot=m_toolchainDraft.updated;std::string parseError;(void)modules::parseToolchainProfiles(m_toolchainSnapshot,m_toolchainProfiles,parseError);m_toolchainSelected.reset();m_toolchainEditMode=0;m_toolchainDraft={};}m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus(error.empty()?"Target profiles saved; no tools were run":error,!error.empty());}
+    }
+    if (m_toolchainFuture.valid() && m_toolchainFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled=m_toolchainCancel && m_toolchainCancel->load(); m_toolchainCancel.reset(); ToolchainResult result; try { result=m_toolchainFuture.get(); } catch (const std::exception&) { result.error="Could not inspect toolchain profiles"; }
+        if (!cancelled && m_toolchainShowing && m_hasProject && m_project.root().generic_string()==m_toolchainRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_toolchainGeneration && moduleStillEnabled(m_toolchainModule,"inspect-toolchain-profiles")) {
+            if (result.error.empty()) { m_toolchainProfiles=std::move(result.profiles); m_toolchainSnapshot=std::move(result.snapshot); setCommandStatus("Profiles are declared settings; paths and tools are unverified",false); }
+            else setCommandStatus("Toolchain profile inspection failed: " + result.error,true);
+            m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions();
+        }
+    }
+    if (m_usbBoardFuture.valid() && m_usbBoardFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        modules::UsbDescriptorScan scan; try {scan=m_usbBoardFuture.get();} catch (const std::exception&) {scan.error="USB discovery failed";}
+        std::vector<modules::Module> fresh; std::string error;
+        const bool enabled=modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_usbBoardModule && m.enabled && m.valid && m.project && m.devices && std::find(m.requirements.begin(),m.requirements.end(),"usb-board-identification-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="identify-usb-boards";});});
+        if (enabled && m_usbBoardShowing && m_usbBoardConfirmed && m_hasProject && m_project.root().generic_string()==m_usbBoardRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_usbBoardGeneration && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_usbBoardModule) {m_usbBoardScan=std::move(scan);m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus(m_usbBoardScan.error.empty()?"Project mappings are unverified; VID/PID may identify only a probe":m_usbBoardScan.error,!m_usbBoardScan.error.empty());}
+    }
+    if (m_svdFuture.valid() && m_svdFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled=m_svdCancel && m_svdCancel->load(); m_svdCancel.reset(); modules::SvdRegisters result;
+        try {result=m_svdFuture.get();} catch (const std::exception& e) {result.error=e.what();}
+        if (!cancelled && m_svdShowing && m_hasProject && m_project.root().generic_string()==m_linkerRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands) { m_svdRegisters=std::move(result); m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); setCommandStatus(!m_svdRegisters.error.empty() ? m_svdRegisters.error : m_svdRegisters.incomplete ? "Some SVD definitions omitted; metadata is unverified" : "Declared metadata only; no hardware was accessed", !m_svdRegisters.error.empty() || m_svdRegisters.incomplete); }
+    }
+    if (m_linkerFuture.valid() && m_linkerFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_linkerCancel && m_linkerCancel->load(); m_linkerCancel.reset(); LinkerResult result;
+        try { result = m_linkerFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_linkerRoot && m_linkerShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (!result.error.empty()) setCommandStatus("Linker map failed: " + result.error, true);
+            else { m_linkerMap = std::move(result.map); setCommandStatus(std::string("Estimates only; VMA and LMA are independent") + (m_linkerMap.incomplete ? "; VMA incomplete" : "") + (m_linkerMap.loadIncomplete ? "; LMA incomplete" : ""), m_linkerMap.incomplete || m_linkerMap.loadIncomplete); }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_hexFuture.valid() && m_hexFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        HexOperation result; result.saving = m_hexSaving; try { result = m_hexFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        m_hexSaving = false;
+        if (result.ok && result.root == m_hexRoot) {
+            m_hexFile = std::move(result.file); m_hexPath = result.path; m_hexBaseline = m_hexFile->buffer().bytes();
+            if (!result.saving) { m_hexViewOffset = 0; m_hexLastNeedle.clear(); m_hexNextSearch = 0; }
+            if (m_hexShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) { m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(result.saving ? "Binary saved" : "Binary opened; edits are not saved automatically", false); }
+            else setStatus(result.saving ? "Binary saved" : "Binary opened", false);
+        } else {
+            const auto message = std::string(result.saving ? "Binary save failed: " : "Binary open failed: ") + (result.error.empty() ? "Project changed" : result.error);
+            if (m_hexShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) { refreshSuggestions(); setCommandStatus(message, true); } else setStatus(message, true);
+        }
+    }
+    if (m_ctestDiscoveryFuture.valid() && m_ctestDiscoveryFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::CTestDiscoveryResult result; try { result = m_ctestDiscoveryFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        m_ctestCancel.reset();
+        if (m_hasProject && m_project.root().generic_string() == m_ctestRoot && m_ctestShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (!result.ok) setCommandStatus("CTest discovery failed: " + result.error, true);
+            else { m_ctestDiscovery = std::move(result.discovery); setCommandStatus(std::to_string(m_ctestDiscovery.tests.size()) + " tests discovered" + (m_ctestHistoryReady ? "; select a test to review" : "; history unavailable: " + m_ctestHistoryError), !m_ctestHistoryReady); }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_ctestRunFuture.valid() && m_ctestRunFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::CTestRunResult result; try { result = m_ctestRunFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        m_ctestCancel.reset();
+        if (m_ctestRerunShowing) { m_ctestRerunSelected.reset(); m_ctestRerunShowing = false; m_ctestRerunCandidates.clear(); }
+        if (m_hasProject && m_project.root().generic_string() == m_ctestRoot && m_ctestShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            std::string error;
+            if (!result.ok || result.results.tests.size() != 1) setCommandStatus("CTest run failed: " + result.error, true);
+            else if (!ctestModuleReady(error)) setCommandStatus("CTest completed but the module changed: " + error, true);
+            else {
+                const auto prior = m_ctestLast.find(m_ctestRunning); if (prior != m_ctestLast.end()) m_ctestPrevious[m_ctestRunning] = prior->second;
+                m_ctestLast[m_ctestRunning] = result.results.tests[0];
+                const bool historySaved = m_ctestHistoryReady && !std::getenv("LUCID_SETTINGS_READ_ONLY") && modules::appendCTestHistory(m_settingsRoot, m_ctestHistory, result.results, error);
+                if (historySaved) m_ctestSummaries = modules::summarizeCTestHistory(m_ctestHistory.runs);
+                if (!historySaved && !error.empty()) { m_ctestHistoryReady = false; m_ctestHistoryError = error; }
+                setCommandStatus(m_ctestRunning + (m_ctestLast[m_ctestRunning].status == modules::TestResultStatus::Failed ? " failed" : " completed") + (historySaved ? "; history saved" : "; history not saved"), m_ctestLast[m_ctestRunning].status == modules::TestResultStatus::Failed || !historySaved);
+            }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        } else setStatus(result.process.cancelled ? "CTest cancelled" : result.ok ? "CTest finished after the review was closed; results were not retained" : "CTest run failed", !result.ok && !result.process.cancelled);
+    }
+    if (m_pythonProvisionFuture.valid() && m_pythonProvisionFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::PythonServerProvisionResult result;
+        try { result = m_pythonProvisionFuture.get(); } catch (const std::exception&) { result.error = "Installation failed"; result.mayHaveChanged = true; }
+        m_pythonProvisionCancel.reset(); m_pythonProvisionBootstrap.reset(); m_languageAttemptRoot.clear();
+        if (m_languageKind == "python" && m_languageRoot == m_pythonProvisionRoot && m_languagePythonInterpreter == m_pythonProvisionInterpreter) { m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); }
+        std::string message = result.ok ? "Python language server installed and verified; reopen a Python file" : result.cancelled ? "Installation cancelled" : "Installation failed";
+        if (!result.ok && !result.error.empty()) message += ": " + result.error;
+        if (!result.ok && result.mayHaveChanged) message += "; environment changes may remain";
+        if (m_pythonShowing && m_hasProject && m_project.root().generic_string() == m_pythonProvisionRoot && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_pythonProvisionGeneration) {
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(message, !result.ok);
+        } else setStatus(message, !result.ok);
+        m_pythonProvisionRoot.clear(); m_pythonProvisionInterpreter.clear();
+    }
+    if (m_pythonRuntimeFuture.valid() && m_pythonRuntimeFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        modules::PythonRuntimeResult result; try { result = m_pythonRuntimeFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (m_pythonShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            std::string error;
+            if (!result.ok) setCommandStatus("Python operation failed: " + result.error + (result.destinationMayRemain ? " A partial environment may remain." : ""), true);
+            else if (!pythonModuleReady(error)) setCommandStatus("Python succeeded but was not remembered: " + error, true);
+            else if (!modules::savePythonPreference(m_settingsRoot, m_pythonPreference, result.interpreter, error)) setCommandStatus("Python succeeded but was not remembered: " + error, true);
+            else {
+                m_languageAttemptRoot.clear();
+                if (m_languageKind == "python") { m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); }
+                if (m_pythonCreating && std::none_of(m_pythonEnvironments.begin(), m_pythonEnvironments.end(), [&result](const auto& env) { return env.interpreter == result.interpreter; })) m_pythonEnvironments.push_back({result.interpreter, result.interpreter.parent_path().parent_path(), result.version, true});
+                m_pythonSelected.reset(); m_modulePage = 0; m_selectedSuggestion = -1;
+                setCommandStatus("Python " + result.version + " remembered; install python-lsp-server if needed", false);
+            }
+            refreshSuggestions();
+        } else setStatus(result.ok ? "Python operation finished; reopen the module to select it" : "Python operation failed" + std::string(result.destinationMayRemain ? "; a partial environment may remain" : ""), !result.ok);
+    }
+    if (m_pythonDiscoveryFuture.valid() && m_pythonDiscoveryFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        PythonDiscoveryResult result; try { result = m_pythonDiscoveryFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (m_hasProject && m_project.root().generic_string() == m_pythonRoot && m_pythonShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (!result.error.empty()) setCommandStatus("Python discovery failed: " + result.error, true);
+            else {
+                m_pythonEnvironments = std::move(result.environments); m_pythonPreferenceReady = m_pythonManage && result.preferenceError.empty();
+                if (m_pythonPreferenceReady) {
+                    m_pythonPreference = std::move(result.preference);
+                    if (!m_pythonPreference.interpreter.empty() && std::none_of(m_pythonEnvironments.begin(), m_pythonEnvironments.end(), [this](const auto& env) { return env.interpreter == m_pythonPreference.interpreter; })) {
+                        m_pythonUnlistedInterpreter = m_pythonPreference.interpreter;
+                        m_pythonEnvironments.insert(m_pythonEnvironments.begin(), {m_pythonPreference.interpreter, {}, {}, false});
+                    }
+                }
+                setCommandStatus(!result.preferenceError.empty() ? "Preference unavailable: " + result.preferenceError : std::to_string(m_pythonEnvironments.size()) + " candidates; bounded discovery may omit environments and versions are unverified", !result.preferenceError.empty());
+            }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_logFuture.valid() && m_logFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_logCancel && m_logCancel->load(); m_logCancel.reset(); LogResult result;
+        try { result = m_logFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_logRoot && m_logShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_logGeneration && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_logModule && moduleStillEnabled(m_logModule,m_logJson?"log-correlation-json":"log-correlation")) {
+            if (!result.error.empty()) setCommandStatus("Log correlation failed: " + result.error, true);
+            else { m_logReport = std::move(result.report); m_logSnapshots = std::move(result.snapshots); setCommandStatus(std::to_string(m_logReport.records.size()) + " matches; " + std::to_string(m_logReport.unparseableLines) + " unparsed lines" + (m_logJson ? "; " + std::to_string(m_logReport.jsonLines) + " JSON lines" : "") + (m_logReport.incomplete ? "; results incomplete" : ""), m_logReport.incomplete || m_logReport.unparseableLines != 0); }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        } else if (!cancelled && m_logShowing && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_logModule) {m_logShowing=false;m_logSnapshots.clear();m_logReport={};m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Log context changed; run the comparison again",true);}
+    }
+    if (m_designTokenFuture.valid() && m_designTokenFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_designTokenCancel && m_designTokenCancel->load(); m_designTokenCancel.reset(); DesignTokenResult result;
+        try { result = m_designTokenFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_designTokenRoot && m_designTokenShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_designTokenGeneration && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_designTokenModule && moduleStillEnabled(m_designTokenModule,"design-token-explorer") && (!m_designTokenAliasEnabled || ([&] { std::vector<modules::Module> fresh; std::string error; return modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_designTokenModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"design-token-aliases-v1")!=m.requirements.end();}); })())) {
+            if (!result.error.empty()) setCommandStatus("Token inspection failed: " + result.error, true);
+            else { m_designTokenReport = std::move(result.report); m_designTokenAliases = std::move(result.aliases); m_designTokenSnapshot = std::move(result.snapshot); setCommandStatus(std::to_string(m_designTokenReport.tokens.size()) + " tokens; " + std::to_string(m_designTokenReport.warnings.size()) + " warnings; select a token for actions", !m_designTokenReport.warnings.empty() || m_designTokenReport.warningsTruncated); }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        } else if (!cancelled && m_designTokenShowing && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_designTokenModule) {m_designTokenShowing=false;m_designTokenSnapshot.clear();m_designTokenAliases.clear();m_designTokenReport={};m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Token context changed; inspect again",true);}
+    }
+    if (m_localizationFuture.valid() && m_localizationFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_localizationCancel && m_localizationCancel->load(); m_localizationCancel.reset(); LocalizationResult result;
+        try { result = m_localizationFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_localizationRoot && m_localizationShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (!result.error.empty()) setCommandStatus("Localization comparison failed: " + result.error, true);
+            else {
+                m_localizationEntries = std::move(result.entries);
+                m_localizationSourceSnapshot = std::move(result.sourceSnapshot); m_localizationTranslationSnapshot = std::move(result.translationSnapshot);
+                std::stable_sort(m_localizationEntries.begin(), m_localizationEntries.end(), [](const auto& a, const auto& b) { return !a.inTranslation && b.inTranslation; });
+                const auto missing = std::count_if(m_localizationEntries.begin(), m_localizationEntries.end(), [](const auto& entry) { return entry.inSource && !entry.inTranslation; });
+                setCommandStatus(std::to_string(missing) + " missing translations; length counts code points, not rendered width", missing != 0);
+            }
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_binaryFuture.valid() && m_binaryFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_binaryCancel && m_binaryCancel->load(); m_binaryCancel.reset(); BinaryResult result;
+        try { result = m_binaryFuture.get(); } catch (const std::exception& e) { result.inspection.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_binaryRoot && m_binaryShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (result.selecting && !result.inspection.error.empty()) { setCommandStatus("Binary inspection failed: " + result.inspection.error, true); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (result.selecting) m_binarySlice = result.slice;
+            m_binaryInspection = std::move(result.inspection); m_binarySnapshot = std::move(result.snapshot);
+            if (!m_binaryInspection.error.empty()) setCommandStatus("Binary inspection failed: " + m_binaryInspection.error, true);
+            else setCommandStatus(m_binaryInspection.incomplete ? "Some metadata is malformed, unsupported, or omitted by limits" : "Read-only inspection; stripped or unsupported metadata may be absent", m_binaryInspection.incomplete);
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_benchmarkFuture.valid() && m_benchmarkFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_benchmarkCancel && m_benchmarkCancel->load(); m_benchmarkCancel.reset(); BenchmarkResult result;
+        try { result = m_benchmarkFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_benchmarkRoot && m_benchmarkShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (result.error.empty()) { m_benchmarkComparison = std::move(result.comparison); setCommandStatus(m_benchmarkComparison.entries.empty() ? "No measurements in these reports" : "Possible changes use a 5% threshold; measurement noise is not assessed", false); }
+            else setCommandStatus("Benchmark comparison failed: " + result.error, true);
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_moduleHistoryFuture.valid() && m_moduleHistoryFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        ModuleHistoryResult result; try { result = m_moduleHistoryFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (m_moduleHistoryShowing && result.isDiff == m_moduleHistoryDiffShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (!m_hasProject || !m_hasDocument || m_project.root().generic_string() != m_moduleHistoryRoot || m_filePath != m_moduleHistoryFile || (m_moduleHistoryRange && m_document.revision() != m_moduleHistoryRevision)) result.error = "Project or file changed; reopen history";
+            if (result.error.empty()) {
+                if (result.isDiff) m_moduleHistoryDiff = std::move(result.diff); else if (m_moduleHistoryRange) m_moduleRangeHistory = std::move(result.ranges); else m_moduleHistoryEntries = std::move(result.entries);
+                setCommandStatus(result.isDiff ? "Historical changes; line numbers do not refer to the current buffer" : m_moduleHistoryRange ? (m_moduleRangeHistory.empty() ? "No history found for selected lines" : "Select a commit; range history is limited to 100 commits") : result.stoppedAtBoundary ? "History stops at a rename outside the project" : (m_moduleHistoryEntries.empty() ? "No commits found for this file" : "Select a commit; history follows renames within the project and is limited to 100 commits"), false);
+            } else setCommandStatus("Git history failed: " + result.error, true);
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_coverageFuture.valid() && m_coverageFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_coverageCancel && m_coverageCancel->load(); m_coverageCancel.reset(); CoverageResult result;
+        try { result = m_coverageFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_coverageRoot && m_coverageShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (result.comparing) {
+                if (result.error.empty()) { m_coverageComparison = std::move(result.comparison); m_coverageComparing = true; }
+                setCommandStatus(result.error.empty() ? "Coverage comparison is approximate; reports may be stale" : "Coverage comparison failed: " + result.error, !result.error.empty());
+                m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            } else {
+            if (!result.error.empty()) result.report.incomplete = true;
+            m_coverageReport = std::move(result.report); m_coverageBaselines = std::move(result.baselines);
+            std::string summaryError;
+            if (!modules::summarizeCoverage(m_coverageReport, m_coverageSummary, summaryError)) { m_coverageReport.incomplete = true; result.error = "Could not summarize coverage: " + summaryError; }
+            std::stable_sort(m_coverageReport.lines.begin(), m_coverageReport.lines.end(), [](const auto& a, const auto& b) { return !a.covered && b.covered; });
+            const auto covered = std::count_if(m_coverageReport.lines.begin(), m_coverageReport.lines.end(), [](const auto& line) { return line.covered; });
+            if (!result.error.empty()) setCommandStatus("Coverage import failed: " + result.error, true);
+            else setCommandStatus(std::to_string(covered) + "/" + std::to_string(m_coverageReport.lines.size()) + " lines covered" + (m_coverageReport.incomplete ? "; report incomplete or files skipped" : "; report may be stale"), m_coverageReport.incomplete);
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            }
+        }
+    }
+    if (m_markdownLinksFuture.valid() && m_markdownLinksFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_markdownLinksCancel && m_markdownLinksCancel->load(); m_markdownLinksCancel.reset();
+        modules::MarkdownLinkResults result; std::string error;
+        try { result = m_markdownLinksFuture.get(); } catch (const std::exception& e) { error = e.what(); }
+        if (!cancelled && m_markdownLinksShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation() == m_markdownExternalGeneration && moduleStillEnabled(m_markdownExternalModule, m_markdownExternalMode ? "markdown-external-links" : "markdown-local-links")) {
+            if (!m_hasProject || m_project.root().generic_string() != m_markdownLinksRoot || !m_hasDocument || m_filePath != m_moduleMarkdownFile || m_document.revision() != m_moduleMarkdownRevision) error = "Document or project changed; check links again";
+            if (error.empty()) {
+                m_markdownLinksResults = std::move(result);
+                const auto missing = std::count_if(m_markdownLinksResults.links.begin(), m_markdownLinksResults.links.end(), [](const auto& link) { return link.status == modules::MarkdownLinkStatus::Missing; });
+                setCommandStatus(m_markdownExternalMode ? "Select a link; each request requires confirmation" : std::to_string(missing) + " missing; external links and fragments are not checked" + (m_markdownLinksResults.incomplete ? "; results incomplete" : ""), m_markdownLinksResults.incomplete || (!m_markdownExternalMode && missing));
+            } else setCommandStatus(error, true);
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if (m_markdownExternalFuture.valid() && m_markdownExternalFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_markdownExternalCancel && m_markdownExternalCancel->load(); m_markdownExternalCancel.reset(); modules::LinkCheck result;
+        try { result=m_markdownExternalFuture.get(); } catch (const std::exception&) { result.detail="Request failed"; }
+        if (!cancelled && m_markdownLinksShowing && m_markdownExternalMode && m_markdownExternalSelected && *m_markdownExternalSelected==m_markdownExternalRequestIndex && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_markdownExternalGeneration && m_hasProject && m_project.root().generic_string()==m_markdownLinksRoot && m_hasDocument && m_filePath==m_moduleMarkdownFile && m_document.revision()==m_moduleMarkdownRevision && moduleStillEnabled(m_markdownExternalModule,"markdown-external-links") && m_markdownExternalRequestIndex<m_markdownLinksResults.links.size()) {
+            auto& link=m_markdownLinksResults.links[m_markdownExternalRequestIndex];
+            link.status=result.state==modules::LinkState::Ok ? modules::MarkdownLinkStatus::Found : result.state==modules::LinkState::Broken ? modules::MarkdownLinkStatus::Missing : modules::MarkdownLinkStatus::NotChecked;
+            link.detail=result.detail; setCommandStatus(result.detail, result.state!=modules::LinkState::Ok); refreshSuggestions();
+        }
+    }
+    if (m_markdownPreviewFuture.valid() && m_markdownPreviewFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        MarkdownPreviewResult result; try { result = m_markdownPreviewFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (m_markdownPreviewShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            if (!m_hasDocument || m_filePath != m_moduleMarkdownFile || m_document.revision() != m_moduleMarkdownRevision) result.error = "Document changed; reopen the preview";
+            if (result.error.empty()) {
+                bool limited = result.preview.truncated;
+                for (const auto& block : result.preview.blocks) {
+                    const auto kind = block.kind == modules::MarkdownBlockKind::Heading ? ui::SuggestionKind::MarkdownHeading : block.kind == modules::MarkdownBlockKind::Code ? ui::SuggestionKind::MarkdownCode : ui::SuggestionKind::ReadOnlyText;
+                    const std::string prefix = block.kind == modules::MarkdownBlockKind::ListItem ? "• " : block.kind == modules::MarkdownBlockKind::Quote ? "│ " : block.kind == modules::MarkdownBlockKind::Code ? "  " : "";
+                    const auto blockText = block.kind == modules::MarkdownBlockKind::Rule ? std::string("────────────────") : block.text;
+                    for (const auto& line : text::wrapLines(blockText, 58)) {
+                        if (m_markdownPreviewLines.size() >= 10000) { limited = true; break; }
+                        m_markdownPreviewLines.push_back({prefix + line, kind});
+                    }
+                    if (limited && m_markdownPreviewLines.size() >= 10000) break;
+                }
+                setCommandStatus(limited ? "Markdown preview limited; some content is omitted" : "Text preview; Escape returns to module commands", limited);
+            } else setCommandStatus(result.error, true);
+            m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if(m_cmakeBuildPrepareFuture.valid() && m_cmakeBuildPrepareFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready){modules::CMakeBuildPlan plan;try{plan=m_cmakeBuildPrepareFuture.get();}catch(const std::exception&){plan.error="Could not prepare build review";}if(m_moduleCMakeShowing && m_cmakeBuildStage==2 && m_hasProject && m_project.root().generic_string()==m_moduleCMakeRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_cmakeBuildGeneration){if(plan.error.empty()){m_cmakeBuildPlan=std::move(plan);m_cmakeBuildStage=3;}else{m_cmakeBuildStage=0;setCommandStatus(plan.error,true);}m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();}}
+    if(m_cmakeBuildFuture.valid() && m_cmakeBuildFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready){modules::ModuleProcessResult result;try{result=m_cmakeBuildFuture.get();}catch(const std::exception&){result.error="Build failed";}m_cmakeBuildCancel.reset();if(m_moduleCMakeShowing && m_cmakeBuildStage==4 && m_hasProject && m_project.root().generic_string()==m_moduleCMakeRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_cmakeBuildGeneration){m_cmakeBuildResult=std::move(result);m_cmakeBuildStage=5;m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus(m_cmakeBuildResult.error.empty()?"Build finished; review exit code and output":m_cmakeBuildResult.error,!m_cmakeBuildResult.error.empty() || m_cmakeBuildResult.exitCode!=0);}}
+    if(m_cmakeValuesFuture.valid() && m_cmakeValuesFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready){CMakeValuesResult result;try{result=m_cmakeValuesFuture.get();}catch(const std::exception&){result.error="Could not read cache values";}if(m_moduleCMakeShowing && m_cmakeValueMode && m_hasProject && m_project.root().generic_string()==m_moduleCMakeRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands){m_cmakeValues=std::move(result.values);if(!result.error.empty())setCommandStatus(result.error,true);m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();}}
+    if (m_cmakeCachePrepareFuture.valid() && m_cmakeCachePrepareFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        CMakeCachePrepareResult result; try { result=m_cmakeCachePrepareFuture.get(); } catch (const std::exception&) { result.error="Could not inspect CMake cache"; }
+        if (m_moduleCMakeShowing && m_moduleCMakeEditing && (m_moduleCMakeOption || m_cmakeValueSelected) && m_hasProject && m_project.root().generic_string()==m_moduleCMakeRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands) {
+            if (result.error.empty()) { m_cmakeCacheUpdate=std::move(result.update); setCommandStatus("Review the change; no file has been written",false); }
+            else setCommandStatus("Cache check failed: " + result.error,true);
+            m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions();
+        }
+    }
+    if (m_cmakeCacheSaveFuture.valid() && m_cmakeCacheSaveFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        std::string error; try { error=m_cmakeCacheSaveFuture.get(); } catch (const std::exception&) { error="Could not save CMake cache"; }
+        if (m_moduleCMakeShowing && m_moduleCMakeEditing && m_hasProject && m_project.root().generic_string()==m_moduleCMakeRoot && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands) {
+            m_moduleCMakeStale=true; m_moduleCMakeOption.reset(); m_cmakeValueSelected.reset(); m_cmakeValueMode=false; m_cmakeCacheUpdate={}; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions();
+            setCommandStatus(error.empty() ? "Cache updated; reconfigure CMake before building" : "Cache not updated: " + error + "; reopen options",!error.empty());
+        }
+    }
+    if (m_moduleCMakeFuture.valid() && m_moduleCMakeFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        CMakeModelResult result; try { result = m_moduleCMakeFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+        if (m_hasProject && m_project.root().generic_string() == m_moduleCMakeRoot && m_moduleCMakeShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            m_moduleCMakeModel = std::move(result.model); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            setCommandStatus(result.error.empty() ? std::to_string(m_moduleCMakeModel.targets.size()) + " CMake targets" : result.error, !result.error.empty());
+        }
+    }
+    if (m_moduleScanFuture.valid() && m_moduleScanFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const bool cancelled = m_moduleScanCancel && m_moduleScanCancel->load(); m_moduleScanCancel.reset();
+        modules::SecretScanResult result; std::string failure;
+        try { result = m_moduleScanFuture.get(); } catch (const std::exception& e) { failure = e.what(); }
+        if (!cancelled && m_hasProject && m_project.root().generic_string() == m_moduleScanRoot && m_moduleScanShowingResults && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+            m_moduleScanResults = std::move(result); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+            if (!failure.empty()) setCommandStatus("Scan failed: " + failure, true);
+            else setCommandStatus(std::to_string(m_moduleScanResults.findings.size()) + " possible secrets; " + std::to_string(m_moduleScanResults.skipped) + " files skipped" + (m_moduleScanResults.incomplete ? "; scan incomplete" : "; pattern scan cannot guarantee safety"), m_moduleScanResults.incomplete);
+        }
+    }
     if (!m_moduleFetchFuture.valid() || m_moduleFetchFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     ModuleFetchResult result;
     try { result = m_moduleFetchFuture.get(); }
@@ -2627,6 +6963,10 @@ void Application::pollDebugger() {
     }
     if (!output.empty() && !m_debugSession.receive(output, error)) { m_debugAdapter.close(); m_debugClosing = false; setStatus("Debugger: " + error, true); updateOpenDebugView("Debugger: " + error, true); return; }
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (m_debugPauseDeadline > 0.0) {
+        if (!m_debugSession.pausePending()) m_debugPauseDeadline = 0.0;
+        else if (now >= m_debugPauseDeadline) { m_debugSession.pauseTimedOut(); m_debugPauseDeadline = 0.0; }
+    }
     if (!m_debugClosing && m_debugStartDeadline > 0.0 && now >= m_debugStartDeadline &&
         (m_debugSession.state() == debug::State::Initializing || m_debugSession.state() == debug::State::Launching)) {
         m_debugAdapter.close(); m_debugStartDeadline = 0.0;
@@ -2641,6 +6981,10 @@ void Application::pollDebugger() {
         setStatus(m_debugSession.breakpointWarning().empty() ? m_debugSession.message() : m_debugSession.breakpointWarning(), m_debugSession.messageIsError() || !m_debugSession.breakpointWarning().empty());
         if (m_debugLastState == debug::State::Failed) m_debugAdapter.close();
     }
+    if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::DebugThreads && m_debugThreadsRefreshAt > 0.0 &&
+        now >= m_debugThreadsRefreshAt && !m_debugSession.threadsPending() && m_debugSession.state() == debug::State::Stopped) {
+        m_debugThreadsRefreshAt = 0.0; std::string ignored; (void)m_debugSession.requestThreads(ignored);
+    }
     if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::DebugThreads && !m_debugSession.threadsPending())
         setCommandStatus(m_debugSession.messageIsError() ? m_debugSession.message() : m_debugSession.threads().empty() ? "No threads reported" : "Select a thread", m_debugSession.messageIsError());
     if (m_searchBar.isOpen() && (m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugThreads || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput)) refreshSuggestions();
@@ -2652,6 +6996,7 @@ void Application::refreshDebugSuggestions() {
     if (kind == ui::PromptKind::DebugMenu) {
         if (!m_debugAdapter.alive() || m_debugSession.state() == debug::State::Ended || m_debugSession.state() == debug::State::Failed) add("Start debugging", "Choose an executable", -10);
         if (m_hasDocument) add("Toggle breakpoint at cursor", "", -11);
+        if (m_debugAdapter.alive() && m_debugSession.state() == debug::State::Running) add("Pause", "Pause the running program", -26);
         if (m_debugAdapter.alive() && m_debugSession.state() == debug::State::Stopped) {
             add("Continue", "", -12); add("Step over", "", -13); add("Step into", "", -14); add("Step out", "", -15);
             add("Call stack", std::to_string(m_debugSession.stack().size()), -16);
@@ -2669,6 +7014,7 @@ void Application::refreshDebugSuggestions() {
             add(thread.name.empty() ? "Thread " + std::to_string(thread.id) : thread.name,
                 thread.id == m_debugSession.selectedThread() ? "Selected" : "Select thread", static_cast<int>(i));
         }
+        add("Refresh threads", "Check for newly discovered threads", -25);
     } else if (kind == ui::PromptKind::DebugVariables) {
         if (m_debugSession.expandedVariables()) add("Back to frame variables", "", -23);
         for (std::size_t i = 0; i < m_debugSession.variables().size(); ++i) {
@@ -2755,7 +7101,7 @@ void Application::applyDebugCommand() {
             workspace::recordTaskActivity(*task, m_settings.taskIdentity, "started debugging", program);
             if (!commitTaskBoard(std::move(board))) { m_debugAdapter.close(); return; }
         }
-        m_debugSource = m_filePath; m_debugClosing = false; m_debugLastState = debug::State::Idle; m_debugLastWarning.clear(); m_debugLastMessage.clear();
+        m_debugSource = m_filePath; m_debugClosing = false; m_debugPauseDeadline = 0.0; m_debugLastState = debug::State::Idle; m_debugLastWarning.clear(); m_debugLastMessage.clear();
         std::map<std::string, std::vector<int>> breakpoints;
         for (const auto& [path, lines] : m_debugBreakpoints) {
             std::string pathError; const auto resolved = m_project.resolve(path, pathError);
@@ -2784,6 +7130,11 @@ void Application::applyDebugCommand() {
         if (!m_debugSession.selectThread(static_cast<std::size_t>(choice), error)) { setCommandStatus(error, true); return; }
         m_debugPage = 0; m_searchBar.open(ui::PromptKind::DebugStack); clearCommandFeedback();
         setCommandStatus("Loading selected thread's stack…", false); refreshSuggestions(); return;
+    }
+    if (kind == ui::PromptKind::DebugThreads && choice == -25) {
+        std::string error;
+        if (!m_debugSession.requestThreads(error)) { setCommandStatus(error, true); return; }
+        m_debugThreadsRefreshAt = 0.0; setCommandStatus("Refreshing threads…", false); refreshSuggestions(); return;
     }
     if (kind == ui::PromptKind::DebugVariables) {
         std::string error;
@@ -2822,10 +7173,16 @@ void Application::applyDebugCommand() {
     if (choice == -11) { toggleBreakpoint(); m_searchBar.close(); return; }
     if (choice == -24) {
         std::string error; if (!m_debugSession.requestThreads(error)) { setCommandStatus(error, true); return; }
+        m_debugThreadsRefreshAt = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() + 1.0;
         m_debugPage = 0; m_searchBar.open(ui::PromptKind::DebugThreads); clearCommandFeedback();
         setCommandStatus("Loading threads…", false); refreshSuggestions(); return;
     }
     if (choice == -19) { stopDebugger(); m_searchBar.close(); return; }
+    if (choice == -26) {
+        std::string error; if (!m_debugSession.pause(error)) { setCommandStatus(error, true); return; }
+        m_debugPauseDeadline = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() + 15.0;
+        m_searchBar.close(); setStatus("Pause requested", false); return;
+    }
     if (choice >= -15 && choice <= -12) {
         const char* command = choice == -12 ? "continue" : choice == -13 ? "next" : choice == -14 ? "stepIn" : "stepOut";
         std::string error; if (!m_debugSession.resume(command, error)) { setCommandStatus(error, true); return; }
@@ -2884,6 +7241,58 @@ void Application::pollGitRemote() {
     setStatus(message, warning);
 }
 
+void Application::pollGitBranch() {
+    if (!m_gitBranchFuture.valid() || m_gitBranchFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    GitRemoteResult result;
+    try { result = m_gitBranchFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
+    const bool sameProject = m_hasProject && m_project.root().generic_string() == m_gitBranchRoot;
+    std::string message = result.ok ? "Switched to " + m_gitBranchTarget.name : "Branch switch failed: " + result.error;
+    bool warning = !result.ok;
+    if (sameProject) {
+        scheduleProjectIndex(); m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear();
+        m_languageNavigationQueued = m_languageFormatQueued = m_languageRenameQueued = m_languageSignatureQueued = false;
+        m_languageNavigationRequest = m_languageFormatRequest = m_languageRenameRequest = m_languageSignatureRequest = m_completionRequest = 0;
+        bool needsRecovery = false;
+        const auto reconcile = [this, &message, &warning, &needsRecovery](const std::string& path, editor::Document& document, std::string& baseline, int& firstLine) {
+            std::string disk, error;
+            const bool readable = m_project.readFile(path, disk, error);
+            const bool binary = readable && std::any_of(disk.begin(), disk.end(), [](unsigned char c) { return c == 0 || (c < 32 && c != '\t' && c != '\n' && c != '\r'); });
+            if (!readable || binary || (readable && !editor::Document::canEditLosslessly(disk, error))) {
+                document.markRecovered(); message += "; " + path + " remains open as recoverable text"; warning = needsRecovery = true; return;
+            }
+            if (disk == baseline) return;
+            if (document.dirty()) { message += "; " + path + " changed while switching"; warning = needsRecovery = true; return; }
+            const auto line = document.cursorLine(), column = document.cursorColumn();
+            document = editor::Document::fromUtf8(disk); document.setCursor(line, column);
+            firstLine = std::min(firstLine, static_cast<int>(document.lineCount() - 1)); baseline = std::move(disk);
+        };
+        if (m_hasDocument) reconcile(m_filePath, m_document, m_diskContents, m_firstLine);
+        for (auto& file : m_inactiveDocuments) reconcile(file.path, file.document, file.diskContents, file.firstLine);
+        if (needsRecovery && !checkpointRecovery()) message += "; recovery checkpoint unavailable";
+        m_syntaxValid = false; m_compileScriptValid = false; m_accessibilityKey.clear(); resetDiagnostics(); invalidateFunctionIndex();
+        std::string refreshError; if (!workspace::gitChanges(m_project.root(), m_gitChanges, refreshError)) { message += "; Git status unavailable: " + refreshError; warning = true; }
+        if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::GitBranchReview) {
+            m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitChanges); clearCommandFeedback(); refreshSuggestions(); setCommandStatus(message, warning);
+        }
+    }
+    setStatus(message, warning);
+}
+
+void Application::pollGitSecretScan() {
+    if (!m_gitSecretFuture.valid() || m_gitSecretFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    modules::SecretScanResult result; std::string failure;
+    try { result = m_gitSecretFuture.get(); } catch (const std::exception& e) { failure = e.what(); }
+    if (!m_hasProject || m_project.root().generic_string() != m_gitSecretRoot || !m_gitSecretRequired ||
+        m_gitSecretPreview.indexTree != m_gitCommitPreview.indexTree || m_gitSecretPreview.head != m_gitCommitPreview.head ||
+        m_gitSecretPreview.paths != m_gitCommitPreview.paths) return;
+    m_gitSecretResult = std::move(result); m_gitSecretFailure = std::move(failure); m_gitSecretFinished = true;
+    if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::GitCommitReview) {
+        refreshSuggestions();
+        const bool warning = !m_gitSecretFailure.empty() || m_gitSecretResult.incomplete || !m_gitSecretResult.findings.empty();
+        setCommandStatus(warning ? "Review scan warnings; select Write commit message to proceed" : "Staged secret scan complete; pattern checks have limits", warning);
+    }
+}
+
 void Application::refreshGitSuggestions() {
     m_gitChoices.clear();
     const auto kind = m_searchBar.kind();
@@ -2897,6 +7306,7 @@ void Application::refreshGitSuggestions() {
         add("Pull from upstream", "Clean working tree; fast-forward only", -31);
         add("Push to upstream", "Current commit; no force push", -32);
         add("Recent commits", "View history", -35);
+        add("Local branches", "Review and switch branches", -36);
         for (std::size_t i = 0; i < m_gitChanges.size(); ++i) {
             const auto& item = m_gitChanges[i]; add(item.path, item.conflict ? "Merge conflict" : "Git " + item.status, static_cast<int>(i));
         }
@@ -2912,7 +7322,15 @@ void Application::refreshGitSuggestions() {
             const auto& line = m_gitReview.lines[i]; add(line.text, line.line > 0 ? "Line " + std::to_string(line.line) : "", static_cast<int>(i));
         }
     } else if (kind == ui::PromptKind::GitCommitReview) {
-        add("Write commit message", "Enter creates a local commit", -15);
+        add("Write commit message", m_gitSecretRequired && !m_gitSecretFinished ? "Wait for staged secret scan" : "Enter creates a local commit", -15);
+        if (m_gitSecretRequired) {
+            if (!m_gitSecretFinished) add("Scanning staged files…", "Reading the reviewed Git tree", -16);
+            else if (!m_gitSecretFailure.empty()) add("Secret scan failed", "Review before continuing", -16);
+            else {
+                add("Secret scan: " + std::to_string(m_gitSecretResult.findings.size()) + " possible findings", m_gitSecretResult.incomplete ? "Incomplete scan; review skipped files" : "Pattern-based scan has limits", -16);
+                for (const auto& finding : m_gitSecretResult.findings) add(finding.path + ":" + std::to_string(finding.line + 1), finding.kind, -16);
+            }
+        }
         for (const auto& path : m_gitCommitPreview.paths) add(path, "Staged", -16);
     } else if (kind == ui::PromptKind::GitRemoteReview) {
         const char* name = m_gitRemoteAction == workspace::GitRemoteAction::Fetch ? "Fetch" : m_gitRemoteAction == workspace::GitRemoteAction::Pull ? "Pull" : "Push";
@@ -2923,6 +7341,14 @@ void Application::refreshGitSuggestions() {
         add("Commit: " + m_gitUpstream.head.substr(0, 12), "", -34);
     } else if (kind == ui::PromptKind::GitHistory) {
         for (const auto& item : m_gitHistory) add(item.hash + "  " + item.subject, item.author + " · " + item.date, -34);
+    } else if (kind == ui::PromptKind::GitBranches) {
+        for (std::size_t i = 0; i < m_gitBranches.branches.size(); ++i) {
+            const auto& branch = m_gitBranches.branches[i]; add(branch.name, (branch.current ? "Current · " : "") + branch.commit.substr(0, 12), static_cast<int>(i));
+        }
+    } else if (kind == ui::PromptKind::GitBranchReview) {
+        add("Switch to " + m_gitBranchTarget.name, "Requires a clean repository; runs Git checkout hooks", -38);
+        add("Target commit: " + m_gitBranchTarget.commit.substr(0, 12), "Branch and HEAD are checked again", -34);
+        add("Current commit: " + m_gitBranches.head.substr(0, 12), "Open files will be refreshed", -34);
     }
     const auto pageSize = pagedContentCount();
     const auto pages = std::max<std::size_t>(1, (entries.size() + pageSize - 1) / pageSize);
@@ -2940,6 +7366,9 @@ void Application::refreshGitSuggestions() {
 void Application::applyGitReview() {
     const auto kind = m_searchBar.kind();
     if (kind == ui::PromptKind::GitCommitInput) {
+        if (m_gitSecretRequired && (!m_gitSecretFinished || ((!m_gitSecretFailure.empty() || m_gitSecretResult.incomplete || !m_gitSecretResult.findings.empty()) && !m_gitSecretAcknowledged))) {
+            setCommandStatus("Review the staged secret scan before committing", true); return;
+        }
         const std::string message(m_searchBar.query()); std::string output, error;
         if (!workspace::gitCommit(m_project.root(), m_gitCommitPreview, message, output, error)) { setCommandStatus(error, true); return; }
         openGitReview(); setCommandStatus("Commit created locally", false); setStatus("Commit created locally", false); return;
@@ -2964,6 +7393,12 @@ void Application::applyGitReview() {
     if (kind == ui::PromptKind::GitRemoteReview) return;
     if (choice == -1 || choice == -2) { if (choice == -1 && m_gitPage) --m_gitPage; else if (choice == -2) ++m_gitPage; m_pagedScroll = 0; m_selectedSuggestion = -1; m_menuReselectionRequired = true; refreshSuggestions(); return; }
     if (kind == ui::PromptKind::GitChanges) {
+        if (choice == -36) {
+            if (m_gitRemoteFuture.valid() || m_gitBranchFuture.valid()) { setCommandStatus("A Git operation is already running", true); return; }
+            std::string error; if (!workspace::gitBranches(m_project.root(), m_gitBranches, error)) { setCommandStatus(error, true); return; }
+            m_gitPage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; m_searchBar.open(ui::PromptKind::GitBranches); clearCommandFeedback(); refreshSuggestions();
+            setCommandStatus("Select a local branch to review", false); return;
+        }
         if (choice == -35) {
             std::string error; if (!workspace::gitHistory(m_project.root(), m_gitHistory, error)) { setCommandStatus(error, true); return; }
             m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitHistory); clearCommandFeedback(); refreshSuggestions(); return;
@@ -2979,14 +7414,57 @@ void Application::applyGitReview() {
         if (choice == -10) {
             std::string error;
             if (!workspace::gitCommitPreview(m_project.root(), m_gitCommitPreview, error)) { setCommandStatus(error, true); return; }
-            m_gitPage = 0; m_searchBar.open(ui::PromptKind::GitCommitReview); clearCommandFeedback(); refreshSuggestions(); return;
+            if (m_gitSecretFuture.valid()) { setCommandStatus("The previous staged scan is still finishing", true); return; }
+            std::vector<modules::Module> installed;
+            const auto moduleRoot = std::filesystem::path(m_settingsRoot).parent_path() / "Modules";
+            if (!m_settingsRoot.empty() && !modules::list(moduleRoot, installed, error)) { setCommandStatus("Cannot check scanner status: " + error, true); return; }
+            m_gitSecretRequired = std::any_of(installed.begin(), installed.end(), [](const modules::Module& module) {
+                return module.id == "lucid-secret-scanner" && module.enabled && std::any_of(module.commands.begin(), module.commands.end(), [](const modules::Command& command) { return command.action == "scan-secrets"; });
+            });
+            m_gitSecretFinished = !m_gitSecretRequired; m_gitSecretAcknowledged = false; m_gitSecretFailure.clear(); m_gitSecretResult = {};
+            if (m_gitSecretRequired) {
+                m_gitSecretRoot = m_project.root().generic_string(); m_gitSecretPreview = m_gitCommitPreview;
+                const auto root = m_project.root(); const auto preview = m_gitCommitPreview;
+                m_gitSecretFuture = std::async(std::launch::async, [root, preview] { return modules::scanStagedSecrets(root, preview); });
+            }
+            m_gitPage = 0; m_selectedSuggestion = -1; m_searchBar.open(ui::PromptKind::GitCommitReview); clearCommandFeedback(); refreshSuggestions();
+            if (m_gitSecretRequired) setCommandStatus("Scanning staged files…", false);
+            return;
         }
         if (choice < 0 || static_cast<std::size_t>(choice) >= m_gitChanges.size()) return;
         m_gitSelectedFile = static_cast<std::size_t>(choice); m_gitPage = 0;
         m_searchBar.open(ui::PromptKind::GitFile); clearCommandFeedback(); refreshSuggestions(); return;
     }
+    if (kind == ui::PromptKind::GitBranches) {
+        if (choice < 0 || static_cast<std::size_t>(choice) >= m_gitBranches.branches.size()) return;
+        m_gitBranchTarget = m_gitBranches.branches[static_cast<std::size_t>(choice)];
+        if (m_gitBranchTarget.current) { setCommandStatus("This branch is already checked out", false); return; }
+        m_gitPage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; m_searchBar.open(ui::PromptKind::GitBranchReview); clearCommandFeedback(); refreshSuggestions();
+        setCommandStatus("Review the target; select Switch to continue", false); return;
+    }
+    if (kind == ui::PromptKind::GitBranchReview) {
+        if (choice != -38) return;
+        if (m_selectedSuggestion < 0) { setCommandStatus("Select Switch to confirm", false); return; }
+        if (m_gitRemoteFuture.valid() || m_gitBranchFuture.valid()) { setCommandStatus("A Git operation is already running", true); return; }
+        if ((m_hasDocument && m_document.dirty()) || std::any_of(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [](const OpenDocument& doc) { return doc.document.dirty(); })) {
+            setCommandStatus("Save all open files before switching branches", true); return;
+        }
+        if (m_debugAdapter.alive()) { setCommandStatus("Stop the debugger before switching branches", true); return; }
+        const auto root = m_project.root(); const auto branches = m_gitBranches; const auto target = m_gitBranchTarget;
+        m_gitBranchRoot = root.generic_string();
+        m_gitBranchFuture = std::async(std::launch::async, [root, branches, target] {
+            GitRemoteResult result; try { result.ok = workspace::gitSwitchBranch(root, branches, target, result.output, result.error); }
+            catch (const std::exception& e) { result.error = e.what(); } return result;
+        });
+        setCommandStatus("Switching branches…", false); return;
+    }
     if (kind == ui::PromptKind::GitCommitReview) {
-        if (choice == -15) { m_searchBar.open(ui::PromptKind::GitCommitInput); clearCommandFeedback(); setCommandStatus("Enter a commit message; Enter commits all reviewed staged files", false); }
+        if (choice == -15) {
+            if (m_gitSecretRequired && !m_gitSecretFinished) { setCommandStatus("Wait for the staged secret scan", true); return; }
+            const bool warning = m_gitSecretRequired && (!m_gitSecretFailure.empty() || m_gitSecretResult.incomplete || !m_gitSecretResult.findings.empty());
+            if (warning && m_selectedSuggestion < 0) { setCommandStatus("Review warnings and select Write commit message to continue", true); return; }
+            m_gitSecretAcknowledged = warning; m_searchBar.open(ui::PromptKind::GitCommitInput); clearCommandFeedback(); setCommandStatus("Enter a commit message; Enter commits all reviewed staged files", false);
+        }
         return;
     }
     if (m_gitSelectedFile >= m_gitChanges.size()) return;
@@ -3319,10 +7797,10 @@ void Application::openProjectSearch(bool replace) {
     if (!m_hasProject) { setStatus("Open a project to search", true); return; }
     if (m_projectSearchFuture.valid()) { setStatus("A project search is still running", false); return; }
     if (!saveDocument()) return;
-    m_projectSearchReplace = replace; m_projectSearchResults = {}; m_projectSearchPage = 0; m_projectReviewFile.reset(); m_lastProjectSearchMatch.reset();
+    m_projectSearchReplace = replace; m_projectSearchEditingFilter = false; m_projectSearchShowingSkipped = false; m_projectSearchResults = {}; m_projectSearchPage = 0; m_projectReviewFile.reset(); m_lastProjectSearchMatch.reset();
     m_projectSearchHistoryPosition = m_projectSearchHistory.size(); m_projectSearchDraft.clear();
     m_searchBar.open(ui::PromptKind::ProjectSearch); clearCommandFeedback();
-    setCommandStatus(m_projectSearchWholeWord ? "Whole words on; Ctrl/Command+Shift+W toggles; Enter searches" : "Whole words off; Ctrl/Command+Shift+W toggles; Enter searches", false);
+    setCommandStatus(projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false);
 }
 
 void Application::reopenProjectSearchResults() {
@@ -3330,7 +7808,7 @@ void Application::reopenProjectSearchResults() {
         setStatus("No project search results to return to", false); return;
     }
     if (m_settingsPanelVisible || m_compileTerminalFocused || m_projectSearchFuture.valid()) return;
-    m_searchBar.open(ui::PromptKind::ProjectSearchResults); clearCommandFeedback();
+    m_projectSearchShowingSkipped = false; m_searchBar.open(ui::PromptKind::ProjectSearchResults); clearCommandFeedback();
     if (m_lastProjectSearchMatch && *m_lastProjectSearchMatch < m_projectSearchResults.matches.size())
         m_projectSearchPage = *m_lastProjectSearchMatch / 6;
     refreshSuggestions();
@@ -3356,14 +7834,19 @@ void Application::pollProjectSearch() {
         return;
     }
     if (cancelled || !m_hasProject || m_project.root().generic_string() != m_projectSearchRoot || !m_searchBar.isOpen() || m_searchBar.kind() != ui::PromptKind::ProjectSearch) return;
-    m_projectSearchResults = std::move(results); m_lastProjectSearchMatch.reset();
+    m_projectSearchResults = std::move(results); m_lastProjectSearchMatch.reset(); m_projectSearchShowingSkipped = false;
     m_projectSearchPage = 0; m_searchBar.open(ui::PromptKind::ProjectSearchResults); clearCommandFeedback(); refreshSuggestions();
-    setCommandStatus(std::to_string(m_projectSearchResults.matches.size()) + " matches in " + std::to_string(m_projectSearchResults.files.size()) + " files; " + std::to_string(m_projectSearchResults.skipped) + " skipped" + (m_projectSearchResults.indexIncomplete ? " (directory scan incomplete; replace disabled)" : m_projectSearchResults.truncated ? " (limit reached; replace disabled)" : ""), m_projectSearchResults.indexIncomplete);
+    setCommandStatus(std::to_string(m_projectSearchResults.matches.size()) + " matches in " + std::to_string(m_projectSearchResults.files.size()) + " files; " + std::to_string(m_projectSearchResults.skipped) + " skipped" + (m_projectSearchResults.firstSkippedPath.empty() ? "" : " (" + m_projectSearchResults.firstSkippedPath + ": " + m_projectSearchResults.firstSkippedReason + ")") + (m_projectSearchResults.indexIncomplete ? "; directory scan incomplete; replace disabled" : m_projectSearchResults.truncated ? "; limit reached; replace disabled" : m_projectSearchResults.readErrors ? "; unreadable files; replace disabled" : ""), m_projectSearchResults.indexIncomplete || m_projectSearchResults.readErrors);
 }
 
 void Application::applyProjectSearch() {
     const auto kind = m_searchBar.kind();
     if (kind == ui::PromptKind::ProjectSearch) {
+        if (m_projectSearchEditingFilter) {
+            if (!workspace::validProjectPathFilter(m_searchBar.query())) { setCommandStatus("An exclusion must include a path pattern", true); return; }
+            m_projectSearchPathFilter = m_searchBar.query(); m_projectSearchEditingFilter = false; m_searchBar.setQuery(m_projectSearchFilterQuery);
+            setCommandStatus(m_projectSearchPathFilter.empty() ? "Searching all paths" : "Path filter: " + m_projectSearchPathFilter, false); return;
+        }
         if (m_projectSearchFuture.valid()) { setCommandStatus("Searching…", false); return; }
         m_projectSearchQuery = m_searchBar.query();
         if (m_projectSearchQuery.empty() || m_projectSearchQuery.find_first_of("\r\n") != std::string::npos) { setCommandStatus("Enter a single-line search", true); return; }
@@ -3372,11 +7855,11 @@ void Application::applyProjectSearch() {
         if (m_projectSearchHistory.size() > 100) m_projectSearchHistory.erase(m_projectSearchHistory.begin());
         m_projectSearchHistoryPosition = m_projectSearchHistory.size(); m_projectSearchDraft = m_projectSearchQuery;
         m_projectSearchRoot = m_project.root().generic_string();
-        auto project = m_project; const auto query = m_projectSearchQuery; const bool wholeWord = m_projectSearchWholeWord;
+        auto project = m_project; const auto query = m_projectSearchQuery, pathFilter = m_projectSearchPathFilter; const bool wholeWord = m_projectSearchWholeWord, caseSensitive = m_projectSearchCaseSensitive, includeGenerated = m_projectSearchIncludeGenerated;
         m_projectSearchCancel = std::make_shared<std::atomic_bool>(false);
-        m_projectSearchFuture = std::async(std::launch::async, [project, query, wholeWord, cancel = m_projectSearchCancel]() mutable {
-            bool complete = false; project.refresh(&complete, cancel.get());
-            auto results = workspace::searchProject(project, query, 1000, cancel.get(), wholeWord); results.indexIncomplete = results.indexIncomplete || !complete; return results;
+        m_projectSearchFuture = std::async(std::launch::async, [project, query, pathFilter, wholeWord, caseSensitive, includeGenerated, cancel = m_projectSearchCancel]() mutable {
+            bool complete = false; project.refresh(&complete, cancel.get(), includeGenerated);
+            auto results = workspace::searchProject(project, query, 1000, cancel.get(), wholeWord, caseSensitive, pathFilter); results.indexIncomplete = results.indexIncomplete || !complete; return results;
         });
         setCommandStatus("Searching project…", false); return;
     }
@@ -3387,15 +7870,28 @@ void Application::applyProjectSearch() {
         const int choice = m_projectSearchChoices[static_cast<std::size_t>(index)];
         if (choice == -1) { if (m_projectSearchPage) --m_projectSearchPage; m_pagedScroll = 0; m_selectedSuggestion = -1; m_menuReselectionRequired = true; refreshSuggestions(); return; }
         if (choice == -2) { ++m_projectSearchPage; m_pagedScroll = 0; m_selectedSuggestion = -1; m_menuReselectionRequired = true; refreshSuggestions(); return; }
-        if (choice == -3) { if (m_projectSearchResults.indexIncomplete || m_projectSearchResults.truncated) { setCommandStatus(m_projectSearchResults.indexIncomplete ? "Directory scan incomplete; resolve access issues and search again" : "Search limit reached; refine before replacing", true); return; } m_searchBar.open(ui::PromptKind::ProjectReplace); clearCommandFeedback(); setCommandStatus("Enter replacement text; empty deletes matches", false); return; }
+        if (choice == -4 || choice == -5) { m_projectSearchShowingSkipped = choice == -4; m_projectSearchPage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+        if (m_projectSearchShowingSkipped) return;
+        if (choice == -3) { if (m_projectSearchResults.indexIncomplete || m_projectSearchResults.truncated || m_projectSearchResults.readErrors) { setCommandStatus(m_projectSearchResults.indexIncomplete ? "Directory scan incomplete; resolve access issues and search again" : m_projectSearchResults.readErrors ? "Could not read " + m_projectSearchResults.firstReadErrorPath + "; fix or exclude it and search again" : "Search limit reached; refine before replacing", true); return; } m_searchBar.open(ui::PromptKind::ProjectReplace); clearCommandFeedback(); setCommandStatus("Enter replacement text; empty deletes matches", false); return; }
         if (choice < 0 || static_cast<std::size_t>(choice) >= m_projectSearchResults.matches.size()) return;
         const auto match = m_projectSearchResults.matches[static_cast<std::size_t>(choice)];
         const auto& searchedFile = m_projectSearchResults.files[match.file];
         const auto path = searchedFile.path;
+        if (m_hasDocument && m_filePath == path && (m_document.dirty() || m_diskContents != searchedFile.original)) {
+            setCommandStatus("Open file changed since search; save and search again", true); return;
+        }
+        const auto cached = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(),
+            [&path](const OpenDocument& open) { return open.path == path; });
+        if (cached != m_inactiveDocuments.end() && (cached->document.dirty() || cached->diskContents != searchedFile.original)) {
+            setCommandStatus("Open file changed since search; save and search again", true); return;
+        }
         std::string current, error;
         if (!m_project.readFile(path, current, error) || current != searchedFile.original) { setCommandStatus("File changed since search; search again", true); return; }
         openFile(path);
         if (m_hasDocument && m_filePath == path) {
+            if (m_document.dirty() || m_diskContents != searchedFile.original) {
+                setStatus("File changed while opening; search again", true); return;
+            }
             m_lastProjectSearchMatch = static_cast<std::size_t>(choice);
             m_document.setCursor(match.line, match.column); m_followCursor = true;
             setStatus("Search match opened; Ctrl/Command+Shift+O returns to results", false);
@@ -3430,7 +7926,7 @@ void Application::applyProjectSearch() {
         }
         if (selection != -4) return;
         workspace::ProjectSearchResults selected;
-        selected.truncated = m_projectSearchResults.truncated; selected.indexIncomplete = m_projectSearchResults.indexIncomplete;
+        selected.truncated = m_projectSearchResults.truncated; selected.indexIncomplete = m_projectSearchResults.indexIncomplete; selected.caseSensitive = m_projectSearchResults.caseSensitive; selected.readErrors = m_projectSearchResults.readErrors;
         std::vector<std::size_t> remap(m_projectSearchResults.files.size(), static_cast<std::size_t>(-1));
         for (std::size_t i = 0; i < m_projectSearchResults.matches.size(); ++i) {
             if (m_projectSearchSelected.size() == m_projectSearchResults.matches.size() && !m_projectSearchSelected[i]) continue;
@@ -3546,6 +8042,29 @@ void Application::findInDocument(bool advance, bool backwards) {
                      "Enter: next  Shift+Enter: previous", false);
 }
 
+bool Application::ensureLanguageServer(std::string& error) {
+    error.clear();
+    if (!m_hasProject) { error = "Open a project first"; return false; }
+    const auto ext = m_hasDocument ? std::filesystem::path(m_filePath).extension().string() : std::string(".cpp");
+    const bool python = ext == ".py";
+    std::filesystem::path interpreter;
+    if (python) {
+        modules::PythonPreference preference;
+        if (!modules::loadPythonPreference(m_settingsRoot, m_project.root(), preference, error)) { error = "Python interpreter preference unavailable: " + error; return false; }
+        interpreter = preference.interpreter;
+        if (interpreter.empty()) { error = "Choose an interpreter in Python Environments; install python-lsp-server in it"; return false; }
+    }
+    const auto root = m_project.root().generic_string();
+    const std::string kind = python ? "python" : "cpp";
+    if (m_languageServer.alive() && m_languageRoot == root && m_languageKind == kind && (!python || m_languagePythonInterpreter == interpreter)) return true;
+    m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); m_completionRequest = 0;
+    m_languageNavigationQueued = false; m_languageNavigationRequest = 0; m_languageFormatQueued = false; m_languageFormatRequest = 0;
+    m_languageRenameQueued = false; m_languageRenameRequest = 0; m_languageSignatureQueued = false; m_languageSignatureRequest = 0;
+    const bool started = python ? m_languageServer.startPython(m_project.root(), interpreter, error) : m_languageServer.start(m_project.root(), error);
+    if (!started) { if (python) error += "; check that python-lsp-server is installed in the selected interpreter"; return false; }
+    m_languageRoot = root; m_languageKind = kind; m_languagePythonInterpreter = std::move(interpreter); return true;
+}
+
 void Application::openCompletion() {
     if (!m_hasDocument || m_searchBar.isOpen() || m_settingsPanelVisible ||
         m_compileTerminalFocused) return;
@@ -3553,13 +8072,8 @@ void Application::openCompletion() {
     m_completionSelected = 0;
     m_completionRequest = 0;
     const auto ext = std::filesystem::path(m_filePath).extension().string();
-    if (ext == ".c" || ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".h" || ext == ".hpp") {
-        const auto root = m_project.root().generic_string();
-        if (!m_languageServer.alive() || m_languageRoot != root) {
-            std::string error;
-            if (m_languageServer.start(m_project.root(), error)) { m_languageRoot = root; m_languageFile.clear(); }
-            else setStatus(error + "; using local suggestions", true);
-        }
+    if (m_hasProject && (ext == ".py" || ext == ".c" || ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".h" || ext == ".hpp")) {
+        std::string error; if (!ensureLanguageServer(error)) setStatus(error + "; using local suggestions", true);
     }
     m_projectCompletionNames.clear();
     std::size_t scanned = 0;
@@ -3584,34 +8098,108 @@ void Application::openCompletion() {
     refreshCompletions();
 }
 
-void Application::requestLanguageNavigation(bool references) {
+void Application::openLanguageStatus() {
+    if (!m_hasProject || m_settingsPanelVisible || m_compileTerminalFocused) { setStatus("Open a project to view language-server status", true); return; }
+    m_languageStatusPage = 0; m_searchBar.open(ui::PromptKind::LanguageStatus); clearCommandFeedback();
+    setCommandStatus("Select Start or Restart for the current source language", false); refreshSuggestions();
+}
+void Application::applyLanguageStatus() {
+    refreshSuggestions();
+    const auto selected = m_selectedSuggestion >= 0 ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
+    if (selected >= m_languageStatusChoices.size()) return;
+    const int choice = m_languageStatusChoices[selected];
+    if (choice == -1 || choice == -2) { if (choice == -1 && m_languageStatusPage) --m_languageStatusPage; else if (choice == -2) ++m_languageStatusPage; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -4) {
+#if defined(_WIN32)
+        setCommandStatus("Automatic CMake setup is unavailable on Windows; configure the project with CMake", true); return;
+#else
+        if (!m_project.exists("CMakeLists.txt") || m_project.isDirectory("CMakeLists.txt")) { setCommandStatus("No CMakeLists.txt found at the project root", true); return; }
+        if (m_compileTerminalProcess.alive() && !m_compileTerminalProcess.commandsDone()) { setCommandStatus("Wait for the current compile to finish", true); return; }
+        if (!saveDocument()) { setCommandStatus("Could not save the open file; CMake was not started", true); return; }
+        std::error_code ec; const auto build = m_project.root() / "build";
+        const auto existing = std::filesystem::symlink_status(build, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory) { setCommandStatus("Cannot inspect build directory: " + ec.message(), true); return; }
+        if (!ec && std::filesystem::exists(existing)) { setCommandStatus("Build directory already exists; configure it manually to avoid changing it", true); return; }
+        ec.clear(); if (!ensureCompileTerminalWindow()) return;
+        if (!std::filesystem::create_directory(build, ec)) { setCommandStatus(ec ? "Cannot create build directory: " + ec.message() : "Build directory already exists; configure it manually to avoid changing it", true); return; }
+        editor::CompileFunction command; command.name = "Generate CMake compilation database";
+        command.commands.push_back({"cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON", 0});
+        m_searchBar.close(); runCompileFunction(std::move(command), "CMakeLists.txt");
+        if (!m_compileTerminalProcess.alive()) { std::error_code cleanup; (void)std::filesystem::remove(build, cleanup); }
+        return;
+#endif
+    }
+    if (choice != -3) return;
+    m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); m_completionRequest = 0;
+    m_languageNavigationQueued = false; m_languageNavigationRequest = 0; m_languageFormatQueued = false; m_languageFormatRequest = 0;
+    m_languageRenameQueued = false; m_languageRenameRequest = 0;
+    m_languageSignatureQueued = false; m_languageSignatureRequest = 0;
+    std::string error;
+    if (!ensureLanguageServer(error)) { setCommandStatus(error, true); refreshSuggestions(); return; }
+    setCommandStatus(m_languageKind == "python" ? "Starting Python language server…" : "Starting clangd…", false); refreshSuggestions();
+}
+
+void Application::requestLanguageRename() {
     if (!m_hasDocument || !m_hasProject || m_searchBar.isOpen()) return;
     const auto ext = std::filesystem::path(m_filePath).extension().string();
-    if (ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") { setStatus("Language navigation currently supports C and C++", true); return; }
-    const auto root = m_project.root().generic_string();
-    if (!m_languageServer.alive() || m_languageRoot != root) {
-        std::string error;
-        if (!m_languageServer.start(m_project.root(), error)) { setStatus(error, true); return; }
-        m_languageRoot = root; m_languageFile.clear();
-    }
+    if (ext != ".py" && ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") { setStatus("Rename supports C, C++ and Python", true); return; }
+    if (!saveDocument()) return;
+    m_languageRenameFile = m_filePath; m_languageRenameRevision = m_document.revision();
+    m_languageRenameLine = m_document.cursorLine(); m_languageRenameColumn = m_document.cursorColumn();
+    m_languageRenameEdits.clear(); m_languageRenameReviewFile.reset(); cancelLanguageRequest(m_languageRenameRequest); m_languageRenameQueued = false;
+    m_searchBar.open(ui::PromptKind::LanguageRenameInput); clearCommandFeedback();
+    setCommandStatus("Enter a new symbol name; Escape cancels", false);
+}
+
+void Application::requestLanguageSignatures() {
+    if (!m_hasDocument || !m_hasProject || m_searchBar.isOpen()) return;
+    const auto ext = std::filesystem::path(m_filePath).extension().string();
+    if (ext != ".py" && ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") { setStatus("Signature help supports C, C++ and Python", true); return; }
+    cancelLanguageRequest(m_languageSignatureRequest);
+    std::string error; if (!ensureLanguageServer(error)) { setStatus(error, true); return; }
+    m_languageSignatureFile = m_filePath; m_languageSignatureRevision = m_document.revision();
+    m_languageSignatureLine = m_document.cursorLine(); m_languageSignatureColumn = m_document.cursorColumn();
+    m_languageSignatureQueued = true; setStatus("Finding function signatures…", false);
+}
+
+void Application::openLanguageSymbols(bool currentFile) {
+    if (!m_hasDocument || !m_hasProject || m_searchBar.isOpen()) return;
+    const auto ext = std::filesystem::path(m_filePath).extension().string();
+    if (ext != ".py" && ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") { setStatus("Symbol search supports C, C++ and Python", true); return; }
     m_languageNavigationFile = m_filePath; m_languageNavigationRevision = m_document.revision();
     m_languageNavigationLine = m_document.cursorLine(); m_languageNavigationColumn = m_document.cursorColumn();
-    m_languageReferences = references; m_languageNavigationQueued = true; m_languageNavigationRequest = 0;
-    setStatus(references ? "Finding references…" : "Finding definition…", false);
+    m_languageDocumentSymbols = currentFile;
+    m_searchBar.open(ui::PromptKind::LanguageSymbolInput); clearCommandFeedback(); setCommandStatus(currentFile ? "Search current-file symbols; empty shows all" : "Search project symbols; empty shows all", false);
+}
+void Application::applyLanguageSymbols() {
+    if (!m_hasDocument || !m_hasProject || m_languageNavigationFile != m_filePath || m_languageNavigationRevision != m_document.revision()) { setCommandStatus("Document changed; start symbol search again", true); return; }
+    const std::string query(m_searchBar.query());
+    if (query.size() > 512 || query.find_first_of("\r\n") != std::string::npos) { setCommandStatus("Enter a single-line symbol query up to 512 bytes", true); return; }
+    cancelLanguageRequest(m_languageNavigationRequest); std::string error;
+    if (!ensureLanguageServer(error)) { setCommandStatus(error, true); return; }
+    m_languageSymbolQuery = query; m_languageWorkspaceSymbols = !m_languageDocumentSymbols; m_languageReferences = m_languageDeclaration = false;
+    m_languageNavigationQueued = true; m_searchBar.close(); setStatus(m_languageDocumentSymbols ? "Searching file symbols…" : "Searching project symbols…", false);
+}
+void Application::requestLanguageNavigation(bool references, bool declaration) {
+    if (!m_hasDocument || !m_hasProject || m_searchBar.isOpen()) return;
+    const auto ext = std::filesystem::path(m_filePath).extension().string();
+    if (ext != ".py" && ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") { setStatus("Language navigation supports C, C++ and Python", true); return; }
+    cancelLanguageRequest(m_languageNavigationRequest);
+    std::string error; if (!ensureLanguageServer(error)) { setStatus(error, true); return; }
+    m_languageNavigationFile = m_filePath; m_languageNavigationRevision = m_document.revision();
+    m_languageNavigationLine = m_document.cursorLine(); m_languageNavigationColumn = m_document.cursorColumn();
+    m_languageReferences = references; m_languageDeclaration = declaration; m_languageWorkspaceSymbols = m_languageDocumentSymbols = false; m_languageNavigationQueued = true;
+    setStatus(references ? "Finding references…" : declaration ? "Finding declaration…" : "Finding definition…", false);
 }
 
 void Application::requestLanguageFormatting() {
     if (!m_hasDocument || !m_hasProject || m_searchBar.isOpen()) return;
     const auto ext = std::filesystem::path(m_filePath).extension().string();
-    if (ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") {
-        setStatus("Formatting currently supports C and C++", true); return;
+    if (ext != ".py" && ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") {
+        setStatus("Formatting supports C, C++ and Python", true); return;
     }
-    const auto root = m_project.root().generic_string();
-    if (!m_languageServer.alive() || m_languageRoot != root) {
-        std::string error;
-        if (!m_languageServer.start(m_project.root(), error)) { setStatus(error, true); return; }
-        m_languageRoot = root; m_languageFile.clear();
-    }
+    cancelLanguageRequest(m_languageFormatRequest);
+    std::string error; if (!ensureLanguageServer(error)) { setStatus(error, true); return; }
     m_completionOpen = false;
     m_languageFormatFile = m_filePath; m_languageFormatRevision = m_document.revision();
     m_languageFormatRange.clear();
@@ -3625,7 +8213,7 @@ void Application::requestLanguageFormatting() {
         };
         m_languageFormatRange = "{\"start\":" + position(start) + ",\"end\":" + position(end) + "}";
     }
-    m_languageFormatOriginal = m_document.toUtf8(); m_languageFormatQueued = true; m_languageFormatRequest = 0;
+    m_languageFormatOriginal = m_document.toUtf8(); m_languageFormatQueued = true;
     setStatus(m_languageFormatRange.empty() ? "Formatting document…" : "Formatting selection…", false);
 }
 
@@ -3638,12 +8226,73 @@ void Application::applyLanguageLocation() {
     if (choice == -2) { ++m_languageLocationPage; m_pagedScroll = 0; m_selectedSuggestion = -1; m_menuReselectionRequired = true; refreshSuggestions(); return; }
     if (choice < 0 || static_cast<std::size_t>(choice) >= m_languageLocations.size()) return;
     const auto location = m_languageLocations[static_cast<std::size_t>(choice)];
-    openFile(location.path);
-    if (!m_hasDocument || m_filePath != location.path || location.line >= m_document.lineCount()) { setStatus("Language location is no longer available", true); return; }
+    openFile(location.path, false);
+    if (m_searchBar.isOpen() || !m_hasDocument || m_filePath != location.path || location.line >= m_document.lineCount()) { setStatus("Language location is no longer available", true); return; }
     const auto& text = m_document.line(location.line);
     std::size_t column = 0, units = 0;
     while (column < text.size() && units + (text[column] > 0xffff ? 2U : 1U) <= location.character) { units += text[column] > 0xffff ? 2U : 1U; ++column; }
-    m_document.setCursor(location.line, column); m_followCursor = true;
+    if (units != location.character) { setStatus("Language location has an invalid character position", true); return; }
+    m_document.setCursor(location.line, column); m_followCursor = true; setStatus("Opened language location", false);
+}
+
+void Application::applyLanguageRename() {
+    if (m_searchBar.kind() == ui::PromptKind::LanguageRenameInput) {
+        if (!m_hasDocument || m_filePath != m_languageRenameFile || m_document.revision() != m_languageRenameRevision) { setCommandStatus("Document changed; start rename again", true); return; }
+        const std::string name(m_searchBar.query());
+        if (!editor::isCompletionIdentifierUtf8(name)) { setCommandStatus("Enter a valid identifier", true); return; }
+        std::string error; if (!ensureLanguageServer(error)) { setCommandStatus(error, true); return; }
+        m_languageRenameName = name; m_languageRenameQueued = true; m_languageRenameRequest = 0;
+        m_searchBar.close(); setStatus("Preparing rename…", false); return;
+    }
+    if (m_searchBar.kind() != ui::PromptKind::LanguageRenameReview) return;
+    refreshSuggestions();
+    if (m_selectedSuggestion < 0) { setCommandStatus("Select Apply after reviewing the files", false); return; }
+    const auto selected = static_cast<std::size_t>(m_selectedSuggestion);
+    if (selected >= m_languageRenameChoices.size()) return;
+    const auto choice = m_languageRenameChoices[selected];
+    if (choice == -1 || choice == -2) { if (choice == -1 && m_languageRenamePage) --m_languageRenamePage; else if (choice == -2) ++m_languageRenamePage; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -4) { m_languageRenameReviewFile.reset(); m_languageRenamePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice >= 0 && !m_languageRenameReviewFile && static_cast<std::size_t>(choice) < m_languageRenameEdits.size()) {
+        m_languageRenameReviewFile = static_cast<std::size_t>(choice); m_languageRenamePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1;
+        setCommandStatus("Review each change; Escape returns to files", false); refreshSuggestions(); return;
+    }
+    if (choice != -3) return;
+    if (!m_hasProject || !m_hasDocument || m_filePath != m_languageRenameFile || m_document.dirty() || m_document.revision() != m_languageRenameRevision) { setCommandStatus("Document changed; start rename again", true); return; }
+    for (const auto& file : m_languageRenameEdits) {
+        if (file.path == m_filePath && m_diskContents != file.original) { setCommandStatus("Open file changed; start rename again", true); return; }
+        const auto open = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [&file](const OpenDocument& doc) { return doc.path == file.path; });
+        if (open != m_inactiveDocuments.end() && (open->document.dirty() || open->diskContents != file.original)) { setCommandStatus("Open file has unsaved changes: " + file.path, true); return; }
+    }
+    if (m_settingsRoot.empty()) { setCommandStatus("Recovery storage is unavailable", true); return; }
+    std::vector<std::string> changed; std::string error;
+    const bool ok = editor::lsp::applyWorkspaceEdits(m_project, m_languageRenameEdits, std::filesystem::path(m_settingsRoot).parent_path() / "Recovery", changed, error);
+    for (const auto& path : changed) {
+        const auto file = std::find_if(m_languageRenameEdits.begin(), m_languageRenameEdits.end(), [&path](const auto& value) { return value.path == path; });
+        if (file == m_languageRenameEdits.end()) continue;
+        const auto normalized = editor::Document::fromUtf8(file->updated).toUtf8();
+        if (path == m_filePath) { (void)m_document.replaceAllUtf8(normalized); m_document.markSaved(); m_diskContents = file->updated; }
+        for (auto& open : m_inactiveDocuments) if (open.path == path) { (void)open.document.replaceAllUtf8(normalized); open.document.markSaved(); open.diskContents = file->updated; }
+    }
+    if (!changed.empty()) { m_syntaxValid = false; m_languageFile.clear(); invalidateFunctionIndex(); resetDiagnostics(); }
+    m_searchBar.close(); m_languageRenameEdits.clear();
+    setStatus(ok ? "Rename applied to " + std::to_string(changed.size()) + " files" : error, !ok);
+}
+
+void Application::cancelLanguageRequest(std::uint64_t& request) {
+    if (!request) return;
+    std::string error;
+    if (m_languageServer.ready() && !m_languageServer.cancel(request, error)) log::warn("Could not cancel language request: " + error);
+    request = 0;
+}
+void Application::expireLanguageRequests(double now) {
+    const auto expire = [this, now](std::uint64_t& request, double& deadline, const char* message) {
+        if (!request) { deadline = 0.0; return; }
+        if (deadline > 0.0 && now >= deadline) { cancelLanguageRequest(request); deadline = 0.0; setStatus(message, true); }
+    };
+    expire(m_languageRenameRequest, m_languageRenameDeadline, "Rename timed out; try again");
+    expire(m_languageNavigationRequest, m_languageNavigationDeadline, "Language navigation timed out; try again");
+    expire(m_languageFormatRequest, m_languageFormatDeadline, "Formatting timed out; try again");
+    expire(m_languageSignatureRequest, m_languageSignatureDeadline, "Signature help timed out; try again");
 }
 
 void Application::pollLanguageServer() {
@@ -3652,49 +8301,71 @@ void Application::pollLanguageServer() {
             m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); m_completionRequest = 0;
             m_languageNavigationQueued = false; m_languageNavigationRequest = 0;
             m_languageFormatQueued = false; m_languageFormatRequest = 0;
-            setStatus("Language server stopped; request a language action to restart it", true);
+            m_languageRenameQueued = false; m_languageRenameRequest = 0;
+            m_languageSignatureQueued = false; m_languageSignatureRequest = 0;
+            setStatus(m_languageKind == "python" ? "Python language server stopped; check python-lsp-server in the selected interpreter" : "Language server stopped; request a language action to restart it", true);
+            if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::LanguageStatus) { setCommandStatus("Language server stopped; select Start to retry", true); refreshSuggestions(); }
         }
         return;
     }
     if (!m_hasProject || m_project.root().generic_string() != m_languageRoot) {
         m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); m_completionRequest = 0;
         m_languageNavigationQueued = false; m_languageNavigationRequest = 0;
-        m_languageFormatQueued = false; m_languageFormatRequest = 0; return;
+        m_languageFormatQueued = false; m_languageFormatRequest = 0; m_languageRenameQueued = false; m_languageRenameRequest = 0; m_languageSignatureQueued = false; m_languageSignatureRequest = 0; return;
     }
     std::vector<std::string> messages; std::string error;
     if (!m_languageServer.poll(messages, error)) {
         m_languageServer.close(); m_languageRoot.clear(); m_languageFile.clear(); m_completionRequest = 0;
         m_languageNavigationQueued = false; m_languageNavigationRequest = 0;
         m_languageFormatQueued = false; m_languageFormatRequest = 0;
-        setStatus("Language server stopped: " + error, true); return;
+        m_languageRenameQueued = false; m_languageRenameRequest = 0;
+        m_languageSignatureQueued = false; m_languageSignatureRequest = 0;
+        setStatus((m_languageKind == "python" ? "Python language server stopped; check python-lsp-server: " : "Language server stopped: ") + error, true);
+        if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::LanguageStatus) { setCommandStatus("Language server stopped: " + error, true); refreshSuggestions(); }
+        return;
     }
     if ((m_languageFormatQueued || m_languageFormatRequest) &&
         (!m_hasDocument || m_languageFormatFile != m_filePath || m_languageFormatRevision != m_document.revision())) {
-        m_languageFormatQueued = false; m_languageFormatRequest = 0;
+        m_languageFormatQueued = false; cancelLanguageRequest(m_languageFormatRequest);
         setStatus("Formatting cancelled because the document changed", true);
     }
     if ((m_languageNavigationQueued || m_languageNavigationRequest) &&
         (!m_hasDocument || m_languageNavigationFile != m_filePath || m_languageNavigationRevision != m_document.revision())) {
-        m_languageNavigationQueued = false; m_languageNavigationRequest = 0;
+        m_languageNavigationQueued = false; cancelLanguageRequest(m_languageNavigationRequest);
+    }
+    if ((m_languageSignatureQueued || m_languageSignatureRequest) && (!m_hasDocument || m_languageSignatureFile != m_filePath || m_languageSignatureRevision != m_document.revision())) {
+        m_languageSignatureQueued = false; cancelLanguageRequest(m_languageSignatureRequest);
+    }
+    if (m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::LanguageStatus) {
+        if (m_languageServer.ready() && (m_commandStatus == "Starting clangd…" || m_commandStatus == "Starting Python language server…")) setCommandStatus(m_languageKind == "python" ? "Python language server is ready" : "clangd is ready", false);
+        refreshSuggestions();
     }
     if (!m_languageServer.ready() || !m_hasDocument) return;
     const auto ext = std::filesystem::path(m_filePath).extension().string();
-    if (ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") return;
+    if (ext != ".py" && ext != ".c" && ext != ".cpp" && ext != ".cc" && ext != ".cxx" && ext != ".h" && ext != ".hpp") return;
+    if ((ext == ".py") != (m_languageKind == "python")) return;
     if (m_languageFile != m_filePath) {
-        if (!m_languageServer.open(m_project.root() / m_filePath, ext == ".c" ? "c" : "cpp", m_document.toUtf8(), error)) { setStatus(error, true); return; }
+        if (!m_languageServer.open(m_project.root() / m_filePath, ext == ".py" ? "python" : ext == ".c" ? "c" : "cpp", m_document.toUtf8(), error)) { setStatus(error, true); return; }
         m_languageFile = m_filePath; m_languageRevision = m_document.revision(); m_completionRequest = 0; m_languageDiagnosticsFile.clear();
     } else if (m_languageRevision != m_document.revision()) {
         if (!m_languageServer.change(m_document.toUtf8(), error)) { setStatus(error, true); return; }
         m_languageRevision = m_document.revision(); m_completionRequest = 0;
     }
     const auto line = m_document.cursorLine(), column = m_document.cursorColumn();
+    if ((m_languageSignatureQueued || m_languageSignatureRequest) && (m_languageSignatureFile != m_filePath || m_languageSignatureRevision != m_document.revision() || m_languageSignatureLine != line || m_languageSignatureColumn != column)) {
+        m_languageSignatureQueued = false; cancelLanguageRequest(m_languageSignatureRequest);
+    }
+    if ((m_languageRenameQueued || m_languageRenameRequest) &&
+        (m_languageRenameFile != m_filePath || m_languageRenameRevision != m_document.revision() || m_languageRenameLine != line || m_languageRenameColumn != column)) {
+        m_languageRenameQueued = false; cancelLanguageRequest(m_languageRenameRequest); setStatus("Rename cancelled because the document or cursor changed", true);
+    }
     if ((m_languageNavigationQueued || m_languageNavigationRequest != 0) &&
         (m_languageNavigationFile != m_filePath || m_languageNavigationRevision != m_document.revision() || m_languageNavigationLine != line || m_languageNavigationColumn != column)) {
-        m_languageNavigationQueued = false; m_languageNavigationRequest = 0;
+        m_languageNavigationQueued = false; cancelLanguageRequest(m_languageNavigationRequest);
     }
     if ((m_languageFormatQueued || m_languageFormatRequest) &&
         (m_languageFormatFile != m_filePath || m_languageFormatRevision != m_document.revision())) {
-        m_languageFormatQueued = false; m_languageFormatRequest = 0;
+        m_languageFormatQueued = false; cancelLanguageRequest(m_languageFormatRequest);
         setStatus("Formatting cancelled because the document changed", true);
     }
     for (const auto& message : messages) {
@@ -3724,37 +8395,104 @@ void Application::pollLanguageServer() {
                 if (endLine->numberValue == lineValue->numberValue && std::isfinite(endChar->numberValue) && endChar->numberValue >= 0 && endChar->numberValue <= 10000000) finish = std::max(finish, columnFor(static_cast<std::size_t>(endChar->numberValue)));
                 const auto* severity = item.find("severity");
                 std::string description = severity && severity->type == editor::JsonType::Number && severity->numberValue == 2 ? "Warning: " + text->stringValue : text->stringValue;
-                converted.emplace_back(static_cast<std::uint32_t>(row), static_cast<std::uint32_t>(startColumn + 1), static_cast<std::uint32_t>(finish - startColumn), std::move(description), "clangd");
+                converted.emplace_back(static_cast<std::uint32_t>(row), static_cast<std::uint32_t>(startColumn + 1), static_cast<std::uint32_t>(finish - startColumn), std::move(description), m_languageKind == "python" ? "pylsp" : "clangd");
                 if (converted.size() == 200) break;
             }
             m_diagnostics = std::move(converted); m_diagnosticsRevision = m_document.revision(); m_compilerAppliedPath = absoluteDocumentPath(); m_diagnosticsValid = true;
             m_languageDiagnosticsFile = m_filePath; m_languageDiagnosticsRevision = m_document.revision(); updateActiveDiagnostic(); continue;
         }
         const auto* navigationId = json ? json->find("id") : nullptr;
+        if (m_languageSignatureRequest && navigationId && navigationId->type == editor::JsonType::Number && navigationId->numberValue == static_cast<double>(m_languageSignatureRequest)) {
+            m_languageSignatureRequest = 0;
+            if (m_searchBar.isOpen()) continue;
+            const auto* problem = json->find("error");
+            if (problem) { const auto* message = problem->find("message"); setStatus(message && message->type == editor::JsonType::String ? "Signature help: " + message->stringValue : "Signature help failed", true); continue; }
+            const auto* result = json->find("result"); const auto* signatures = result ? result->find("signatures") : nullptr;
+            if (!signatures || signatures->type != editor::JsonType::Array) { setStatus("No function signatures available", false); continue; }
+            const auto index = [](const editor::JsonValue* value) -> std::size_t {
+                return value && value->type == editor::JsonType::Number && std::isfinite(value->numberValue) && value->numberValue >= 0 && value->numberValue < 10000 && std::floor(value->numberValue) == value->numberValue ? static_cast<std::size_t>(value->numberValue) : 0U;
+            };
+            const auto clean = [](std::string text) {
+                for (auto& c : text) if (static_cast<unsigned char>(c) < 32) c = ' ';
+                if (text.size() > 512) { text.resize(512); std::string e; while (!text.empty() && !editor::Document::canEditLosslessly(text, e)) text.pop_back(); text += "…"; }
+                return text;
+            };
+            const auto activeSignature = index(result->find("activeSignature")); const auto defaultParameter = index(result->find("activeParameter"));
+            m_languageSignatures.clear();
+            for (std::size_t i = 0; i < signatures->children.size() && i < 30; ++i) {
+                const auto& signature = signatures->children[i]; const auto* label = signature.find("label");
+                if (!label || label->type != editor::JsonType::String || label->stringValue.empty()) continue;
+                const auto* parameters = signature.find("parameters");
+                const auto activeParameter = signature.find("activeParameter") ? index(signature.find("activeParameter")) : defaultParameter;
+                std::string detail;
+                if (parameters && parameters->type == editor::JsonType::Array && activeParameter < parameters->children.size()) {
+                    detail = "Parameter " + std::to_string(activeParameter + 1);
+                    const auto name = editor::lsp::signatureParameterLabel(signature, activeParameter);
+                    if (name && !name->empty()) detail += ": " + clean(*name);
+                }
+                m_languageSignatures.emplace_back((i == activeSignature ? "[Active] " : "") + clean(label->stringValue), std::move(detail));
+            }
+            if (m_languageSignatures.empty()) { setStatus("No function signatures available", false); continue; }
+            m_languageSignaturePage = 0; m_searchBar.open(ui::PromptKind::LanguageSignatures); clearCommandFeedback(); refreshSuggestions();
+            setCommandStatus("Function signatures; Escape closes", false); continue;
+        }
+        if (m_languageRenameRequest && navigationId && navigationId->type == editor::JsonType::Number && navigationId->numberValue == static_cast<double>(m_languageRenameRequest)) {
+            m_languageRenameRequest = 0;
+            if (m_searchBar.isOpen()) { setStatus("Rename cancelled because another menu opened", true); continue; }
+            const auto* problem = json->find("error");
+            if (problem) { const auto* message = problem->find("message"); setStatus(message && message->type == editor::JsonType::String ? "Rename failed: " + message->stringValue : "Rename failed", true); continue; }
+            const auto* result = json->find("result"); std::string renameError;
+            if (!result || result->type == editor::JsonType::Null) { setStatus("No rename changes returned", false); continue; }
+            if (!editor::lsp::prepareWorkspaceEdits(m_project, *result, m_filePath, m_diskContents, m_languageServer.documentVersion(), m_languageRenameEdits, renameError)) { setStatus("Rename rejected: " + renameError, true); continue; }
+            if (m_languageRenameEdits.empty()) { setStatus("No rename changes returned", false); continue; }
+            m_languageRenamePage = 0; m_languageRenameReviewFile.reset(); m_searchBar.open(ui::PromptKind::LanguageRenameReview); clearCommandFeedback(); refreshSuggestions();
+            setCommandStatus("Select a file to inspect changes; server may not find all references", false); continue;
+        }
         if (m_languageNavigationRequest && navigationId && navigationId->type == editor::JsonType::Number && navigationId->numberValue == static_cast<double>(m_languageNavigationRequest)) {
             m_languageNavigationRequest = 0; m_languageLocations.clear();
+            if (m_searchBar.isOpen()) { setStatus("Language search cancelled because another menu opened", false); continue; }
             const auto* problem = json->find("error");
             if (problem) { const auto* description = problem->find("message"); setStatus(description && description->type == editor::JsonType::String ? "Language server: " + description->stringValue : "Language navigation failed", true); continue; }
             const auto* result = json->find("result");
             const auto addLocation = [this](const editor::JsonValue& item) {
-                const auto* uri = item.find("uri"); if (!uri) uri = item.find("targetUri");
-                const auto* range = item.find("range"); if (!range) range = item.find("targetSelectionRange");
+                const auto* location = item.find("location"); if (!location) location = &item;
+                const auto* uri = location->find("uri"); if (!uri) uri = location->find("targetUri");
+                const auto* range = location->find("selectionRange"); if (!range) range = location->find("range"); if (!range) range = location->find("targetSelectionRange");
                 const auto* start = range ? range->find("start") : nullptr;
                 const auto* row = start ? start->find("line") : nullptr; const auto* col = start ? start->find("character") : nullptr;
-                if (!uri || uri->type != editor::JsonType::String || !row || !col || row->type != editor::JsonType::Number || col->type != editor::JsonType::Number || !std::isfinite(row->numberValue) || !std::isfinite(col->numberValue) || row->numberValue < 0 || col->numberValue < 0 || row->numberValue > 10000000 || col->numberValue > 10000000 || std::floor(row->numberValue) != row->numberValue || std::floor(col->numberValue) != col->numberValue) return;
-                std::filesystem::path absolute; if (!editor::lsp::pathFromFileUri(uri->stringValue, absolute)) return;
+                if ((!uri && !m_languageDocumentSymbols) || (uri && uri->type != editor::JsonType::String) || !row || !col || row->type != editor::JsonType::Number || col->type != editor::JsonType::Number || !std::isfinite(row->numberValue) || !std::isfinite(col->numberValue) || row->numberValue < 0 || col->numberValue < 0 || row->numberValue > 10000000 || col->numberValue > 10000000 || std::floor(row->numberValue) != row->numberValue || std::floor(col->numberValue) != col->numberValue) return;
+                std::filesystem::path absolute; if (uri) { if (!editor::lsp::pathFromFileUri(uri->stringValue, absolute)) return; } else absolute = m_project.root() / m_filePath;
                 std::error_code ec; absolute = std::filesystem::weakly_canonical(absolute, ec); if (ec) return;
                 const auto relative = absolute.lexically_relative(m_project.root());
                 if (relative.empty() || *relative.begin() == "..") return;
+                if (m_languageDocumentSymbols && relative.generic_string() != m_filePath) return;
                 std::string error; const auto resolved = m_project.resolve(relative.generic_string(), error);
                 if (!error.empty() || resolved != absolute || !m_project.exists(relative.generic_string())) return;
-                m_languageLocations.push_back({relative.generic_string(), static_cast<std::size_t>(row->numberValue), static_cast<std::size_t>(col->numberValue)});
+                const auto* nameValue = item.find("name"); std::string name;
+                if (nameValue && nameValue->type == editor::JsonType::String) {
+                    name = nameValue->stringValue; for (auto& c : name) if (static_cast<unsigned char>(c) < 32) c = ' ';
+                    if (name.size() > 256) { name.resize(256); std::string e; while (!name.empty() && !editor::Document::canEditLosslessly(name, e)) name.pop_back(); name += "…"; }
+                }
+                if (m_languageDocumentSymbols && !m_languageSymbolQuery.empty()) {
+                    const auto fold = [](std::string value) { for (auto& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A')); return value; };
+                    if (fold(name).find(fold(m_languageSymbolQuery)) == std::string::npos) return;
+                }
+                m_languageLocations.push_back({relative.generic_string(), static_cast<std::size_t>(row->numberValue), static_cast<std::size_t>(col->numberValue), std::move(name)});
             };
-            if (result && result->type == editor::JsonType::Array) { for (const auto& item : result->children) { addLocation(item); if (m_languageLocations.size() >= 500) break; } }
+            if (result && result->type == editor::JsonType::Array) {
+                std::size_t visited = 0;
+                const auto visit = [&](const auto& self, const editor::JsonValue& item, std::size_t depth) -> void {
+                    if (++visited > 10000 || depth > 64 || m_languageLocations.size() >= 500) return;
+                    addLocation(item);
+                    const auto* children = m_languageDocumentSymbols ? item.find("children") : nullptr;
+                    if (children && children->type == editor::JsonType::Array) for (const auto& child : children->children) self(self, child, depth + 1);
+                };
+                for (const auto& item : result->children) { visit(visit, item, 0); if (m_languageLocations.size() >= 500 || visited > 10000) break; }
+            }
             else if (result && result->type == editor::JsonType::Object) addLocation(*result);
             if (m_languageLocations.empty()) { setStatus("No location found in this project", false); continue; }
             m_languageLocationPage = 0; m_searchBar.open(ui::PromptKind::LanguageLocations); clearCommandFeedback(); refreshSuggestions();
-            setCommandStatus(std::to_string(m_languageLocations.size()) + " locations; select one to open", false); continue;
+            setCommandStatus(std::to_string(m_languageLocations.size()) + (m_languageLocations.size() >= 500 ? " locations (limit reached); refine search" : " locations; select one to open"), false); continue;
         }
         const auto* formatId = json ? json->find("id") : nullptr;
         if (m_languageFormatRequest && formatId && formatId->type == editor::JsonType::Number && formatId->numberValue == static_cast<double>(m_languageFormatRequest)) {
@@ -3805,14 +8543,40 @@ void Application::pollLanguageServer() {
         }
         if (!names.empty()) { m_completions = std::move(names); m_completionSelected = 0; }
     }
+    const double requestTime = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    expireLanguageRequests(requestTime);
+    if (m_languageSignatureQueued) {
+        std::size_t utf16 = 0; const auto& source = m_document.line(line);
+        for (std::size_t i = 0; i < column && i < source.size(); ++i) utf16 += source[i] > 0xffff ? 2U : 1U;
+        const auto uri = debug::jsonString(editor::lsp::fileUri(m_project.root() / m_filePath));
+        const std::string params = "{\"textDocument\":{\"uri\":" + uri + "},\"position\":{\"line\":" + std::to_string(line) + ",\"character\":" + std::to_string(utf16) + "}}";
+        if (!m_languageServer.request("textDocument/signatureHelp", params, m_languageSignatureRequest, error)) setStatus(error, true);
+        else m_languageSignatureDeadline = requestTime + 15.0;
+        m_languageSignatureQueued = false;
+    }
+    if (m_languageRenameQueued) {
+        std::size_t utf16 = 0; const auto& source = m_document.line(line);
+        for (std::size_t i = 0; i < column && i < source.size(); ++i) utf16 += source[i] > 0xffff ? 2U : 1U;
+        const auto uri = debug::jsonString(editor::lsp::fileUri(m_project.root() / m_filePath));
+        const std::string params = "{\"textDocument\":{\"uri\":" + uri + "},\"position\":{\"line\":" + std::to_string(line) + ",\"character\":" + std::to_string(utf16) + "},\"newName\":" + debug::jsonString(m_languageRenameName) + "}";
+        if (!m_languageServer.request("textDocument/rename", params, m_languageRenameRequest, error)) setStatus(error, true);
+        else m_languageRenameDeadline = requestTime + 15.0;
+        m_languageRenameQueued = false;
+    }
     if (m_languageNavigationQueued) {
         std::size_t utf16 = 0; const auto& source = m_document.line(line);
         for (std::size_t i = 0; i < column && i < source.size(); ++i) utf16 += source[i] > 0xffff ? 2 : 1;
         const auto uri = debug::jsonString(editor::lsp::fileUri(m_project.root() / m_filePath));
-        std::string params = "{\"textDocument\":{\"uri\":" + uri + "},\"position\":{\"line\":" + std::to_string(line) + ",\"character\":" + std::to_string(utf16) + "}";
-        if (m_languageReferences) params += ",\"context\":{\"includeDeclaration\":true}";
-        params += "}";
-        if (!m_languageServer.request(m_languageReferences ? "textDocument/references" : "textDocument/definition", params, m_languageNavigationRequest, error)) setStatus(error, true);
+        std::string params;
+        if (m_languageWorkspaceSymbols) params = "{\"query\":" + debug::jsonString(m_languageSymbolQuery) + "}";
+        else if (m_languageDocumentSymbols) params = "{\"textDocument\":{\"uri\":" + uri + "}}";
+        else {
+            params = "{\"textDocument\":{\"uri\":" + uri + "},\"position\":{\"line\":" + std::to_string(line) + ",\"character\":" + std::to_string(utf16) + "}";
+            if (m_languageReferences) params += ",\"context\":{\"includeDeclaration\":true}";
+            params += "}";
+        }
+        if (!m_languageServer.request(m_languageWorkspaceSymbols ? "workspace/symbol" : m_languageDocumentSymbols ? "textDocument/documentSymbol" : m_languageReferences ? "textDocument/references" : m_languageDeclaration ? "textDocument/declaration" : "textDocument/definition", params, m_languageNavigationRequest, error)) setStatus(error, true);
+        else m_languageNavigationDeadline = requestTime + 15.0;
         m_languageNavigationQueued = false;
     }
     if (m_languageFormatQueued) {
@@ -3821,9 +8585,10 @@ void Application::pollLanguageServer() {
         if (!m_languageFormatRange.empty()) params += ",\"range\":" + m_languageFormatRange;
         params += "}";
         if (!m_languageServer.request(m_languageFormatRange.empty() ? "textDocument/formatting" : "textDocument/rangeFormatting", params, m_languageFormatRequest, error)) setStatus(error, true);
+        else m_languageFormatDeadline = requestTime + 15.0;
         m_languageFormatQueued = false;
     }
-    if (!m_completionOpen) return;
+    if (!m_completionOpen || !m_languageServer.supports("textDocument/completion")) return;
     if (m_completionRequest != 0 && m_completionRequestRevision == m_document.revision() && m_completionRequestLine == line && m_completionRequestColumn == column) return;
     std::size_t utf16 = 0;
     const auto& text = m_document.line(line);
@@ -4021,7 +8786,17 @@ void Application::applyCommand(bool forceFolder) {
         else setStatus("Started without reopening the previous workspace", false);
         return;
     }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageStatus) { applyLanguageStatus(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageSymbolInput) { applyLanguageSymbols(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageSignatures) {
+        refreshSuggestions(); const auto row = m_selectedSuggestion >= 0 ? static_cast<std::size_t>(m_selectedSuggestion) : 0U;
+        if (row < m_languageSignatureChoices.size()) { const int choice = m_languageSignatureChoices[row];
+            if (choice == -1 && m_languageSignaturePage) --m_languageSignaturePage; else if (choice == -2) ++m_languageSignaturePage;
+            m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); }
+        return;
+    }
     if (m_searchBar.kind() == ui::PromptKind::LanguageLocations) { applyLanguageLocation(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageRenameInput || m_searchBar.kind() == ui::PromptKind::LanguageRenameReview) { applyLanguageRename(); return; }
     if (m_searchBar.kind() == ui::PromptKind::Diagnostics) { applyDiagnosticList(); return; }
     if (m_searchBar.kind() == ui::PromptKind::File && m_projectIndexFuture.valid()) { setCommandStatus("Indexing project files; try again shortly", false); return; }
 
@@ -4067,8 +8842,8 @@ void Application::applyCommand(bool forceFolder) {
     if (m_searchBar.kind() == ui::PromptKind::AiSettings || m_searchBar.kind() == ui::PromptKind::AiModelInput || m_searchBar.kind() == ui::PromptKind::AiKeyInput) { applyAiSettings(); return; }
     if (m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugInput || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugThreads || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput) { applyDebugCommand(); return; }
     if (m_searchBar.kind() == ui::PromptKind::RecoveryList || m_searchBar.kind() == ui::PromptKind::RecoveryDetail) { applyRecovery(); return; }
-    if (m_searchBar.kind() == ui::PromptKind::ModuleList || m_searchBar.kind() == ui::PromptKind::ModuleActions || m_searchBar.kind() == ui::PromptKind::ModuleCommands || m_searchBar.kind() == ui::PromptKind::ModuleImport || m_searchBar.kind() == ui::PromptKind::ModulePreview || m_searchBar.kind() == ui::PromptKind::ModuleCatalog) { applyModuleCommand(); return; }
-    if (m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory) { applyGitReview(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::ModuleList || m_searchBar.kind() == ui::PromptKind::ModuleActions || m_searchBar.kind() == ui::PromptKind::ModuleCommands || m_searchBar.kind() == ui::PromptKind::ModuleImport || m_searchBar.kind() == ui::PromptKind::ModuleSnippetName || m_searchBar.kind() == ui::PromptKind::ModuleCMakePath || m_searchBar.kind() == ui::PromptKind::ModuleCoveragePath || m_searchBar.kind() == ui::PromptKind::ModuleBenchmarkPath || m_searchBar.kind() == ui::PromptKind::ModuleBinaryPath || m_searchBar.kind() == ui::PromptKind::ModuleLocalizationEdit || m_searchBar.kind() == ui::PromptKind::ModuleLocalizationPath || m_searchBar.kind() == ui::PromptKind::ModuleDesignTokensPath || m_searchBar.kind() == ui::PromptKind::ModuleLogsInput || m_searchBar.kind() == ui::PromptKind::ModulePythonInterpreterPath || m_searchBar.kind() == ui::PromptKind::ModulePythonCreatePath || m_searchBar.kind() == ui::PromptKind::ModuleCTestInput || m_searchBar.kind() == ui::PromptKind::ModuleHexPath || m_searchBar.kind() == ui::PromptKind::ModuleHexOffset || m_searchBar.kind() == ui::PromptKind::ModuleHexLength || m_searchBar.kind() == ui::PromptKind::ModuleHexBytes || m_searchBar.kind() == ui::PromptKind::ModuleHexSearch || m_searchBar.kind() == ui::PromptKind::ModuleLinkerPath || m_searchBar.kind() == ui::PromptKind::ModuleToolchainPath || m_searchBar.kind() == ui::PromptKind::ModuleCrashPath || m_searchBar.kind() == ui::PromptKind::ModuleRustPath || m_searchBar.kind() == ui::PromptKind::ModuleSqlPath || m_searchBar.kind() == ui::PromptKind::ModuleSqlExportPath || m_searchBar.kind() == ui::PromptKind::ModuleVisualPath || m_searchBar.kind() == ui::PromptKind::ModuleApiTemplateName || m_searchBar.kind() == ui::PromptKind::ModuleApiEnvironmentPath || m_searchBar.kind() == ui::PromptKind::ModuleApiSavePath || m_searchBar.kind() == ui::PromptKind::ModuleDependencyArtifactPath || m_searchBar.kind() == ui::PromptKind::ModuleContainerActionPath || m_searchBar.kind() == ui::PromptKind::ModuleContainerPath || m_searchBar.kind() == ui::PromptKind::ModuleFlashExecutable || m_searchBar.kind() == ui::PromptKind::ModuleShaderCompiler || m_searchBar.kind() == ui::PromptKind::ModuleShaderOutput || m_searchBar.kind() == ui::PromptKind::ModulePullRequestUrl || m_searchBar.kind() == ui::PromptKind::ModulePullRequestComment || m_searchBar.kind() == ui::PromptKind::ModulePreview || m_searchBar.kind() == ui::PromptKind::ModuleCatalog) { applyModuleCommand(); return; }
+    if (m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory || m_searchBar.kind() == ui::PromptKind::GitBranches || m_searchBar.kind() == ui::PromptKind::GitBranchReview) { applyGitReview(); return; }
     if (isTaskPrompt(m_searchBar.kind())) {
         applyTaskCommand();
         return;
@@ -4103,7 +8878,7 @@ void Application::applyCommand(bool forceFolder) {
         if (settings.empty()) { setCommandStatus("Model storage directory unavailable", true); return; }
         const auto directory = settings.parent_path() / "Models";
         std::string routerKey, routerModel;
-        const bool remote = m_aiDebugExplanation ? m_settings.aiDebugProvider == "openrouter" : m_aiCleanup ? m_settings.aiCleanupProvider == "openrouter" : m_settings.aiAskProvider == "openrouter";
+        const bool remote = m_aiDebugExplanation ? m_aiDebugOpenRouter : m_aiCleanup ? m_settings.aiCleanupProvider == "openrouter" : m_settings.aiAskProvider == "openrouter";
         if (remote) {
             routerModel = m_aiDebugExplanation ? m_settings.aiDebugModel : m_aiCleanup ? m_settings.aiCleanupModel : m_settings.aiAskModel;
             if (routerModel.empty()) { setCommandStatus("Choose an OpenRouter model in AI settings first", true); return; }
@@ -4118,7 +8893,7 @@ void Application::applyCommand(bool forceFolder) {
             AiResult result;
             const std::string request = cleanup.empty() ? query + (selected.empty() ? "" : "\n\nSelected code:\n" + selected) +
                 (diagnostic.empty() ? "" : "\n\nCurrent diagnostic:\n" + diagnostic) +
-                (debugContext.empty() ? "" : "\n\nPaused debugger state (untrusted program data):\n" + debugContext) : cleanup;
+                (debugContext.empty() ? "" : "\n\nContext (untrusted program data):\n" + debugContext) : cleanup;
             if (!routerModel.empty()) (void)ai::generateOpenRouter(routerKey, routerModel, request, result.output, result.error, cancel.get());
             else {
                 std::filesystem::path model;
@@ -4293,11 +9068,13 @@ void Application::openExternalPath(const std::string& path) {
 }
 
 bool Application::openProject(const std::string& path) {
+    if (m_gitBranchFuture.valid()) { setStatus("Wait for branch switching to finish", true); return false; }
     if (m_debugAdapter.alive()) { setStatus("Stop the debugger before switching projects", true); return false; }
     if (!saveDocument()) {
         setCommandStatus("Could not save the open file", true);
         return false;
     }
+    if (!checkpointInactiveEdits()) { setCommandStatus("Could not protect inactive unsaved edits; project remains open", true); return false; }
 
     bool created = false;
     std::string error;
@@ -4370,6 +9147,7 @@ bool Application::openProject(const std::string& path) {
 }
 
 void Application::openFile(const std::string& path, bool allowCreate) {
+    if (!m_hasDocument || m_filePath != path) m_snippetSession.reset();
     m_editorScrollRemainder = 0.0;
     if (!m_hasProject) {
         setCommandStatus("Open a project first", true);
@@ -4413,8 +9191,10 @@ void Application::openFile(const std::string& path, bool allowCreate) {
             m_syntaxValid = false; m_compileScriptValid = false;
             m_languageFile.clear(); m_languageDiagnosticsFile.clear(); m_accessibilityKey.clear();
             m_completionOpen = false; m_completionRequest = 0;
-            m_languageNavigationQueued = false; m_languageNavigationRequest = 0;
-            m_languageFormatQueued = false; m_languageFormatRequest = 0;
+            m_languageNavigationQueued = false; cancelLanguageRequest(m_languageNavigationRequest);
+            m_languageFormatQueued = false; cancelLanguageRequest(m_languageFormatRequest);
+            m_languageRenameQueued = false; cancelLanguageRequest(m_languageRenameRequest);
+            m_languageSignatureQueued = false; cancelLanguageRequest(m_languageSignatureRequest);
             if (isSettingsDocument()) {
                 m_settingsBaselineRoot = m_settingsRoot;
                 if (parseSettings(content).valid) m_settingsBaseline = content;
@@ -4434,14 +9214,17 @@ void Application::openFile(const std::string& path, bool allowCreate) {
         return;
     }
 
-    if (m_project.isDirectory(relative)) {
+    const auto cached = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(),
+        [&relative](const OpenDocument& file) { return file.path == relative; });
+    const bool hasDirtyCache = cached != m_inactiveDocuments.end() && cached->document.dirty();
+    if (!hasDirtyCache && m_project.isDirectory(relative)) {
         setCommandStatus("Path is a folder: " + relative, true);
         return;
     }
 
     bool created = false;
     std::string error;
-    if (!m_project.exists(relative)) {
+    if (!hasDirtyCache && !m_project.exists(relative)) {
         if (!allowCreate) {
             setCommandStatus("File is no longer available: " + relative, true);
             return;
@@ -4468,9 +9251,11 @@ void Application::openFile(const std::string& path, bool allowCreate) {
     }
 
     std::string content;
+    bool diskUnavailable = false;
     if (!m_project.readFile(relative, content, error)) {
-        setCommandStatus(std::move(error), true);
-        return;
+        if (!hasDirtyCache) { setCommandStatus(std::move(error), true); return; }
+        diskUnavailable = true;
+        content = cached->diskContents;
     }
 
     // NUL bytes and non-whitespace control characters are strong indicators of
@@ -4478,25 +9263,33 @@ void Application::openFile(const std::string& path, bool allowCreate) {
     const bool binary = std::any_of(content.begin(), content.end(), [](unsigned char c) {
         return c == 0 || (c < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\f');
     });
-    if (binary) {
+    if (binary && !hasDirtyCache) {
         if (!platform::openBinaryFile((m_project.root() / relative).string())) {
             setCommandStatus("Binary file was not opened: " + relative, false);
         }
         return;
     }
 
-    if (!editor::Document::canEditLosslessly(content, error)) {
-        setCommandStatus(error, true); setStatus(error, true); return;
+    if (binary || !editor::Document::canEditLosslessly(content, error)) {
+        if (!hasDirtyCache) { setCommandStatus(error, true); setStatus(error, true); return; }
+        diskUnavailable = true;
+        content = cached->diskContents;
     }
 
     editor::Document next = editor::Document::fromUtf8(content);
     int nextFirstLine = 0;
-    const auto cached = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(),
-        [&relative](const OpenDocument& file) { return file.path == relative; });
+    std::string nextBaseline = content;
+    bool externalConflict = diskUnavailable;
     bool restoredContext = false;
     if (cached != m_inactiveDocuments.end()) {
-        // Reload if another program changed the file while it was inactive.
-        if (cached->document.toUtf8() == next.toUtf8()) {
+        // A dirty cached buffer is authoritative for unsaved edits even if the
+        // file changed on disk. Retain its original baseline so save detects
+        // the conflict instead of replacing or discarding either version.
+        if (cached->document.dirty() || cached->document.toUtf8() == next.toUtf8()) {
+            if (cached->document.dirty()) {
+                nextBaseline = cached->diskContents;
+                externalConflict = externalConflict || content != nextBaseline;
+            }
             next = std::move(cached->document);
             nextFirstLine = cached->firstLine;
             restoredContext = true;
@@ -4525,7 +9318,7 @@ void Application::openFile(const std::string& path, bool allowCreate) {
         m_unrestoredFiles.erase(std::remove_if(m_unrestoredFiles.begin(), m_unrestoredFiles.end(),
             [&relative](const auto& file) { return file.path == relative; }), m_unrestoredFiles.end());
     }
-    m_diskContents = content;
+    m_diskContents = std::move(nextBaseline);
     m_firstLine = nextFirstLine;
     m_followCursor = !restoredContext;
     m_syntaxValid = false;
@@ -4536,19 +9329,22 @@ void Application::openFile(const std::string& path, bool allowCreate) {
     }
     m_searchBar.close();
 
-    setStatus((created ? "Created " : "Opened ") + relative, false);
+    setStatus(externalConflict ? "File changed or is unavailable; unsaved edits remain open. Save is checked against the original." : (created ? "Created " : "Opened ") + relative, externalConflict);
+    if (externalConflict && !checkpointRecovery() && m_settingsRoot.empty())
+        setStatus("Unsaved edits remain open, but recovery storage is unavailable", true);
     const auto extension = std::filesystem::path(relative).extension().string();
     const bool cpp = extension == ".c" || extension == ".cpp" || extension == ".cc" || extension == ".cxx" || extension == ".h" || extension == ".hpp";
     const auto root = m_project.root().generic_string();
-    if (cpp && (!m_languageServer.alive() || m_languageRoot != root) && m_languageAttemptRoot != root) {
-        m_languageAttemptRoot = root;
+    const auto attempt = root + (cpp ? "|cpp" : "|python");
+    if ((cpp || extension == ".py") && (!m_languageServer.alive() || m_languageRoot != root || m_languageKind != (cpp ? "cpp" : "python")) && m_languageAttemptRoot != attempt) {
+        m_languageAttemptRoot = attempt;
         std::string languageError;
-        if (m_languageServer.start(m_project.root(), languageError)) m_languageRoot = root;
-        else setStatus("clangd unavailable; using built-in diagnostics and completion", true);
+        if (!ensureLanguageServer(languageError) && !externalConflict) setStatus(languageError + "; using built-in diagnostics and completion", true);
     }
 }
 
 bool Application::saveDocument() {
+    if (m_gitBranchFuture.valid()) { setStatus("Wait for branch switching to finish", true); return false; }
     if (!m_hasDocument || !m_document.dirty()) {
         return true;
     }
@@ -4556,8 +9352,18 @@ bool Application::saveDocument() {
         setStatus("No project is open", true);
         return false;
     }
-
     std::string error;
+    std::string contents;
+    if (!m_document.serializeForFile(m_diskContents, contents, error)) { setStatus("Cannot save safely: " + error, true); return false; }
+    if (contents.size() > workspace::Project::maxFileSize) {
+        setStatus("Cannot save: file exceeds Lucid's 16 MiB limit. Your edits remain open.", true);
+        return false;
+    }
+    // Preserve edits before checking the disk or committing the replacement.
+    if (!checkpointRecovery()) {
+        if (m_settingsRoot.empty()) setStatus("Cannot save safely: recovery storage is unavailable", true);
+        return false;
+    }
     std::string disk;
     if (!m_project.readFile(m_filePath, disk, error)) {
         setStatus("Cannot save: file was removed or cannot be read. Your changes remain open.", true);
@@ -4565,12 +9371,6 @@ bool Application::saveDocument() {
     }
     if (disk != m_diskContents) {
         setStatus("File changed outside Lucid; save blocked. Open Recovery to save a copy of your edits.", true);
-        return false;
-    }
-    std::string contents;
-    if (!m_document.serializeForFile(m_diskContents, contents, error)) { setStatus("Cannot save safely: " + error, true); return false; }
-    if (contents.size() > workspace::Project::maxFileSize) {
-        setStatus("Cannot save: file exceeds Lucid's 16 MiB limit. Your edits remain open.", true);
         return false;
     }
     if (m_settingsRoot.empty()) { setStatus("Cannot save safely: local version history is unavailable", true); return false; }
@@ -4643,6 +9443,7 @@ void Application::deleteCurrentFile() {
 }
 
 void Application::deleteCurrentProject() {
+    if (m_gitBranchFuture.valid()) { setStatus("Wait for branch switching to finish", true); return; }
     if (m_debugAdapter.alive()) { setStatus("Stop the debugger before deleting the project", true); return; }
     if (!m_hasProject) {
         setStatus("No project is open", true);
@@ -4683,6 +9484,7 @@ void Application::deleteCurrentProject() {
         return;
     }
 
+    if (!checkpointInactiveEdits()) return;
     const std::string projectName = m_projectName;
     closeProject();
 
@@ -4871,7 +9673,7 @@ void Application::acceptSuggestion() {
     m_commandStatus.clear();
     m_commandStatusIsError = false;
     if (m_searchBar.kind() == ui::PromptKind::ProjectSearch)
-        setCommandStatus(m_projectSearchWholeWord ? "Whole words on; Ctrl/Command+Up/Down: history" : "Whole words off; Ctrl/Command+Up/Down: history", false);
+        setCommandStatus(projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false);
     refreshSuggestions();
 }
 
@@ -4983,6 +9785,77 @@ void Application::refreshSuggestions() {
         if (m_diagnosticListPage + 1 < pages) add("Next page >", "", -2);
         clipPaged(m_diagnosticListChoices); return;
     }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageSignatures) {
+        m_languageSignatureChoices.clear(); const auto pageSize = pagedContentCount();
+        const auto pages = std::max<std::size_t>(1, (m_languageSignatures.size() + pageSize - 1) / pageSize);
+        m_languageSignaturePage = std::min(m_languageSignaturePage, pages - 1);
+        const auto add = [this, &addDetailedSuggestion](std::string label, std::string detail, int choice) { addDetailedSuggestion(std::move(label), ui::SuggestionKind::Task, std::move(detail)); m_languageSignatureChoices.push_back(choice); };
+        if (m_languageSignaturePage) add("< Previous page", "", -1);
+        for (std::size_t i = m_languageSignaturePage * pageSize; i < std::min(m_languageSignatures.size(), (m_languageSignaturePage + 1) * pageSize); ++i) add(m_languageSignatures[i].first, m_languageSignatures[i].second, 0);
+        if (m_languageSignaturePage + 1 < pages) add("Next page >", "", -2);
+        clipPaged(m_languageSignatureChoices); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageStatus) {
+        struct Entry { std::string label, detail; int choice; };
+        std::vector<Entry> entries;
+        const bool python = m_hasDocument && std::filesystem::path(m_filePath).extension() == ".py";
+        const bool alive = m_languageServer.alive() && m_languageKind == (python ? "python" : "cpp"), ready = alive && m_languageServer.ready();
+        entries.push_back({python ? (alive ? "Restart Python language server" : "Start Python language server") : (alive ? "Restart clangd" : "Start clangd"), python ? "Uses pylsp from the remembered interpreter" : alive ? "Restart the language server" : "Uses clangd from PATH", -3});
+        entries.push_back({"Server", ready ? "Ready" : alive ? "Starting" : "Not running", 0});
+        if (!python) {
+        std::error_code databaseError;
+        const bool rootDatabase = std::filesystem::is_regular_file(m_project.root() / "compile_commands.json", databaseError) && !databaseError;
+        databaseError.clear();
+        const bool buildDatabase = std::filesystem::is_regular_file(m_project.root() / "build" / "compile_commands.json", databaseError) && !databaseError;
+        entries.push_back({"Compilation database", rootDatabase ? "Found compile_commands.json" : buildDatabase ? "Found build/compile_commands.json" : "Not found at root or build/; clangd may use other configuration", 0});
+#if !defined(_WIN32)
+        if (!rootDatabase && !buildDatabase && m_project.exists("CMakeLists.txt") && !m_project.isDirectory("CMakeLists.txt"))
+            entries.push_back({"Generate CMake database", "Runs project CMake scripts in a new build/ directory", -4});
+#endif
+        }
+        const std::pair<const char*, const char*> features[] = {
+            {"Completion", "textDocument/completion"}, {"Signature help", "textDocument/signatureHelp"}, {"Project symbols", "workspace/symbol"}, {"File symbols", "textDocument/documentSymbol"}, {"Definition", "textDocument/definition"},
+            {"Declaration", "textDocument/declaration"}, {"References", "textDocument/references"},
+            {"Rename", "textDocument/rename"}, {"Document formatting", "textDocument/formatting"},
+            {"Selection formatting", "textDocument/rangeFormatting"}
+        };
+        for (const auto& feature : features) entries.push_back({feature.first, !alive ? "Start server to check" : !ready ? "Waiting for server" : m_languageServer.supports(feature.second) ? "Supported" : "Not supported", 0});
+        const auto pageSize = pagedContentCount(); const auto pages = std::max<std::size_t>(1, (entries.size() + pageSize - 1) / pageSize);
+        m_languageStatusPage = std::min(m_languageStatusPage, pages - 1); m_languageStatusChoices.clear();
+        const auto add = [this, &addDetailedSuggestion](const Entry& entry) { addDetailedSuggestion(entry.label, ui::SuggestionKind::Task, entry.detail); m_languageStatusChoices.push_back(entry.choice); };
+        if (m_languageStatusPage) add({"< Previous page", "", -1});
+        for (std::size_t i = m_languageStatusPage * pageSize; i < std::min(entries.size(), (m_languageStatusPage + 1) * pageSize); ++i) add(entries[i]);
+        if (m_languageStatusPage + 1 < pages) add({"Next page >", "", -2});
+        clipPaged(m_languageStatusChoices); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageRenameReview) {
+        m_languageRenameChoices.clear();
+        const auto add = [this, &addDetailedSuggestion](std::string label, std::string detail, int choice) {
+            addDetailedSuggestion(std::move(label), ui::SuggestionKind::Task, std::move(detail)); m_languageRenameChoices.push_back(choice);
+        };
+        const auto pageSize = std::max<std::size_t>(1, pagedContentCount() - 1);
+        const bool reviewingFile = m_languageRenameReviewFile && *m_languageRenameReviewFile < m_languageRenameEdits.size();
+        const auto count = reviewingFile ? m_languageRenameEdits[*m_languageRenameReviewFile].changes.size() : m_languageRenameEdits.size();
+        const auto pages = std::max<std::size_t>(1, (count + pageSize - 1) / pageSize);
+        m_languageRenamePage = std::min(m_languageRenamePage, pages - 1);
+        if (reviewingFile) add("< Back to files", m_languageRenameEdits[*m_languageRenameReviewFile].path, -4);
+        else add("Apply rename", std::to_string(m_languageRenameEdits.size()) + " files; backups are created", -3);
+        if (m_languageRenamePage) add("< Previous page", "", -1);
+        for (std::size_t i = m_languageRenamePage * pageSize; i < std::min(count, (m_languageRenamePage + 1) * pageSize); ++i) {
+            if (reviewingFile) {
+                const auto& change = m_languageRenameEdits[*m_languageRenameReviewFile].changes[i];
+                add("Line " + std::to_string(change.line + 1) + ": " + change.before,
+                    "→ " + change.after + (change.truncated ? " (preview shortened)" : ""), -5);
+            } else {
+                const auto& file = m_languageRenameEdits[i];
+                add(file.path, std::to_string(file.changes.size()) + " changes; Enter to inspect", static_cast<int>(i));
+            }
+        }
+        if (m_languageRenamePage + 1 < pages) add("Next page >", "", -2);
+        clipPaged(m_languageRenameChoices); return;
+    }
+    if (m_searchBar.kind() == ui::PromptKind::LanguageRenameInput) return;
+    if (m_searchBar.kind() == ui::PromptKind::LanguageSymbolInput) return;
     if (m_searchBar.kind() == ui::PromptKind::LanguageLocations) {
         m_languageLocationChoices.clear();
         const auto add = [this, &addDetailedSuggestion](std::string label, int choice) { addDetailedSuggestion(std::move(label), ui::SuggestionKind::Task, ""); m_languageLocationChoices.push_back(choice); };
@@ -4992,7 +9865,7 @@ void Application::refreshSuggestions() {
         if (m_languageLocationPage) add("< Previous page", -1);
         const auto begin = m_languageLocationPage * pageSize;
         for (std::size_t i = begin; i < std::min(begin + pageSize, m_languageLocations.size()); ++i) {
-            const auto& loc = m_languageLocations[i]; add(loc.path + ":" + std::to_string(loc.line + 1) + ":" + std::to_string(loc.character + 1), static_cast<int>(i));
+            const auto& loc = m_languageLocations[i]; add((loc.name.empty() ? std::string{} : loc.name + " — ") + loc.path + ":" + std::to_string(loc.line + 1) + ":" + std::to_string(loc.character + 1), static_cast<int>(i));
         }
         if (m_languageLocationPage + 1 < pages) add("Next page >", -2);
         if (m_selectedSuggestion >= static_cast<int>(m_languageLocationChoices.size())) m_selectedSuggestion = -1;
@@ -5006,6 +9879,19 @@ void Application::refreshSuggestions() {
             addDetailedSuggestion(std::move(label), ui::SuggestionKind::Task, std::move(detail)); m_projectSearchChoices.push_back(choice);
         };
         constexpr std::size_t pageSize = 6;
+        if (m_projectSearchShowingSkipped) {
+            const auto pages = std::max<std::size_t>(1, (m_projectSearchResults.skippedFiles.size() + pageSize - 1) / pageSize);
+            m_projectSearchPage = std::min(m_projectSearchPage, pages - 1);
+            add("< Back to matches", "", -5);
+            if (m_projectSearchPage) add("< Previous page", "", -1);
+            const auto begin = m_projectSearchPage * pageSize;
+            for (std::size_t i = begin; i < std::min(begin + pageSize, m_projectSearchResults.skippedFiles.size()); ++i)
+                add(m_projectSearchResults.skippedFiles[i].path, m_projectSearchResults.skippedFiles[i].reason, -6);
+            if (m_projectSearchPage + 1 < pages) add("Next page >", "", -2);
+            if (m_projectSearchResults.skipped > m_projectSearchResults.skippedFiles.size()) add("Additional skipped files", std::to_string(m_projectSearchResults.skipped - m_projectSearchResults.skippedFiles.size()) + " not listed", -6);
+            if (m_selectedSuggestion >= static_cast<int>(m_suggestions.size())) m_selectedSuggestion = -1;
+            clipPaged(m_projectSearchChoices); return;
+        }
         const auto pages = std::max<std::size_t>(1, (m_projectSearchResults.matches.size() + pageSize - 1) / pageSize);
         m_projectSearchPage = std::min(m_projectSearchPage, pages - 1);
         if (m_projectSearchPage) add("< Previous page", "", -1);
@@ -5017,6 +9903,7 @@ void Application::refreshSuggestions() {
         }
         if (m_projectSearchPage + 1 < pages) add("Next page >", "", -2);
         if (!m_projectSearchResults.matches.empty()) add("Replace all matches…", "Review before applying", -3);
+        if (m_projectSearchResults.skipped) add("Skipped files…", std::to_string(m_projectSearchResults.skipped) + " skipped", -4);
         if (m_selectedSuggestion >= static_cast<int>(m_suggestions.size())) m_selectedSuggestion = -1;
         clipPaged(m_projectSearchChoices);
         return;
@@ -5043,7 +9930,7 @@ void Application::refreshSuggestions() {
                 add(std::string(included ? "[x] " : "[ ] ") + "Before " + std::to_string(match.line + 1) + ":" + std::to_string(match.column + 1),
                     ui::SuggestionKind::Task, match.preview, -100 - static_cast<int>(index));
                 add("After this match", ui::SuggestionKind::ReadOnlyText,
-                    workspace::replacementPreview(m_projectSearchResults.files[file], match, m_projectSearchQuery, m_projectReplacement), 0);
+                    workspace::replacementPreview(m_projectSearchResults.files[file], match, m_projectSearchQuery, m_projectReplacement, m_projectSearchResults.caseSensitive), 0);
             }
             if (m_projectSearchPage + 1 < pages) add("Next page >", ui::SuggestionKind::Task, "", -2);
             clipPaged(m_projectSearchChoices); return;
@@ -5158,7 +10045,7 @@ void Application::refreshSuggestions() {
     if (m_searchBar.kind() == ui::PromptKind::DebugMenu || m_searchBar.kind() == ui::PromptKind::DebugInput || m_searchBar.kind() == ui::PromptKind::DebugStack || m_searchBar.kind() == ui::PromptKind::DebugThreads || m_searchBar.kind() == ui::PromptKind::DebugVariables || m_searchBar.kind() == ui::PromptKind::DebugOutput) { refreshDebugSuggestions(); clipPaged(m_debugChoices); return; }
     if (m_searchBar.kind() == ui::PromptKind::RecoveryList || m_searchBar.kind() == ui::PromptKind::RecoveryDetail) { refreshRecoverySuggestions(); clipPaged(m_recoveryChoices); return; }
     if (m_searchBar.kind() == ui::PromptKind::ModuleList || m_searchBar.kind() == ui::PromptKind::ModuleActions || m_searchBar.kind() == ui::PromptKind::ModuleCommands || m_searchBar.kind() == ui::PromptKind::ModulePreview || m_searchBar.kind() == ui::PromptKind::ModuleCatalog) { refreshModuleSuggestions(); clipPaged(m_moduleChoices); return; }
-    if (m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory) { refreshGitSuggestions(); clipPaged(m_gitChoices); return; }
+    if (m_searchBar.kind() == ui::PromptKind::GitChanges || m_searchBar.kind() == ui::PromptKind::GitFile || m_searchBar.kind() == ui::PromptKind::GitDiff || m_searchBar.kind() == ui::PromptKind::GitCommitReview || m_searchBar.kind() == ui::PromptKind::GitCommitInput || m_searchBar.kind() == ui::PromptKind::GitRemoteReview || m_searchBar.kind() == ui::PromptKind::GitHistory || m_searchBar.kind() == ui::PromptKind::GitBranches || m_searchBar.kind() == ui::PromptKind::GitBranchReview) { refreshGitSuggestions(); clipPaged(m_gitChoices); return; }
     if (isTaskPrompt(m_searchBar.kind())) {
         refreshTaskSuggestions();
         clipPaged(m_taskChoices);
@@ -5343,7 +10230,7 @@ void Application::onCommandQueryChanged() {
     m_pagedScroll = 0;
     if (m_searchBar.kind() == ui::PromptKind::TaskList) m_taskPage = 0;
     if (m_searchBar.kind() == ui::PromptKind::ModuleCatalog) m_modulePage = 0;
-    if (m_searchBar.kind() == ui::PromptKind::ProjectSearch) {
+    if (m_searchBar.kind() == ui::PromptKind::ProjectSearch && !m_projectSearchEditingFilter) {
         m_projectSearchHistoryPosition = m_projectSearchHistory.size(); m_projectSearchDraft = m_searchBar.query();
     }
     m_selectedSuggestion = -1;
@@ -5354,6 +10241,7 @@ void Application::onCommandQueryChanged() {
     m_suggestionSelectionOpacityVelocity = 0.0F;
     m_commandStatus.clear();
     m_commandStatusIsError = false;
+    if (m_searchBar.kind() == ui::PromptKind::ProjectSearch) setCommandStatus(m_projectSearchEditingFilter ? "Comma-separated paths; * and ? match, ! excludes; Enter applies" : projectSearchOptions(m_projectSearchWholeWord, m_projectSearchCaseSensitive, m_projectSearchPathFilter, m_projectSearchIncludeGenerated), false);
     if (m_searchBar.kind() == ui::PromptKind::File && m_projectIndexFuture.valid()) setCommandStatus("Indexing project files…", false);
     if (m_searchBar.kind() == ui::PromptKind::Find) findInDocument(false);
     else if (m_searchBar.kind() == ui::PromptKind::Replace)
@@ -6506,7 +11394,18 @@ void Application::syncAccessibility(const ui::FrameState& frame) {
 #if defined(__APPLE__)
     std::string label, value, key;
     std::size_t start = 0, length = 0;
-    if (frame.settingsPanelVisible) {
+    if (frame.visualPreview && m_shaderPreviewViewActive) {
+        label = "Shader preview"; value = "GPU-rendered shader snapshot. Press Escape to close."; key = label + value;
+    } else if (frame.visualPreview && m_visualReview) {
+        label = "Visual comparison preview";
+        value = std::string(m_visualCropMode ? "Source-pixel crop; arrows move, zero returns to overview; the display may scale. " : "Baseline, candidate and difference reduced previews. ") + std::to_string(m_visualReview->comparison().changedPixels) + " changed pixels of " + std::to_string(m_visualReview->comparison().comparedPixels) + ". Press Escape to close.";
+        key = label + value;
+    } else if (frame.diagramPreviewVisible) {
+        label = "Diagram preview"; value = "Mermaid flowchart. Arrow keys pan; plus or minus zoom; zero resets to fit; Escape closes. Zoom " + std::to_string(static_cast<int>(m_diagramZoom*100)) + " percent.";
+        for (const auto& node : frame.diagramNodes) value += "\nNode " + node.id + ": " + node.label;
+        for (const auto& edge : frame.diagramEdges) value += "\n" + edge.from + (edge.bidirectional ? " bidirectional with " : " to ") + edge.to + (edge.label.empty() ? "" : ": " + edge.label);
+        key = label + value;
+    } else if (frame.settingsPanelVisible) {
         label = "Lucid settings";
         const auto settingName = [](ui::SettingsControl control) -> std::string {
             using C = ui::SettingsControl;
@@ -6558,6 +11457,7 @@ void Application::syncAccessibility(const ui::FrameState& frame) {
         key = label + value + ":" + std::to_string(start) + ":" + std::to_string(length);
     } else if (m_hasDocument) {
         label = "Editor: " + m_filePath;
+        if (frame.coverageCursor >= 0) label += frame.coverageCursor ? "; covered according to imported report, which may be stale" : "; uncovered according to imported report, which may be stale";
         if (!m_activeDiagnosticMessage.empty()) label += "; error: " + m_activeDiagnosticMessage;
         if (frame.completionVisible) {
             if (frame.completions.empty()) label += "; no matching completions";
@@ -7169,16 +12069,26 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
 
     ui::FrameState state =
         m_searchBar.frameState(timeSeconds, m_animationSpeed);
+    state.visualPreview = m_visualVisible ? (m_visualCropMode ? &m_visualCropPreview : &m_visualPreview) : nullptr;
+    state.webPreviewMode = m_visualVisible && (m_webViewActive || m_shaderPreviewViewActive);
+    state.shaderPreviewMode = m_visualVisible && m_shaderPreviewViewActive;
+    state.diagramPreviewVisible = m_diagramPreviewVisible;
+    if (m_diagramPreviewVisible) { state.diagramNodes = m_diagramPreview.nodes; state.diagramEdges = m_diagramPreview.edges; state.diagramWidth = m_diagramPreview.width; state.diagramHeight = m_diagramPreview.height; state.diagramZoom=m_diagramZoom; state.diagramPanX=m_diagramPanX; state.diagramPanY=m_diagramPanY; }
     state.animationTime =
         static_cast<float>(std::fmod(m_animationTimeSeconds, animationPeriod));
     switch (m_searchBar.kind()) {
     case ui::PromptKind::Ai: if (m_aiCleanup) state.commandPlaceholder = "Clean selected code with AI..."; break;
     case ui::PromptKind::AiSettings: state.commandPlaceholder = "AI settings: choose a workflow or key..."; break;
-    case ui::PromptKind::ProjectSearch: state.commandPlaceholder = "Search project (case-sensitive)..."; break;
+    case ui::PromptKind::ProjectSearch: state.commandPlaceholder = m_projectSearchEditingFilter ? "Filter project paths (text)..." : m_projectSearchCaseSensitive ? "Search project (case-sensitive)..." : "Search project (ASCII case-insensitive)..."; break;
     case ui::PromptKind::ProjectSearchResults: state.commandPlaceholder = "Project search results..."; break;
     case ui::PromptKind::ProjectReplace: state.commandPlaceholder = "Replace matches with..."; break;
     case ui::PromptKind::ProjectReplaceReview: state.commandPlaceholder = "Review project replacement..."; break;
     case ui::PromptKind::LanguageLocations: state.commandPlaceholder = "Language locations..."; break;
+    case ui::PromptKind::LanguageSymbolInput: state.commandPlaceholder = m_languageDocumentSymbols ? "Search file symbols..." : "Search project symbols..."; break;
+    case ui::PromptKind::LanguageStatus: state.commandPlaceholder = "Language server status..."; break;
+    case ui::PromptKind::LanguageSignatures: state.commandPlaceholder = "Function signatures..."; break;
+    case ui::PromptKind::LanguageRenameInput: state.commandPlaceholder = "New symbol name..."; break;
+    case ui::PromptKind::LanguageRenameReview: state.commandPlaceholder = "Review workspace rename..."; break;
     case ui::PromptKind::Diagnostics: state.commandPlaceholder = "Diagnostics in current file..."; break;
     case ui::PromptKind::SettingsMenu: state.commandPlaceholder = "Settings: choose an option..."; break;
     case ui::PromptKind::SessionRestore: state.commandPlaceholder = "Restore your last workspace?"; break;
@@ -7196,6 +12106,41 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     case ui::PromptKind::ModuleActions: state.commandPlaceholder = "Module details and permissions..."; break;
     case ui::PromptKind::ModuleCommands: state.commandPlaceholder = "Module commands..."; break;
     case ui::PromptKind::ModuleImport: state.commandPlaceholder = "Module file path or GitHub package..."; break;
+    case ui::PromptKind::ModuleSnippetName: state.commandPlaceholder = "Name personal snippet..."; break;
+    case ui::PromptKind::ModuleCMakePath: state.commandPlaceholder = m_cmakeBuildStage==1 ? "Absolute CMake executable..." : m_cmakeValueInput ? "Replacement cache value..." : "Project-relative CMake build directory..."; break;
+    case ui::PromptKind::ModuleCoveragePath: state.commandPlaceholder = "Project-relative LCOV report..."; break;
+    case ui::PromptKind::ModuleBenchmarkPath: state.commandPlaceholder = m_benchmarkSelectingCandidate ? "Project-relative candidate report..." : "Project-relative baseline report..."; break;
+    case ui::PromptKind::ModuleBinaryPath: state.commandPlaceholder = "Project-relative binary file..."; break;
+    case ui::PromptKind::ModuleLocalizationEdit: state.commandPlaceholder = "Single-line translation..."; break;
+    case ui::PromptKind::ModuleLocalizationPath: state.commandPlaceholder = m_localizationSelectingTranslation ? "Project-relative translation JSON..." : "Project-relative source JSON..."; break;
+    case ui::PromptKind::ModuleDesignTokensPath: state.commandPlaceholder = "Project-relative CSS or JSON token file..."; break;
+    case ui::PromptKind::ModuleLogsInput: state.commandPlaceholder = m_logInputStage == 0 ? "Log path; empty finishes selection..." : m_logInputStage == 1 ? "Search text; empty shows all..." : "Optional syslog year and offset..."; break;
+    case ui::PromptKind::ModulePythonInterpreterPath: state.commandPlaceholder = "Absolute path to a Python interpreter..."; break;
+    case ui::PromptKind::ModulePythonCreatePath: state.commandPlaceholder = "New project-relative virtual environment directory..."; break;
+    case ui::PromptKind::ModuleCTestInput: state.commandPlaceholder = m_ctestInputStage == 0 ? "Project-relative CMake build directory..." : "Absolute CTest executable path..."; break;
+    case ui::PromptKind::ModuleHexPath: state.commandPlaceholder = "Project-relative binary file..."; break;
+    case ui::PromptKind::ModuleHexOffset: state.commandPlaceholder = "Byte offset (decimal or 0x...)..."; break;
+    case ui::PromptKind::ModuleHexLength: state.commandPlaceholder = "Number of bytes to select..."; break;
+    case ui::PromptKind::ModuleHexBytes: state.commandPlaceholder = m_hexBytesInsert ? "Hexadecimal byte pairs to insert..." : "Hexadecimal byte pairs to overwrite..."; break;
+    case ui::PromptKind::ModuleHexSearch: state.commandPlaceholder = "Hexadecimal byte pairs to find..."; break;
+    case ui::PromptKind::ModuleToolchainPath: state.commandPlaceholder = m_usbBoardInput ? "Project-relative USB board mappings JSON..." : m_targetConfigureStage==1 ? "Project-relative existing build directory..." : m_targetConfigureStage==2 ? "Absolute CMake executable..." : (m_toolchainEditMode==1 || m_toolchainEditMode==2) ? "JSON with exactly one profile..." : "Project-relative toolchain profiles JSON..."; break;
+    case ui::PromptKind::ModuleLinkerPath: state.commandPlaceholder = m_svdInput ? "Project-relative CMSIS-SVD file..." : "Project-relative GNU ld map file..."; break;
+    case ui::PromptKind::ModulePullRequestUrl: state.commandPlaceholder = "https://github.com/owner/repo/pull/123"; break;
+    case ui::PromptKind::ModulePullRequestComment: state.commandPlaceholder = "Review comment (confirm before posting)..."; break;
+    case ui::PromptKind::ModuleShaderOutput: state.commandPlaceholder = "Project-relative SPIR-V output path..."; break;
+    case ui::PromptKind::ModuleFlashExecutable: state.commandPlaceholder = m_serialStage==12 ? "Explicit BIN flash address (0x...)..." : "Absolute OpenOCD executable path..."; break;
+    case ui::PromptKind::ModuleShaderCompiler: state.commandPlaceholder = "Absolute glslangValidator executable path..."; break;
+    case ui::PromptKind::ModuleDependencyArtifactPath: state.commandPlaceholder = "Project-relative local package artifact..."; break;
+    case ui::PromptKind::ModuleContainerActionPath: state.commandPlaceholder = "Project-relative container actions JSON..."; break;
+    case ui::PromptKind::ModuleContainerPath: state.commandPlaceholder = "Absolute Docker or Podman executable path..."; break;
+    case ui::PromptKind::ModuleApiSavePath: state.commandPlaceholder = m_apiAssertionStage==1 ? "Project-relative assertion JSON file..." : "New project-relative response file..."; break;
+    case ui::PromptKind::ModuleApiTemplateName: state.commandPlaceholder = "Request template name..."; break;
+    case ui::PromptKind::ModuleApiEnvironmentPath: state.commandPlaceholder = "Project-relative API environment JSON path..."; break;
+    case ui::PromptKind::ModuleVisualPath: state.commandPlaceholder = m_visualConfigured && m_visualConfigPath.empty() ? "Visual configuration JSON path..." : m_visualBaseline.empty() ? "Baseline PNG path..." : "Candidate PNG path..."; break;
+    case ui::PromptKind::ModuleSqlExportPath: state.commandPlaceholder = "New project-relative CSV path..."; break;
+    case ui::PromptKind::ModuleSqlPath: state.commandPlaceholder = m_sqlBound && !m_sqlDatabase.empty() ? "Project-relative typed bindings JSON..." : "Project-relative SQLite database..."; break;
+    case ui::PromptKind::ModuleCrashPath: state.commandPlaceholder = m_crashMapInput ? "Project-relative TSV or Breakpad .sym..." : "Project-relative minidump or GDB text..."; break;
+    case ui::PromptKind::ModuleRustPath: state.commandPlaceholder = m_rustRunStage==1 ? "Absolute Cargo executable..." : "Project-relative Rust JSON diagnostics..."; break;
     case ui::PromptKind::ModulePreview: state.commandPlaceholder = "Review module before installing..."; break;
     case ui::PromptKind::ModuleCatalog: state.commandPlaceholder = "Search GitHub modules..."; break;
     case ui::PromptKind::GitChanges: state.commandPlaceholder = "Git review: changed files..."; break;
@@ -7205,6 +12150,8 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     case ui::PromptKind::GitCommitInput: state.commandPlaceholder = "Commit message; Enter creates a local commit..."; break;
     case ui::PromptKind::GitRemoteReview: state.commandPlaceholder = "Review Git remote operation..."; break;
     case ui::PromptKind::GitHistory: state.commandPlaceholder = "Recent commits..."; break;
+    case ui::PromptKind::GitBranches: state.commandPlaceholder = "Local Git branches..."; break;
+    case ui::PromptKind::GitBranchReview: state.commandPlaceholder = "Review branch switch..."; break;
     case ui::PromptKind::TaskList: state.commandPlaceholder = "Tasks: search or create..."; break;
     case ui::PromptKind::TaskActions: state.commandPlaceholder = "Task actions..."; break;
     case ui::PromptKind::TaskSubtasks: state.commandPlaceholder = "Subtasks..."; break;
@@ -7235,6 +12182,8 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     pollProjectIndex();
     pollFunctionIndex();
     pollGitRemote();
+    pollGitBranch();
+    pollGitSecretScan();
     pollCompilerDiagnostics(timeSeconds);
     refreshSettings();
     refreshDiagnostics(timeSeconds);
@@ -7344,6 +12293,22 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     state.visibleLines = m_visibleLines;
     state.visibleTokens = m_visibleTokens;
     state.firstLine = m_firstLine;
+    state.coverageLines.assign(m_visibleLines.size(), -1); state.coverageCursor = -1;
+    if (m_hasProject && m_hasDocument && !m_document.dirty() && m_project.root().generic_string() == m_coverageRoot) {
+        const auto baseline = m_coverageBaselines.find(m_filePath);
+        if (baseline != m_coverageBaselines.end() && baseline->second == m_diskContents) {
+            for (const auto& line : m_coverageReport.lines) {
+                if (line.path != m_filePath) continue;
+                if (line.line == m_document.cursorLine()) state.coverageCursor = line.covered ? 1 : 0;
+                if (line.line >= static_cast<std::size_t>(std::max(0, m_firstLine)) && line.line - static_cast<std::size_t>(std::max(0, m_firstLine)) < state.coverageLines.size())
+                    state.coverageLines[line.line - static_cast<std::size_t>(std::max(0, m_firstLine))] = line.covered ? 1 : 0;
+            }
+        }
+    }
+    if (state.coverageCursor >= 0) {
+        m_statusPosition += state.coverageCursor ? " · covered" : " · uncovered";
+        state.statusPosition = m_statusPosition;
+    }
 
     state.debugBreakpointLines.clear();
     if (auto found = m_debugBreakpoints.find(m_filePath); m_hasDocument && found != m_debugBreakpoints.end())

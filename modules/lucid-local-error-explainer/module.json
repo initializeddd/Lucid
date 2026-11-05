@@ -1,0 +1,11 @@
+{
+  "name": "Local Error Explainer",
+  "version": "0.1.0",
+  "description": "Explain diagnostics and debugger errors using Lucid's local model. The model may need downloading on first use.",
+  "requires": ["local-error-explainer-v1", "local-debug-explainer-v1"],
+  "permissions": {"project": false, "network": false, "processes": false, "settings": false},
+  "commands": [
+    {"title": "Explain current diagnostic", "action": "explain-diagnostic-local"},
+    {"title": "Explain debugger state", "action": "explain-debug-local"}
+  ]
+}

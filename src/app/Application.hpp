@@ -4,6 +4,7 @@
 #include "debug/Session.hpp"
 #include "debug/AdapterProcess.hpp"
 #include "editor/lsp/Client.hpp"
+#include "editor/lsp/TextEdits.hpp"
 #include "workspace/search/ProjectSearch.hpp"
 #include "workspace/session/Session.hpp"
 #include "editor/compile/CompileScript.hpp"
@@ -25,12 +26,79 @@
 #include "workspace/recovery/Snapshot.hpp"
 #include "workspace/git/GitReview.hpp"
 #include "modules/Modules.hpp"
+#include "modules/ContainerInspection.hpp"
+#include "modules/ContainerActions.hpp"
+#include "modules/ModuleProcess.hpp"
 #include "modules/Registry.hpp"
+#include "modules/SecretScan.hpp"
+#include "modules/CMakeModel.hpp"
+#include "modules/CMakeCacheValues.hpp"
+#include "modules/CMakeBuild.hpp"
+#include "modules/MarkdownOutline.hpp"
+#include "modules/MarkdownPreview.hpp"
+#include "modules/MarkdownLinks.hpp"
+#include "modules/ExternalLinks.hpp"
+#include "modules/AccessibilityAudit.hpp"
+#include "modules/ApiRequests.hpp"
+#include "modules/ApiAssertions.hpp"
+#include "modules/SqlChanges.hpp"
+#include "modules/SqlRowDiff.hpp"
+#include "modules/DesignTokenAliases.hpp"
+#include "ui/VisualReviewCrop.hpp"
+#include "modules/VisualConfigEdit.hpp"
+#include "modules/GitHubPullRequests.hpp"
+#include "modules/PullRequestPatch.hpp"
+#include "modules/DependencyRisk.hpp"
+#include "modules/ReleaseNotes.hpp"
+#include "modules/SqlWorkbench.hpp"
+#include "modules/Coverage.hpp"
+#include "modules/CoverageSummary.hpp"
+#include "modules/BenchmarkComparison.hpp"
+#include "modules/BinaryInspector.hpp"
+#include "modules/LocalizationWorkspace.hpp"
+#include "modules/DesignTokens.hpp"
+#include "modules/SerialCapture.hpp"
+#include "modules/SerialDevices.hpp"
+#include "modules/BoardProfiles.hpp"
+#include "modules/OpenOcdFlash.hpp"
+#include "modules/ShaderCompiler.hpp"
+#include "modules/ShaderIncludes.hpp"
+#include "modules/SpirvInspection.hpp"
+#include "modules/ShaderPreview.hpp"
+#include "modules/VisualComparison.hpp"
+#include "ui/VisualReviewPreview.hpp"
+#include "modules/LogCorrelation.hpp"
+#include "modules/PythonEnvironments.hpp"
+#include "modules/PythonRuntime.hpp"
+#include "modules/PythonPreference.hpp"
+#include "modules/CTestRunner.hpp"
+#include "modules/CTestHistory.hpp"
+#include "modules/HexFile.hpp"
+#include "modules/LinkerMap.hpp"
+#include "modules/ToolchainProfiles.hpp"
+#include "modules/ToolchainTargets.hpp"
+#include "modules/TargetConfigure.hpp"
+#include "modules/SvdRegisters.hpp"
+#include "modules/UsbDescriptors.hpp"
+#include "modules/CrashDump.hpp"
+#include "modules/UnixCrashReport.hpp"
+#include "modules/CrashSymbols.hpp"
+#include "modules/RustOwnership.hpp"
+#include "modules/RustDiagnosticRun.hpp"
+#include "modules/DiagramPreview.hpp"
+#include "modules/WebPreviewBundle.hpp"
+#if defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+#include "platform/browser/WebPreviewPresentation.hpp"
+#endif
+#if defined(__APPLE__)
+#include "platform/browser/MacWebPreview.hpp"
+#endif
 
 #include <atomic>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <map>
 #include <optional>
 #include <set>
 #include <span>
@@ -85,20 +153,33 @@ private:
     void refreshDebugSuggestions();
     void applyDebugCommand();
     bool checkpointRecovery();
+    bool checkpointInactiveEdits();
     [[nodiscard]] bool saveSession(std::string& error);
     void restoreSession(const workspace::session::State& state);
     void openRecovery(bool includeHistory = true);
     void refreshRecoverySuggestions();
+    [[nodiscard]] bool recoverySnapshotProtected() const;
     void applyRecovery();
     void openModules();
     void refreshModuleSuggestions();
     void applyModuleCommand();
+    bool navigateSnippet(bool backwards);
+    bool pythonModuleReady(std::string& error);
+    bool ctestModuleReady(std::string& error);
+    bool hexModuleReady(std::string& error);
     void pollModules();
+#if defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+    [[nodiscard]] platform::WebPreviewContext windowsWebPreviewContext(bool& authorized) const;
+#endif
+    void requestVisualCrop(std::size_t x, std::size_t y);
+    [[nodiscard]] bool visualConfigAuthorized() const;
     void refreshModuleCatalog();
     void openGitReview();
     void refreshGitSuggestions();
     void applyGitReview();
     void pollGitRemote();
+    void pollGitBranch();
+    void pollGitSecretScan();
     void showTaskView(ui::PromptKind view);
     void refreshTaskSuggestions();
     void applyTaskCommand();
@@ -124,8 +205,18 @@ private:
     void openCompletion();
     void refreshCompletions();
     void pollLanguageServer();
-    void requestLanguageNavigation(bool references);
+    [[nodiscard]] bool ensureLanguageServer(std::string& error);
+    void requestLanguageNavigation(bool references, bool declaration = false);
+    void openLanguageStatus();
+    void applyLanguageStatus();
     void requestLanguageFormatting();
+    void requestLanguageSignatures();
+    void openLanguageSymbols(bool currentFile = false);
+    void applyLanguageSymbols();
+    void expireLanguageRequests(double now);
+    void cancelLanguageRequest(std::uint64_t& request);
+    void requestLanguageRename();
+    void applyLanguageRename();
     void applyLanguageLocation();
     void applyCommand(bool forceFolder);
     void createFolder(const std::string& path);
@@ -238,6 +329,7 @@ private:
     [[nodiscard]] std::string commandPath() const;
 
     void setCommandStatus(std::string message, bool error);
+    [[nodiscard]] bool dependencyArtifactReady(std::string& error) const;
     void setStatus(std::string message, bool error);
 
     std::string m_accessibilityKey;
@@ -258,10 +350,11 @@ private:
     struct TaskChoice { TaskChoiceKind kind; std::string id; };
     enum class TaskInputKind { Identity, Title, Subtask, Assignee, Solution };
     std::filesystem::path m_recoveryFile;
+    std::map<std::string, std::filesystem::path> m_inactiveRecoveryFiles;
     std::filesystem::path m_cachedRecoveryPath;
     std::optional<workspace::recovery::Snapshot> m_cachedRecoverySnapshot;
     std::vector<std::filesystem::path> m_recoveryFiles;
-    struct RecoverySummary { std::string file; bool saved = false, history = false; std::size_t openCount = 0; };
+    struct RecoverySummary { std::string file; bool saved = false, history = false; std::size_t openCount = 0; std::string diskState; };
     std::vector<RecoverySummary> m_recoverySummaries;
     workspace::recovery::Snapshot m_recoveryPreview;
     std::size_t m_recoverySelected = 0, m_recoveryPage = 0;
@@ -272,6 +365,8 @@ private:
     modules::Module m_modulePreview;
     std::string m_modulePreviewManifest;
     std::string m_modulePreviewSource;
+    std::string m_personalSnippetDraft;
+    bool m_personalSnippetTemplate = false;
     struct ModuleFetchResult {
         bool catalog = false;
         std::size_t generation = 0;
@@ -280,6 +375,480 @@ private:
     };
     std::vector<modules::RegistryEntry> m_moduleCatalog;
     std::future<ModuleFetchResult> m_moduleFetchFuture;
+    std::future<modules::SecretScanResult> m_moduleScanFuture;
+    std::shared_ptr<std::atomic_bool> m_moduleScanCancel;
+    modules::SecretScanResult m_moduleScanResults;
+    std::string m_moduleScanRoot;
+    int m_moduleScanFilter = 0;
+    bool m_moduleScanShowingResults = false;
+    struct CMakeModelResult { modules::CMakeModel model; std::string error; };
+    std::future<CMakeModelResult> m_moduleCMakeFuture;
+    modules::CMakeModel m_moduleCMakeModel;
+    std::string m_moduleCMakeRoot;
+    std::string m_moduleCMakeBuild = "build";
+    bool m_moduleCMakePrepare = false;
+    bool m_moduleCMakeShowing = false;
+    bool m_moduleCMakeOptions = false;
+    bool m_moduleCMakeEditing = false, m_moduleCMakeStale = false;
+    std::optional<std::size_t> m_moduleCMakeOption;
+    std::vector<modules::CMakeCacheValue> m_cmakeValues;
+    std::optional<std::size_t> m_cmakeValueSelected;
+    bool m_cmakeValueMode=false, m_cmakeValueInput=false;
+    struct CMakeValuesResult {std::vector<modules::CMakeCacheValue> values;std::string error;};
+    std::future<CMakeValuesResult> m_cmakeValuesFuture;
+    struct CMakeCachePrepareResult { modules::CMakeCacheUpdate update; std::string error; };
+    std::future<CMakeCachePrepareResult> m_cmakeCachePrepareFuture;
+    std::future<std::string> m_cmakeCacheSaveFuture;
+    modules::CMakeCacheUpdate m_cmakeCacheUpdate;
+    std::string m_cmakeCacheTarget;
+    std::optional<std::size_t> m_moduleCMakeTarget;
+    int m_cmakeBuildStage=0;
+    modules::CMakeBuildPlan m_cmakeBuildPlan;
+    modules::ModuleProcessResult m_cmakeBuildResult;
+    std::future<modules::CMakeBuildPlan> m_cmakeBuildPrepareFuture;
+    std::future<modules::ModuleProcessResult> m_cmakeBuildFuture;
+    std::shared_ptr<std::atomic_bool> m_cmakeBuildCancel;
+    std::uint64_t m_cmakeBuildGeneration=0;
+    bool m_moduleMarkdownShowing = false;
+    modules::MarkdownOutline m_moduleMarkdownOutline;
+    std::string m_moduleMarkdownFile;
+    std::uint64_t m_moduleMarkdownRevision = 0;
+    struct MarkdownPreviewResult { modules::MarkdownPreview preview; std::string error; };
+    std::future<MarkdownPreviewResult> m_markdownPreviewFuture;
+    bool m_markdownPreviewShowing = false;
+    std::vector<std::pair<std::string, ui::SuggestionKind>> m_markdownPreviewLines;
+    std::future<modules::MarkdownLinkResults> m_markdownLinksFuture;
+    std::shared_ptr<std::atomic_bool> m_markdownLinksCancel;
+    modules::MarkdownLinkResults m_markdownLinksResults;
+    std::string m_markdownLinksRoot;
+    int m_markdownLinksFilter = 0;
+    bool m_markdownLinksShowing = false;
+    bool m_markdownExternalMode = false;
+    std::optional<std::size_t> m_markdownExternalSelected;
+    std::future<modules::LinkCheck> m_markdownExternalFuture;
+    std::shared_ptr<std::atomic_bool> m_markdownExternalCancel;
+    std::size_t m_markdownExternalRequestIndex = 0;
+    std::uint64_t m_markdownExternalGeneration = 0;
+    std::string m_markdownExternalModule;
+    struct CoverageResult { modules::CoverageReport report; modules::CoverageComparison comparison; std::map<std::string, std::string> baselines; std::string error; bool comparing = false; };
+    std::future<CoverageResult> m_coverageFuture;
+    std::shared_ptr<std::atomic_bool> m_coverageCancel;
+    modules::CoverageReport m_coverageReport;
+    modules::CoverageSummary m_coverageSummary;
+    modules::CoverageComparison m_coverageComparison;
+    bool m_coverageChoosingBaseline = false, m_coverageComparing = false;
+    bool m_coverageFilesMode = false;
+    std::string m_coverageFile;
+    std::map<std::string, std::string> m_coverageBaselines;
+    std::string m_coverageRoot;
+    bool m_coverageCobertura = false;
+    bool m_coverageShowing = false;
+    int m_coverageFilter = 0; // 0: all, 1: uncovered, 2: covered.
+    struct BenchmarkResult { modules::BenchmarkComparison comparison; std::string error; };
+    std::future<BenchmarkResult> m_benchmarkFuture;
+    std::shared_ptr<std::atomic_bool> m_benchmarkCancel;
+    modules::BenchmarkComparison m_benchmarkComparison;
+    std::string m_benchmarkRoot, m_benchmarkBaseline;
+    std::optional<std::size_t> m_benchmarkSelected;
+    int m_benchmarkFilter = 0;
+    bool m_benchmarkSelectingCandidate = false, m_benchmarkShowing = false;
+    struct BinaryResult { modules::BinaryInspection inspection; std::shared_ptr<const std::string> snapshot; bool selecting = false; std::size_t slice = 0; };
+    std::future<BinaryResult> m_binaryFuture;
+    std::shared_ptr<std::atomic_bool> m_binaryCancel;
+    modules::BinaryInspection m_binaryInspection;
+    std::shared_ptr<const std::string> m_binarySnapshot;
+    std::size_t m_binarySlice = 0;
+    std::string m_binaryRoot;
+    bool m_binaryShowing = false;
+    std::optional<unsigned> m_binaryCategory; // Sections, libraries, or symbols.
+    struct LocalizationResult { std::vector<modules::LocalizationEntry> entries; std::string sourceSnapshot, translationSnapshot, error; };
+    std::future<LocalizationResult> m_localizationFuture;
+    std::shared_ptr<std::atomic_bool> m_localizationCancel;
+    std::vector<modules::LocalizationEntry> m_localizationEntries;
+    std::string m_localizationRoot, m_localizationSource, m_localizationTranslation, m_localizationSourceSnapshot, m_localizationTranslationSnapshot;
+    modules::LocalizationEditPlan m_localizationEditPlan;
+    std::string m_localizationEditModule, m_localizationEditContextFile;
+    std::uint64_t m_localizationEditContextRevision = 0;
+    bool m_localizationEditContextHasDocument = false, m_localizationEditPreview = false;
+    std::optional<std::size_t> m_localizationSelected;
+    bool m_localizationSelectingTranslation = false, m_localizationShowing = false;
+    struct DesignTokenResult { modules::DesignTokenReport report; std::vector<modules::DesignAliasResult> aliases; std::string snapshot, error; };
+    std::future<DesignTokenResult> m_designTokenFuture;
+    std::shared_ptr<std::atomic_bool> m_designTokenCancel;
+    modules::DesignTokenReport m_designTokenReport;
+    std::vector<modules::DesignAliasResult> m_designTokenAliases;
+    std::uint64_t m_designTokenGeneration=0;
+    bool m_designTokenAliasEnabled=false;
+    std::string m_designTokenRoot, m_designTokenFile, m_designTokenSnapshot, m_designTokenModule;
+    std::optional<std::size_t> m_designTokenSelected;
+    bool m_designTokenShowing = false;
+    struct LogResult { modules::LogCorrelationResult report; std::map<std::string, std::string> snapshots; std::string error; };
+    std::future<LogResult> m_logFuture;
+    std::shared_ptr<std::atomic_bool> m_logCancel;
+    modules::LogCorrelationResult m_logReport;
+    std::map<std::string, std::string> m_logSnapshots;
+    std::vector<std::string> m_logPaths;
+    std::string m_logRoot, m_logQuery, m_logModule;
+    std::uint64_t m_logGeneration = 0;
+    std::optional<std::size_t> m_logSelected;
+    int m_logInputStage = 0;
+    bool m_logShowing = false, m_logJson = false;
+    struct PythonDiscoveryResult { std::vector<modules::PythonEnvironment> environments; modules::PythonPreference preference; std::string error, preferenceError; };
+    std::future<PythonDiscoveryResult> m_pythonDiscoveryFuture;
+    std::vector<modules::PythonEnvironment> m_pythonEnvironments;
+    std::filesystem::path m_pythonUnlistedInterpreter;
+    std::string m_pythonRoot;
+    bool m_pythonShowing = false;
+    bool m_pythonManage = false, m_pythonPreferenceReady = false;
+    std::optional<std::size_t> m_pythonSelected;
+    modules::PythonPreference m_pythonPreference;
+    std::future<modules::PythonRuntimeResult> m_pythonRuntimeFuture;
+    std::future<modules::PythonServerProvisionResult> m_pythonProvisionFuture;
+    std::shared_ptr<std::atomic_bool> m_pythonProvisionCancel;
+    std::optional<bool> m_pythonProvisionBootstrap;
+    std::string m_pythonProvisionRoot;
+    std::filesystem::path m_pythonProvisionInterpreter;
+    std::uint64_t m_pythonProvisionGeneration = 0;
+    bool m_pythonCreating = false;
+    std::future<modules::CTestDiscoveryResult> m_ctestDiscoveryFuture;
+    std::future<modules::CTestRunResult> m_ctestRunFuture;
+    std::shared_ptr<std::atomic_bool> m_ctestCancel;
+    modules::TestDiscovery m_ctestDiscovery;
+    std::map<std::string, modules::TestResult> m_ctestLast, m_ctestPrevious;
+    modules::CTestHistorySnapshot m_ctestHistory;
+    std::vector<modules::TestHistorySummary> m_ctestSummaries;
+    std::vector<modules::FailedRerunCandidate> m_ctestRerunCandidates;
+    std::optional<std::size_t> m_ctestRerunSelected;
+    bool m_ctestRerunShowing = false;
+    bool m_ctestHistoryReady = false;
+    std::string m_ctestHistoryError;
+    std::filesystem::path m_ctestBuild, m_ctestExecutable;
+    std::string m_ctestRoot, m_ctestRunning;
+    std::optional<std::size_t> m_ctestSelected;
+    int m_ctestInputStage = 0;
+    bool m_ctestShowing = false;
+    struct HexOperation { modules::HexFile file; std::string error, root, path; bool ok = false, saving = false; };
+    std::future<HexOperation> m_hexFuture;
+    std::optional<modules::HexFile> m_hexFile;
+    std::string m_hexRoot, m_hexPath, m_hexBaseline;
+    std::size_t m_hexViewOffset = 0, m_hexEditOffset = 0;
+    std::string m_hexLastNeedle;
+    std::size_t m_hexNextSearch = 0;
+    enum class HexOffsetAction { Navigate, Overwrite, Select, Insert };
+    HexOffsetAction m_hexOffsetAction = HexOffsetAction::Navigate;
+    bool m_hexShowing = false, m_hexBytesInsert = false, m_hexReplaceSelection = false, m_hexSaving = false;
+    struct LinkerResult { modules::LinkerMap map; std::string error; };
+    std::future<LinkerResult> m_linkerFuture;
+    std::shared_ptr<std::atomic_bool> m_linkerCancel;
+    modules::LinkerMap m_linkerMap;
+    std::string m_linkerRoot;
+    std::size_t m_linkerSectionOffset = 0;
+    bool m_linkerShowing = false;
+    std::future<modules::SvdRegisters> m_svdFuture;
+    std::shared_ptr<std::atomic_bool> m_svdCancel;
+    modules::SvdRegisters m_svdRegisters;
+    std::optional<std::size_t> m_svdSelected;
+    bool m_svdShowing = false, m_svdInput = false;
+    struct ToolchainResult { std::vector<modules::ToolchainProfile> profiles; std::string error, snapshot; };
+    std::future<ToolchainResult> m_toolchainFuture;
+    std::shared_ptr<std::atomic_bool> m_toolchainCancel;
+    std::vector<modules::ToolchainProfile> m_toolchainProfiles;
+    std::string m_toolchainRoot, m_toolchainModule, m_toolchainFile, m_toolchainSnapshot;
+    modules::TargetEditDraft m_toolchainDraft;
+    modules::ToolchainProfile m_toolchainEditProfile;
+    int m_toolchainEditMode=0; // 0 browse, 1 add, 2 replace, 3 remove, 4 review add, 5 review replace, 6 review remove
+    int m_targetConfigureStage=0; // build path, executable, review, running, result
+    std::string m_targetConfigureBuild;
+    modules::TargetConfigurePlan m_targetConfigurePlan;
+    modules::ModuleProcessResult m_targetConfigureResult;
+    std::future<modules::ModuleProcessResult> m_targetConfigureFuture;
+    std::shared_ptr<std::atomic_bool> m_targetConfigureCancel;
+    std::future<std::string> m_toolchainSaveFuture;
+    std::shared_ptr<std::atomic_bool> m_toolchainSaveCancel;
+    std::uint64_t m_toolchainGeneration = 0;
+    std::optional<std::size_t> m_toolchainSelected;
+    bool m_toolchainShowing = false;
+    struct CrashInspectionResult { modules::CrashDump dump; modules::UnixCrashReport gdb; bool isGdb=false; };
+    std::future<CrashInspectionResult> m_crashFuture;
+    modules::UnixCrashReport m_crashGdb;
+    bool m_crashIsGdb=false;
+    std::shared_ptr<std::atomic_bool> m_crashCancel;
+    modules::CrashDump m_crashDump;
+    modules::CrashSourceMap m_crashSourceMap;
+    std::string m_crashMapIdentity;
+    bool m_crashMapInput = false;
+    std::string m_crashRoot;
+    bool m_crashShowing = false;
+    struct RustOwnershipResult { std::vector<modules::RustOwnershipDiagnostic> diagnostics; std::string error; };
+    std::future<RustOwnershipResult> m_rustOwnershipFuture;
+    std::shared_ptr<std::atomic_bool> m_rustOwnershipCancel;
+    std::vector<modules::RustOwnershipDiagnostic> m_rustOwnershipDiagnostics;
+    std::vector<modules::RustOwnershipSpan> m_rustOwnershipSpans;
+    std::optional<std::size_t> m_rustOwnershipSelected;
+    std::string m_rustOwnershipRoot;
+    bool m_rustOwnershipShowing = false;
+    int m_rustRunStage=0; // executable input, review, running, results
+    std::string m_rustRunModule;
+    std::uint64_t m_rustRunGeneration=0;
+    modules::RustDiagnosticPlan m_rustRunPlan;
+    modules::RustDiagnosticRun m_rustRunResult;
+    std::future<modules::RustDiagnosticRun> m_rustRunFuture;
+    std::shared_ptr<std::atomic_bool> m_rustRunCancel;
+    struct ReleaseNotesResult { std::vector<modules::ReleaseNoteEntry> entries; std::string warning; };
+    std::future<ReleaseNotesResult> m_releaseNotesFuture;
+    std::vector<modules::ReleaseNoteEntry> m_releaseNotesEntries;
+    modules::ReleaseNoteDraft m_releaseNotesDraft;
+    bool m_releaseNotesPreview = false;
+    int m_releaseNotesFilter = 0;
+    std::string m_releaseNotesRoot, m_releaseNotesFile, m_releaseNotesModule;
+    std::uint64_t m_releaseNotesRevision = 0, m_releaseNotesGeneration = 0;
+    bool m_releaseNotesShowing = false;
+    struct ContainerResult { modules::ContainerListing listing; modules::ModuleProcessResult process; std::string error; };
+    struct ContainerActionPrepareResult { modules::ContainerActionReview review; std::string error; };
+    std::future<ContainerActionPrepareResult> m_containerActionPrepareFuture;
+    std::vector<modules::ContainerProjectAction> m_containerProjectActions;
+    modules::ContainerActionReview m_containerActionReview;
+    std::string m_containerActionConfigPath, m_containerActionConfigSnapshot;
+    bool m_containerActionMode = false;
+    std::future<ContainerResult> m_containerFuture;
+    std::shared_ptr<std::atomic_bool> m_containerCancel;
+    modules::ContainerListing m_containerListing;
+    std::filesystem::path m_containerRuntime;
+    std::string m_containerModule, m_containerOutput, m_containerProjectRoot;
+    std::uint64_t m_containerGeneration = 0;
+    std::optional<std::size_t> m_containerSelected;
+    std::string m_containerOperation;
+    int m_containerStage = 0;
+    bool m_containerShowing = false, m_containerRunningLogs = false;
+    std::future<modules::ShaderCompilation> m_shaderFuture;
+    std::future<modules::ShaderIncludeGraph> m_shaderIncludesFuture;
+    std::shared_ptr<std::atomic_bool> m_shaderIncludesCancel;
+    modules::ShaderIncludeGraph m_shaderIncludes;
+    bool m_shaderIncludesShowing = false;
+    struct SpirvResult { modules::SpirvInspection inspection; std::string error; };
+    std::future<SpirvResult> m_spirvFuture;
+    std::shared_ptr<std::atomic_bool> m_spirvCancel;
+    SpirvResult m_spirvResult;
+    bool m_spirvShowing = false;
+    struct ShaderPreviewResult { modules::ShaderPreviewImage image; std::string error; };
+    std::future<ShaderPreviewResult> m_shaderPreviewFuture;
+    std::shared_ptr<std::atomic_bool> m_shaderPreviewCancel;
+    std::string m_shaderPreviewBytes;
+    int m_shaderPreviewStage = 0; // 1 review, 2 running, 3 ready, 4 failed.
+    bool m_shaderPreviewViewActive = false;
+    std::shared_ptr<std::atomic_bool> m_shaderCancel;
+    modules::ShaderCompilation m_shaderResult;
+    std::filesystem::path m_shaderCompiler;
+    std::string m_shaderRoot, m_shaderFile, m_shaderStage, m_shaderModule;
+    std::string m_shaderOutput;
+    std::optional<std::string> m_shaderExpectedOutput;
+    bool m_shaderArtifact = false;
+    std::uint64_t m_shaderRevision = 0, m_shaderGeneration = 0;
+    bool m_shaderShowing = false, m_shaderCompleted = false;
+    struct WebBundleResult { modules::WebPreviewBundle bundle; std::string error; };
+    std::future<WebBundleResult> m_webBundleFuture;
+#if defined(__APPLE__)
+    std::unique_ptr<platform::MacWebPreview> m_webRenderer;
+#endif
+#if defined(_WIN32) && defined(LUCID_WEBVIEW2_UI_TEST)
+    std::unique_ptr<platform::WebPreviewPresentation> m_windowsWebPresentation;
+    bool m_webCleanupReported = false, m_webPresentationActive = false;
+    std::chrono::steady_clock::time_point m_webCleanupSince{};
+#endif
+    std::string m_webRoot, m_webFile, m_webModule, m_webError;
+    std::uint64_t m_webRevision = 0, m_webGeneration = 0;
+    bool m_webShowing = false, m_webStarted = false, m_webReady = false, m_webViewActive = false;
+    std::future<modules::SerialDeviceScan> m_serialScanFuture;
+    std::future<modules::SerialCaptureResult> m_serialFuture;
+    std::shared_ptr<modules::SerialMonitorBuffer> m_serialMonitor;
+    std::chrono::steady_clock::time_point m_serialMonitorRefresh{};
+    std::shared_ptr<std::atomic_bool> m_serialCancel;
+    modules::SerialDeviceScan m_serialScan;
+    modules::SerialCaptureResult m_serialResult;
+    modules::BoardProfile m_boardProfile;
+    std::string m_serialModule;
+    std::uint64_t m_serialGeneration = 0;
+    std::size_t m_serialSelected = 0;
+    unsigned m_serialBaud = 115200;
+    int m_serialStage = 0;
+    bool m_serialShowing = false;
+    bool m_usbBoardInput = false, m_usbBoardShowing = false, m_usbBoardConfirmed = false;
+    std::string m_usbBoardRoot, m_usbBoardModule;
+    std::uint64_t m_usbBoardGeneration = 0;
+    modules::BoardMappings m_usbBoardMappings;
+    modules::UsbDescriptorScan m_usbBoardScan;
+    std::future<modules::UsbDescriptorScan> m_usbBoardFuture;
+    struct FlashPrepareResult { modules::FirmwareSnapshot snapshot; std::string error; };
+    std::future<FlashPrepareResult> m_flashPrepareFuture;
+    std::future<modules::ModuleProcessResult> m_flashFuture;
+    std::shared_ptr<std::atomic_bool> m_flashCancel;
+    modules::FirmwareSnapshot m_flashSnapshot;
+    modules::ModuleProcessResult m_flashResult;
+    std::filesystem::path m_flashExecutable;
+    std::string m_flashRoot, m_flashFile;
+    std::uint64_t m_flashRevision = 0, m_flashGeneration = 0;
+    struct DependencyResult { modules::DependencyRiskReport report; std::string error; };
+    struct DependencyDetailResult { modules::OsvDetail detail; std::string error; };
+    std::future<DependencyResult> m_dependencyFuture;
+    std::future<DependencyDetailResult> m_dependencyDetailFuture;
+    std::future<modules::DependencyArtifactVerification> m_dependencyArtifactFuture;
+    std::shared_ptr<std::atomic_bool> m_dependencyArtifactCancel;
+    modules::DependencyArtifactVerification m_dependencyArtifactResult;
+    std::string m_dependencyArtifactPath, m_dependencyArtifactRoot, m_dependencyDocumentSnapshot;
+    std::size_t m_dependencyArtifactIndex = 0;
+    int m_dependencyArtifactStage = 0; // 1 review, 2 verifying, 3 result
+
+    std::shared_ptr<std::atomic_bool> m_dependencyCancel;
+    modules::DependencyRiskReport m_dependencyReport;
+    modules::OsvDetail m_dependencyDetail;
+    bool m_dependencyProvenanceShowing = false;
+    std::optional<std::size_t> m_dependencyProvenanceSelected;
+    std::vector<std::string> m_dependencyIds;
+    std::string m_dependencySelectedId;
+    bool m_dependencyDetailReady = false;
+    std::string m_dependencyFile, m_dependencyModule, m_dependencyError;
+    std::uint64_t m_dependencyRevision = 0, m_dependencyGeneration = 0;
+    bool m_dependencyShowing = false, m_dependencyReady = false, m_dependencyQuerying = false, m_dependencyQueried = false;
+    struct PullRequestResult { modules::PullRequestData data; std::string error; };
+    std::future<PullRequestResult> m_pullRequestFuture;
+    std::shared_ptr<std::atomic_bool> m_pullRequestCancel;
+    modules::PullRequestData m_pullRequestData;
+    std::string m_pullRequestUrl, m_pullRequestModule, m_pullRequestError;
+    std::uint64_t m_pullRequestGeneration = 0;
+    bool m_pullRequestShowing = false, m_pullRequestFetched = false;
+    struct PullPatchResult { std::vector<modules::PatchHunk> hunks; std::string error; };
+    std::future<PullPatchResult> m_pullPatchFuture;
+    std::optional<std::size_t> m_pullPatchSelected;
+    std::size_t m_pullPatchPending = 0;
+    std::uint64_t m_pullPatchGeneration = 0;
+    std::vector<modules::PatchHunk> m_pullPatchHunks;
+    std::string m_pullPatchError;
+    std::string m_pullCommentBody;
+    std::size_t m_pullCommentLine = 0;
+    bool m_pullCommentConfirm = false;
+    int m_pullReviewMode = 0; // 0: inline comment, 1: approve, 2: request changes, 3: comment review.
+    bool m_pullReviewPosting = false;
+    std::future<std::string> m_pullCommentFuture;
+    std::future<modules::ApiAssertionReport> m_apiAssertionFuture;
+    std::shared_ptr<std::atomic_bool> m_apiAssertionCancel;
+    modules::ApiAssertionReport m_apiAssertions;
+    int m_apiAssertionStage = 0;
+    std::uint64_t m_apiAssertionGeneration = 0, m_apiAssertionResponseGeneration = 0;
+    std::future<modules::ApiResponse> m_apiFuture;
+    std::shared_ptr<std::atomic_bool> m_apiCancel;
+    std::vector<modules::ApiRequest> m_apiRequests;
+    std::vector<modules::ApiEnvironment> m_apiEnvironments;
+    bool m_apiEditMode = false, m_apiEditAdding = false, m_apiEditConfirm = false;
+    std::vector<std::string> m_apiEditNames;
+    std::optional<std::size_t> m_apiEditSelected;
+    std::string m_apiEditBaseline;
+    bool m_apiChoosingEnvironment = false, m_apiProfileMode = false;
+    std::string m_apiRoot;
+    modules::ApiResponse m_apiResponse;
+    int m_apiResponseView = 0;
+    int m_apiSaveStage = 0;
+    std::future<std::string> m_apiSaveFuture;
+    std::shared_ptr<std::atomic_bool> m_apiSaveCancel;
+    std::string m_apiSavePath;
+    std::uint64_t m_apiSaveGeneration = 0;
+    std::string m_apiFile, m_apiModule;
+    std::uint64_t m_apiRevision = 0, m_apiGeneration = 0;
+    std::optional<std::size_t> m_apiSelected;
+    bool m_apiShowing = false, m_apiConfirmed = false;
+    std::future<modules::SqlChangePreview> m_sqlChangeFuture;
+    std::future<std::string> m_sqlChangeSaveFuture;
+    std::shared_ptr<std::atomic_bool> m_sqlChangeCancel;
+    std::future<modules::SqlRowDiff> m_sqlRowFuture;
+    std::shared_ptr<std::atomic_bool> m_sqlRowCancel;
+    modules::SqlRowDiff m_sqlRowDiff;
+    bool m_sqlRowShowing = false;
+    std::size_t m_sqlRowIndex = 0;
+    std::uint64_t m_sqlRowGeneration = 0;
+    modules::SqlChangePreview m_sqlChange;
+    std::shared_ptr<std::string> m_sqlChangeBindingsSnapshot;
+    std::string m_sqlChangeBindingsPath;
+    bool m_sqlChangeMode = false;
+    int m_sqlChangeStage = 0;
+    std::future<modules::SqlQueryResult> m_sqlFuture;
+    std::shared_ptr<const std::string> m_sqlSnapshot;
+    std::future<modules::SqlColumnsResult> m_sqlColumnsFuture;
+    std::shared_ptr<std::atomic_bool> m_sqlColumnsCancel;
+    std::shared_ptr<const std::string> m_sqlColumnsSnapshot;
+    modules::SqlColumnsResult m_sqlColumns;
+    std::size_t m_sqlColumnsObject = 0;
+    std::future<modules::SqlSchemaResult> m_sqlSchemaFuture;
+    std::shared_ptr<std::atomic_bool> m_sqlSchemaCancel;
+    modules::SqlSchemaResult m_sqlSchema;
+    std::optional<std::size_t> m_sqlSchemaSelected;
+    std::uint64_t m_sqlSchemaGeneration = 0;
+    bool m_sqlSchemaShowing = false;
+    std::shared_ptr<std::atomic_bool> m_sqlCancel;
+    modules::SqlQueryResult m_sqlResult;
+    std::future<modules::SqlCsvExport> m_sqlCsvFuture;
+    std::future<std::string> m_sqlCsvSaveFuture;
+    std::shared_ptr<std::atomic_bool> m_sqlCsvCancel;
+    modules::SqlCsvExport m_sqlCsv;
+    std::string m_sqlCsvPath;
+    int m_sqlCsvStage = 0;
+    std::string m_sqlRoot, m_sqlFile, m_sqlModule, m_sqlQuery, m_sqlDatabase;
+    std::uint64_t m_sqlRevision = 0, m_sqlGeneration = 0;
+    bool m_sqlShowing = false, m_sqlExplain = false, m_sqlBound = false;
+    struct VisualConfigResult { modules::VisualConfigDraft draft; std::string error; };
+    std::future<VisualConfigResult> m_visualConfigFuture;
+    std::future<std::string> m_visualConfigApplyFuture;
+    std::shared_ptr<std::atomic_bool> m_visualConfigCancel;
+    std::shared_ptr<modules::VisualReview> m_visualConfigReview;
+    modules::VisualConfigDraft m_visualConfigDraft;
+    modules::VisualConfigChange m_visualConfigChange{};
+    std::string m_visualConfigOriginal, m_visualConfigFile;
+    std::uint64_t m_visualConfigRevision=0, m_visualConfigGeneration=0;
+    int m_visualConfigStage=0, m_visualConfigOperation=0;
+    struct VisualResult { std::shared_ptr<modules::VisualReview> review; ui::VisualReviewPreview preview; std::string error; };
+    std::future<VisualResult> m_visualFuture;
+    std::future<std::string> m_visualApprovalFuture;
+    std::shared_ptr<std::atomic_bool> m_visualCancel;
+    std::shared_ptr<modules::VisualReview> m_visualReview;
+    ui::VisualReviewPreview m_visualPreview;
+    struct VisualCropResult { ui::VisualReviewPreview preview; std::string error; std::size_t x=0, y=0; };
+    std::future<VisualCropResult> m_visualCropFuture;
+    std::shared_ptr<std::atomic_bool> m_visualCropCancel;
+    std::shared_ptr<modules::VisualReview> m_visualCropReview;
+    ui::VisualReviewPreview m_visualCropPreview;
+    std::size_t m_visualCropX=0, m_visualCropY=0;
+    bool m_visualCropMode=false;
+    std::string m_visualRoot, m_visualModule, m_visualBaseline, m_visualConfigPath;
+    std::uint64_t m_visualGeneration = 0;
+    bool m_visualShowing = false, m_visualVisible = false, m_visualConfirm = false, m_visualConfigured = false;
+    struct DiagramPreviewResult { modules::DiagramLayout layout; std::string error; };
+    std::future<DiagramPreviewResult> m_diagramPreviewFuture;
+    std::shared_ptr<std::atomic_bool> m_diagramPreviewCancel;
+    modules::DiagramLayout m_diagramPreview;
+    std::string m_diagramPreviewFile;
+    std::uint64_t m_diagramPreviewRevision = 0;
+    std::uint64_t m_diagramPreviewPromptGeneration = 0;
+    std::string m_diagramPreviewModule;
+    bool m_diagramPreviewVisible = false;
+    double m_diagramZoom = 1.0, m_diagramPanX = 0.0, m_diagramPanY = 0.0;
+    double m_diagramDragX = 0.0, m_diagramDragY = 0.0;
+    bool m_diagramDragging = false;
+    std::future<modules::AccessibilityAudit> m_accessibilityFuture;
+    modules::AccessibilityAudit m_accessibilityAudit;
+    std::string m_accessibilityFile;
+    std::uint64_t m_accessibilityRevision = 0;
+    std::uint64_t m_accessibilityPromptGeneration = 0;
+    std::string m_accessibilityModule;
+    bool m_accessibilityShowing = false;
+    struct SnippetSession { std::string file, root, snapshot; std::vector<modules::SnippetRange> fields; std::size_t active = 0, finalOffset = 0, finalFieldIndex = 0; };
+    std::optional<SnippetSession> m_snippetSession;
+    struct ModuleHistoryResult { std::vector<workspace::GitFileHistoryEntry> entries; std::vector<workspace::GitRangeHistoryEntry> ranges; workspace::GitReview diff; std::string error; bool isDiff = false, stoppedAtBoundary = false; };
+    std::future<ModuleHistoryResult> m_moduleHistoryFuture;
+    std::vector<workspace::GitFileHistoryEntry> m_moduleHistoryEntries;
+    std::vector<workspace::GitRangeHistoryEntry> m_moduleRangeHistory;
+    workspace::GitReview m_moduleHistoryDiff;
+    std::string m_moduleHistoryRoot, m_moduleHistoryFile;
+    bool m_moduleHistoryShowing = false, m_moduleHistoryDiffShowing = false;
+    bool m_moduleHistoryRange = false;
+    std::uint64_t m_moduleHistoryRevision = 0;
     std::size_t m_moduleFetchGeneration = 0;
     std::vector<int> m_moduleChoices;
     std::size_t m_moduleSelected = 0;
@@ -300,15 +869,26 @@ private:
     bool m_debugClosing = false;
     double m_debugCloseDeadline = 0.0;
     double m_debugStartDeadline = 0.0;
+    double m_debugPauseDeadline = 0.0;
+    double m_debugThreadsRefreshAt = 0.0;
     debug::State m_debugLastState = debug::State::Idle;
     std::vector<workspace::GitChange> m_gitChanges;
     std::vector<workspace::GitHistoryEntry> m_gitHistory;
     workspace::GitReview m_gitReview;
     workspace::GitCommitPreview m_gitCommitPreview;
+    std::future<modules::SecretScanResult> m_gitSecretFuture;
+    modules::SecretScanResult m_gitSecretResult;
+    workspace::GitCommitPreview m_gitSecretPreview;
+    std::string m_gitSecretRoot, m_gitSecretFailure;
+    bool m_gitSecretRequired = false, m_gitSecretFinished = false, m_gitSecretAcknowledged = false;
     workspace::GitUpstream m_gitUpstream;
     workspace::GitRemoteAction m_gitRemoteAction = workspace::GitRemoteAction::Fetch;
     struct GitRemoteResult { bool ok = false; std::string output, error; };
     std::future<GitRemoteResult> m_gitRemoteFuture;
+    std::future<GitRemoteResult> m_gitBranchFuture;
+    workspace::GitBranches m_gitBranches;
+    workspace::GitBranch m_gitBranchTarget;
+    std::string m_gitBranchRoot;
     std::string m_gitRemoteRoot;
     std::size_t m_gitSelectedFile = 0;
     std::size_t m_gitPage = 0;
@@ -348,20 +928,40 @@ private:
     bool m_completionOpen = false;
     editor::lsp::Client m_languageServer;
     std::string m_languageRoot;
+    std::string m_languageKind;
+    std::filesystem::path m_languagePythonInterpreter;
     std::string m_languageAttemptRoot;
     std::string m_languageFile;
     std::uint64_t m_languageRevision = 0;
-    struct LanguageLocation { std::string path; std::size_t line = 0, character = 0; };
+    struct LanguageLocation { std::string path; std::size_t line = 0, character = 0; std::string name; };
     std::vector<LanguageLocation> m_languageLocations;
+    std::vector<int> m_languageStatusChoices;
+    std::size_t m_languageStatusPage = 0;
+    bool m_languageSignatureQueued = false;
+    std::uint64_t m_languageSignatureRequest = 0, m_languageSignatureRevision = 0;
+    std::string m_languageSignatureFile;
+    std::size_t m_languageSignatureLine = 0, m_languageSignatureColumn = 0, m_languageSignaturePage = 0;
+    double m_languageSignatureDeadline = 0.0;
+    std::vector<std::pair<std::string, std::string>> m_languageSignatures;
+    std::vector<int> m_languageSignatureChoices;
     std::vector<int> m_languageLocationChoices;
     std::size_t m_languageLocationPage = 0;
-    bool m_languageNavigationQueued = false, m_languageReferences = false;
+    bool m_languageNavigationQueued = false, m_languageReferences = false, m_languageDeclaration = false, m_languageWorkspaceSymbols = false, m_languageDocumentSymbols = false;
+    std::string m_languageSymbolQuery;
     std::uint64_t m_languageNavigationRequest = 0, m_languageNavigationRevision = 0;
     std::string m_languageNavigationFile;
     std::size_t m_languageNavigationLine = 0, m_languageNavigationColumn = 0;
     bool m_languageFormatQueued = false;
     std::uint64_t m_languageFormatRequest = 0, m_languageFormatRevision = 0;
     std::string m_languageFormatFile, m_languageFormatOriginal, m_languageFormatOutput, m_languageFormatRange;
+    bool m_languageRenameQueued = false;
+    std::uint64_t m_languageRenameRequest = 0, m_languageRenameRevision = 0;
+    std::string m_languageRenameFile, m_languageRenameName;
+    std::size_t m_languageRenameLine = 0, m_languageRenameColumn = 0, m_languageRenamePage = 0;
+    std::vector<editor::lsp::WorkspaceFileEdit> m_languageRenameEdits;
+    std::optional<std::size_t> m_languageRenameReviewFile;
+    std::vector<int> m_languageRenameChoices;
+    double m_languageRenameDeadline = 0.0, m_languageNavigationDeadline = 0.0, m_languageFormatDeadline = 0.0;
     std::string m_languageDiagnosticsFile;
     std::uint64_t m_languageDiagnosticsRevision = ~std::uint64_t{0};
     std::uint64_t m_completionRequest = 0;
@@ -482,7 +1082,9 @@ private:
     std::size_t m_projectSearchPage = 0;
     std::optional<std::size_t> m_lastProjectSearchMatch;
     std::optional<std::size_t> m_projectReviewFile;
-    bool m_projectSearchReplace = false, m_projectSearchWholeWord = false;
+    bool m_projectSearchReplace = false, m_projectSearchWholeWord = false, m_projectSearchCaseSensitive = true, m_projectSearchIncludeGenerated = false, m_projectSearchShowingSkipped = false;
+    bool m_projectSearchEditingFilter = false;
+    std::string m_projectSearchPathFilter, m_projectSearchFilterQuery;
     std::future<workspace::ProjectSearchResults> m_projectSearchFuture;
     std::shared_ptr<std::atomic_bool> m_projectSearchCancel;
     std::string m_projectSearchRoot;

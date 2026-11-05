@@ -1,0 +1,32 @@
+{
+  "name": "Embedded C/C++",
+  "version": "0.1.0",
+  "description": "Review linker maps, cross-toolchain profiles and CMSIS-SVD register metadata.",
+  "requires": [
+    "linker-map-v1",
+    "toolchain-profiles-v1",
+    "svd-registers-v1",
+    "toolchain-target-edit-v1",
+    "toolchain-configure-v1"
+  ],
+  "permissions": {
+    "project": true,
+    "network": false,
+    "processes": true,
+    "settings": false
+  },
+  "commands": [
+    {
+      "title": "Review linker map",
+      "action": "review-linker-map"
+    },
+    {
+      "title": "Inspect toolchain profiles",
+      "action": "inspect-toolchain-profiles"
+    },
+    {
+      "title": "Inspect SVD registers",
+      "action": "inspect-svd-registers"
+    }
+  ]
+}

@@ -16,10 +16,29 @@ int main() {
         !project.writeFile("binary.bin", std::string("\0target", 7), error)) return 2;
     project.refresh();
     auto results = lucid::workspace::searchProject(project, "target");
+    const auto filtered = lucid::workspace::searchProject(project, "target", 1000, nullptr, false, true, "src/");
+    if (filtered.files.size() != 1 || filtered.files[0].path != "src/b.cpp" || filtered.matches.size() != 1 || filtered.skipped != 0) return 53;
+    const auto wildcard = lucid::workspace::searchProject(project, "target", 1000, nullptr, false, true, "*.cpp, !src/");
+    if (wildcard.files.size() != 1 || wildcard.files[0].path != "a.cpp" || wildcard.matches.size() != 2) return 54;
+    const auto excludeOnly = lucid::workspace::searchProject(project, "target", 1000, nullptr, false, true, "!src/");
+    if (excludeOnly.files.size() != 1 || excludeOnly.files[0].path != "a.cpp") return 55;
+    const auto alternatives = lucid::workspace::searchProject(project, "target", 1000, nullptr, false, true, "a.cpp, src/*.cpp");
+    if (alternatives.files.size() != 2 || alternatives.matches.size() != 3) return 56;
+    const auto invalidFilter = lucid::workspace::searchProject(project, "target", 1000, nullptr, false, true, "!");
+    if (!invalidFilter.indexIncomplete || !invalidFilter.matches.empty()) return 57;
     std::atomic_bool cancelSearch{true};
+    std::string cancelledContent = "old";
+    if (project.readFile("a.cpp", cancelledContent, error, &cancelSearch) || !cancelledContent.empty() || error.find("cancelled") == std::string::npos) return 50;
+    if (lucid::editor::Document::canEditLosslessly("valid", error, &cancelSearch) || error.find("cancelled") == std::string::npos) return 51;
+    if (!lucid::editor::Document::canEditLosslessly("\xef\xbf\xbd", error) ||
+        lucid::editor::Document::canEditLosslessly("\xc0\x80", error) ||
+        lucid::editor::Document::canEditLosslessly("\xed\xa0\x80", error) ||
+        lucid::editor::Document::canEditLosslessly("a\r\nb\nc", error)) return 52;
     const auto cancelled = lucid::workspace::searchProject(project, "target", 1000, &cancelSearch);
     if (!cancelled.indexIncomplete || !cancelled.matches.empty()) return 37;
     if (results.matches.size() != 3 || results.files.size() != 2 || results.skipped != 1) return 3;
+    if (results.firstSkippedPath != "binary.bin" || results.firstSkippedReason != "binary content") return 63;
+    if (results.skippedFiles.size() != 1 || results.skippedFiles[0].path != "binary.bin" || results.skippedFiles[0].reason != "binary content") return 69;
     if (results.matches[1].line != 1 || results.matches[1].column != 0) return 4;
     const auto limited = lucid::workspace::searchProject(project, "target", 1);
     std::size_t changed = 0;
@@ -114,5 +133,52 @@ int main() {
     if (
         !lucid::workspace::replaceProject(project, whole, "needle", "pin", changed, error) || changed != 1 ||
         !project.readFile("whole.cpp", text, error) || text != "pin needles _needle needle_ (pin) éneedle needleé\n") return 39;
+    if (!project.writeFile("case.cpp", "Needle NEEDLE needleX (nEeDlE)\n", error)) return 42;
+    project.refresh();
+    const auto insensitive = lucid::workspace::searchProject(project, "needle", 1000, nullptr, true, false);
+    if (insensitive.caseSensitive || insensitive.matches.size() != 3 || insensitive.files.size() != 1) return 43;
+    if (lucid::workspace::replacementPreview(insensitive.files[0], insensitive.matches[0], "needle", "pin", false).find("pin") == std::string::npos) return 44;
+    if (!lucid::workspace::replaceProject(project, insensitive, "needle", "pin", changed, error) || changed != 1 ||
+        !project.readFile("case.cpp", text, error) || text != "pin pin needleX (pin)\n") return 45;
+    if (!project.writeFile("overlap.cpp", "a-a- ", error)) return 46;
+    project.refresh();
+    const auto overlap = lucid::workspace::searchProject(project, "a-", 1000, nullptr, true);
+    if (overlap.matches.size() != 1 || overlap.matches[0].offset != 2) return 47;
+    const std::string adversarial(1024 * 1024, 'a');
+    if (!project.writeFile("large.cpp", adversarial + "B", error)) return 48;
+    project.refresh();
+    const auto longMatch = lucid::workspace::searchProject(project, std::string(4096, 'a') + "b", 1000, nullptr, false, false);
+    if (longMatch.matches.size() != 1 || longMatch.matches[0].offset != adversarial.size() - 4096) return 49;
+    if (!project.writeFile("filter/keep.cpp", "token", error) || !project.writeFile("filter/vendor/skip.cpp", "token", error)) return 58;
+    project.refresh();
+    const auto scoped = lucid::workspace::searchProject(project, "token", 1000, nullptr, false, true, "filter/*.cpp,!vendor/");
+    if (scoped.matches.size() != 1 || !lucid::workspace::replaceProject(project, scoped, "token", "done", changed, error) || changed != 1 ||
+        !project.readFile("filter/keep.cpp", text, error) || text != "done" ||
+        !project.readFile("filter/vendor/skip.cpp", text, error) || text != "token") return 59;
+    if (!project.writeFile("filter/disappears.cpp", "token", error)) return 60;
+    project.refresh();
+    fs::remove(root / "filter/disappears.cpp");
+    const auto missingFile = lucid::workspace::searchProject(project, "token", 1000, nullptr, false, true, "filter/");
+    if (missingFile.readErrors != 1 || missingFile.firstReadErrorPath != "filter/disappears.cpp" || missingFile.matches.empty() ||
+        lucid::workspace::replaceProject(project, missingFile, "token", "unsafe", changed, error) || changed != 0) return 61;
+    if (missingFile.firstSkippedPath != "filter/disappears.cpp" || missingFile.firstSkippedReason != "could not read") return 64;
+    if (missingFile.skippedFiles.size() != 1 || missingFile.skippedFiles[0].path != "filter/disappears.cpp") return 70;
+    const auto omittedMissing = lucid::workspace::searchProject(project, "token", 1000, nullptr, false, true, "filter/,!disappears.cpp");
+    if (omittedMissing.readErrors != 0 || omittedMissing.matches.size() != 1) return 62;
+    { std::ofstream mixed(root / "filter/mixed.txt", std::ios::binary); mixed << "token\r\nline\n"; }
+    project.refresh();
+    const auto mixedFile = lucid::workspace::searchProject(project, "token", 1000, nullptr, false, true, "mixed.txt");
+    if (mixedFile.firstSkippedPath != "filter/mixed.txt" || mixedFile.firstSkippedReason != "unsupported text encoding or line endings" || mixedFile.skipped != 1) return 65;
+    fs::create_directories(root / "build"); fs::create_directories(root / ".git"); fs::create_directories(root / ".lucid");
+    { std::ofstream file(root / "build/generated.txt"); file << "unique-generated-token"; }
+    { std::ofstream file(root / ".git/private.txt"); file << "unique-generated-token"; }
+    { std::ofstream file(root / ".lucid/private.txt"); file << "unique-generated-token"; }
+    bool complete = false; project.refresh(&complete);
+    if (!complete || !lucid::workspace::searchProject(project, "unique-generated-token").matches.empty()) return 66;
+    project.refresh(&complete, nullptr, true);
+    const auto generated = lucid::workspace::searchProject(project, "unique-generated-token");
+    if (!complete || generated.matches.size() != 1 || generated.files[0].path != "build/generated.txt") return 67;
+    std::atomic_bool cancelGenerated{true}; project.refresh(&complete, &cancelGenerated, true);
+    if (complete) return 68;
     fs::remove_all(root); return 0;
 }

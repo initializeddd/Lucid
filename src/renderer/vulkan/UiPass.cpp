@@ -16,6 +16,7 @@
 #include "shaders/ui_rect.frag.h"
 #include "shaders/ui_text.vert.h"
 #include "shaders/ui_text.frag.h"
+#include "shaders/ui_image.frag.h"
 
 #include <algorithm>
 #include <array>
@@ -48,6 +49,7 @@ struct WelcomeShortcut {
     bool shift = false;
     std::string_view key;
     std::string_view label;
+    bool alt = false;
 };
 
 struct WelcomeRectSpec {
@@ -130,11 +132,11 @@ void UiPass::createDescriptorSetLayout() {
 void UiPass::createDescriptorSet() {
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 1;
+    poolSize.descriptorCount = 4;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
+    poolInfo.maxSets = 4;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
     LUCID_VK_CHECK(
@@ -161,6 +163,29 @@ void UiPass::createDescriptorSet() {
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &imageInfo;
     vkUpdateDescriptorSets(m_device.handle(), 1, &write, 0, nullptr);
+
+    std::array<VkDescriptorSetLayout, 3> layouts{}; layouts.fill(m_descriptorSetLayout);
+    allocateInfo.descriptorSetCount = static_cast<std::uint32_t>(layouts.size());
+    allocateInfo.pSetLayouts = layouts.data();
+    LUCID_VK_CHECK(vkAllocateDescriptorSets(m_device.handle(), &allocateInfo, m_previewSets.data()));
+}
+
+void UiPass::prepareVisualPreview(const ui::VisualReviewPreview* preview) {
+    if (!preview || !preview->generation || preview->generation == m_previewGeneration) return;
+    const std::array<const modules::VisualImage*, 3> images{&preview->baseline, &preview->candidate, &preview->difference};
+    for (const auto* image : images) if (!image->width || !image->height || image->width > 1024 || image->height > 1024 || image->rgba.size() != image->width * image->height * 4) return;
+    m_device.waitIdle();
+    std::array<std::unique_ptr<Texture>, 3> textures;
+    for (std::size_t i = 0; i < images.size(); ++i) {
+        const auto& image = *images[i];
+        textures[i] = std::make_unique<Texture>(m_device, static_cast<std::uint32_t>(image.width), static_cast<std::uint32_t>(image.height), image.rgba.data(), image.rgba.size(), true);
+    }
+    for (std::size_t i = 0; i < textures.size(); ++i) {
+        VkDescriptorImageInfo info{}; info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; info.imageView = textures[i]->view(); info.sampler = textures[i]->sampler();
+        VkWriteDescriptorSet write{}; write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; write.dstSet = m_previewSets[i]; write.dstBinding = 0; write.descriptorCount = 1; write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &info;
+        vkUpdateDescriptorSets(m_device.handle(), 1, &write, 0, nullptr);
+    }
+    m_previewTextures = std::move(textures); m_previewGeneration = preview->generation;
 }
 
 void UiPass::createPipelineLayouts() {
@@ -203,12 +228,14 @@ void UiPass::createPipelines() {
     VkShaderModule rectFrag = VK_NULL_HANDLE;
     VkShaderModule textVert = VK_NULL_HANDLE;
     VkShaderModule textFrag = VK_NULL_HANDLE;
+    VkShaderModule imageFrag = VK_NULL_HANDLE;
 
     try {
         rectVert = createShaderModule(m_device, ui_rect_vert_spv, sizeof(ui_rect_vert_spv));
         rectFrag = createShaderModule(m_device, ui_rect_frag_spv, sizeof(ui_rect_frag_spv));
         textVert = createShaderModule(m_device, ui_text_vert_spv, sizeof(ui_text_vert_spv));
         textFrag = createShaderModule(m_device, ui_text_frag_spv, sizeof(ui_text_frag_spv));
+        imageFrag = createShaderModule(m_device, ui_image_frag_spv, sizeof(ui_image_frag_spv));
 
         VkPipelineShaderStageCreateInfo rectStages[2]{};
         rectStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -326,6 +353,9 @@ void UiPass::createPipelines() {
         pipelineInfo.layout = m_textPipelineLayout;
         LUCID_VK_CHECK(vkCreateGraphicsPipelines(m_device.handle(), VK_NULL_HANDLE, 1,
                                                  &pipelineInfo, nullptr, &m_textPipeline));
+        textStages[1].module = imageFrag;
+        LUCID_VK_CHECK(vkCreateGraphicsPipelines(m_device.handle(), VK_NULL_HANDLE, 1,
+                                                 &pipelineInfo, nullptr, &m_imagePipeline));
 
     } catch (...) {
         if (m_rectPipeline != VK_NULL_HANDLE) {
@@ -336,10 +366,12 @@ void UiPass::createPipelines() {
             vkDestroyPipeline(m_device.handle(), m_textPipeline, nullptr);
             m_textPipeline = VK_NULL_HANDLE;
         }
+        if (m_imagePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device.handle(), m_imagePipeline, nullptr); m_imagePipeline = VK_NULL_HANDLE; }
         destroyShaderModule(m_device.handle(), rectVert);
         destroyShaderModule(m_device.handle(), rectFrag);
         destroyShaderModule(m_device.handle(), textVert);
         destroyShaderModule(m_device.handle(), textFrag);
+        destroyShaderModule(m_device.handle(), imageFrag);
         throw;
     }
 
@@ -347,6 +379,7 @@ void UiPass::createPipelines() {
     destroyShaderModule(m_device.handle(), rectFrag);
     destroyShaderModule(m_device.handle(), textVert);
     destroyShaderModule(m_device.handle(), textFrag);
+    destroyShaderModule(m_device.handle(), imageFrag);
 }
 
 void UiPass::createVertexBuffers() {
@@ -361,6 +394,7 @@ void UiPass::createVertexBuffers() {
 }
 
 void UiPass::destroy() noexcept {
+    if (m_imagePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device.handle(), m_imagePipeline, nullptr); m_imagePipeline = VK_NULL_HANDLE; }
     for (Buffer& buffer : m_vertexBuffers) {
         buffer.destroy();
     }
@@ -466,6 +500,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
     std::vector<WelcomeRectSpec> diagnosticRects;
     diagnosticRects.reserve(24);
     std::vector<WelcomeRectSpec> overlayRects;
+    std::vector<WelcomeRectSpec> diagramRects;
+    std::vector<TextVertex> diagramVertices;
+    VkRect2D diagramScissor = fullScissor;
+    struct PreviewQuad { float x0, y0, x1, y1; std::size_t image; };
+    std::vector<PreviewQuad> previewQuads;
     overlayRects.reserve(48);
     std::vector<WelcomeRectSpec> compileMarkers;
     compileMarkers.reserve(32);
@@ -553,6 +592,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             const float baseline = rowTop + lineHeight * 0.5F + fontCenter;
             const float numberWidth = measureText(number);
             const int absoluteLine = state.firstLine + static_cast<int>(index);
+            if (index < state.coverageLines.size() && state.coverageLines[index] >= 0) {
+                const auto coverageColor = state.coverageLines[index] ? ui::theme::kSyntaxString : ui::theme::kError;
+                compileMarkers.push_back(WelcomeRectSpec{0.0F, rowTop + lineHeight * 0.18F, 2.0F * contentScale,
+                    rowTop + lineHeight * 0.82F, 0.0F, 0.0F, 0.0F, 0.9F, coverageColor, coverageColor});
+            }
             const bool currentLine = absoluteLine == state.cursorRow;
             const bool diagnosticLine =
                 state.diagnosticsVisible && absoluteLine == state.diagnosticLine;
@@ -979,7 +1023,90 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const std::array<float, 4> normalText = toGpuColor(ui::theme::kText);
         const std::array<float, 4> errorText = toGpuColor(ui::theme::kError);
 
-        if (!state.commandVisible && state.settingsErrorVisible &&
+        if (state.visualPreview) {
+            const float inset = 24.0F * contentScale;
+            const float x0 = inset, y0 = inset, x1 = viewportWidth - inset, y1 = viewportHeight - inset;
+            if (x1 > x0 + 120.0F * contentScale && y1 > y0 + 120.0F * contentScale) {
+                addRect({x0, y0, x1, y1}, 8.0F * contentScale, contentScale, 0.99F, ui::theme::kSurface, ui::theme::kBorder);
+                appendText(vertices, state.shaderPreviewMode ? "Shader preview · GPU-rendered snapshot · Escape to close" : state.webPreviewMode ? "Web preview · snapshot · Escape to close" : "Visual review · preview · Escape to close", x0 + 16.0F * contentScale, y0 + 30.0F * contentScale, normalText);
+                const std::array<const modules::VisualImage*, 3> images{&state.visualPreview->baseline, &state.visualPreview->candidate, &state.visualPreview->difference};
+                const std::array<const char*, 3> labels{"Baseline", "Candidate", "Difference"};
+                const float gap = 12.0F * contentScale, top = y0 + 62.0F * contentScale;
+                const float cellWidth = state.webPreviewMode ? x1 - x0 - 2.0F * gap : (x1 - x0 - 4.0F * gap) / 3.0F;
+                const float cellHeight = y1 - top - gap;
+                for (std::size_t n = 0; n < (state.webPreviewMode ? 1U : images.size()); ++n) {
+                    const auto& image = *images[state.webPreviewMode ? 1 : n];
+                    if (!image.width || !image.height || image.rgba.size() != image.width * image.height * 4 || cellWidth <= 0 || cellHeight <= 0) continue;
+                    const float left = x0 + gap + n * (cellWidth + gap);
+                    if (!state.webPreviewMode) appendText(vertices, labels[n], left, top - 10.0F * contentScale, mutedText);
+                    const float scale = std::min(cellWidth / image.width, cellHeight / image.height);
+                    const float startX = left + (cellWidth - image.width * scale) * 0.5F;
+                    const float startY = top + (cellHeight - image.height * scale) * 0.5F;
+                    previewQuads.push_back({startX, startY, startX + image.width * scale, startY + image.height * scale, state.webPreviewMode ? 1 : n});
+                }
+            }
+        }
+
+        if (state.diagramPreviewVisible && state.diagramWidth > 0.0 && state.diagramHeight > 0.0) {
+            const float inset = 24.0F * contentScale;
+            const float x0 = inset, y0 = inset, x1 = viewportWidth - inset, y1 = viewportHeight - inset;
+            if (x1 > x0 + std::max(80.0F, 32.0F * contentScale + 1.0F) &&
+                y1 > y0 + std::max(100.0F, 64.0F * contentScale + 1.0F)) {
+                addRect({x0, y0, x1, y1}, 8.0F * contentScale, 1.0F * contentScale, 0.98F, ui::theme::kSurface, ui::theme::kBorder);
+                appendText(vertices, "Diagram preview", x0 + 18.0F * contentScale, y0 + 30.0F * contentScale, normalText);
+                const std::string hint = "Drag/arrows pan · scroll/+/- zoom · 0 fit · Esc close";
+                appendText(vertices, hint, x1 - 18.0F * contentScale - measureText(hint), y0 + 30.0F * contentScale, mutedText);
+                const float left = x0 + 16.0F * contentScale, top = y0 + 48.0F * contentScale;
+                const float width = x1 - left - 16.0F * contentScale, height = y1 - top - 16.0F * contentScale;
+                const auto clipLeft=static_cast<std::int32_t>(std::clamp(left,0.0F,viewportWidth)); const auto clipTop=static_cast<std::int32_t>(std::clamp(top,0.0F,viewportHeight));
+                const auto clipRight=static_cast<std::int32_t>(std::clamp(left+width,0.0F,viewportWidth)); const auto clipBottom=static_cast<std::int32_t>(std::clamp(top+height,0.0F,viewportHeight));
+                diagramScissor.offset={clipLeft,clipTop}; diagramScissor.extent={static_cast<std::uint32_t>(std::max(0,clipRight-clipLeft)),static_cast<std::uint32_t>(std::max(0,clipBottom-clipTop))};
+                const auto zoom=std::isfinite(state.diagramZoom) ? std::clamp(state.diagramZoom,1.0,8.0) : 1.0;
+                const auto panX=std::isfinite(state.diagramPanX) ? std::clamp(state.diagramPanX,-0.95,0.95) : 0.0, panY=std::isfinite(state.diagramPanY) ? std::clamp(state.diagramPanY,-0.95,0.95) : 0.0;
+                const float factor = std::min(width / static_cast<float>(state.diagramWidth), height / static_cast<float>(state.diagramHeight)) * static_cast<float>(zoom);
+                const float originX = left + (width - static_cast<float>(state.diagramWidth) * factor) * 0.5F + static_cast<float>(panX)*width;
+                const float originY = top + (height - static_cast<float>(state.diagramHeight) * factor) * 0.5F + static_cast<float>(panY)*height;
+                const auto diagramRect=[&](const ui::Rect& rect,float radius,float borderWidth,float opacity,const ui::theme::Color& fill,const ui::theme::Color& border) { diagramRects.push_back(WelcomeRectSpec{rect.x0,rect.y0,rect.x1,rect.y1,radius,borderWidth,0.0F,opacity,fill,border}); };
+                const auto px = [originX, factor](double value) { return originX + static_cast<float>(value) * factor; };
+                const auto py = [originY, factor](double value) { return originY + static_cast<float>(value) * factor; };
+                const float stroke = std::max(1.0F, 1.5F * contentScale);
+                for (const auto& edge : state.diagramEdges) {
+                    for (std::size_t i = 1; i < edge.points.size(); ++i) {
+                        const auto a = edge.points[i - 1], b = edge.points[i];
+                        const float ax = px(a.x), ay = py(a.y), bx = px(b.x), by = py(b.y);
+                        diagramRect({std::min(ax, bx) - stroke * 0.5F, std::min(ay, by) - stroke * 0.5F, std::max(ax, bx) + stroke * 0.5F, std::max(ay, by) + stroke * 0.5F}, 0.0F, 0.0F, 0.85F, ui::theme::kTextMuted, ui::theme::kTextMuted);
+                    }
+                    if (edge.points.size() >= 2) {
+                        const auto drawArrow = [&](const auto& a, const auto& b) {
+                            const bool horizontal = std::abs(b.x - a.x) > std::abs(b.y - a.y);
+                            const char* arrow = horizontal ? (b.x > a.x ? ">" : "<") : (b.y > a.y ? "v" : "^");
+                            const float dx = horizontal ? (b.x > a.x ? -8.0F : 8.0F) * contentScale : 0.0F;
+                            const float dy = horizontal ? 0.0F : (b.y > a.y ? -8.0F : 8.0F) * contentScale;
+                            appendText(diagramVertices, arrow, px(b.x) + dx - measureText(arrow) * 0.5F, py(b.y) + dy + fontCenter, normalText);
+                        };
+                        drawArrow(edge.points[edge.points.size()-2],edge.points.back());
+                        if(edge.bidirectional) drawArrow(edge.points[1],edge.points[0]);
+                    }
+                    if (!edge.label.empty() && edge.points.size() >= 2) {
+                        std::size_t longest=1; double length=-1;
+                        for (std::size_t i=1;i<edge.points.size();++i) { const auto dx=edge.points[i].x-edge.points[i-1].x, dy=edge.points[i].y-edge.points[i-1].y; const auto candidate=std::hypot(dx,dy); if (candidate>length) { length=candidate; longest=i; } }
+                        const auto a=edge.points[longest-1], b=edge.points[longest]; const float x=px((a.x+b.x)*0.5), y=py((a.y+b.y)*0.5);
+                        std::string label=edge.label; const float maxWidth=120.0F*contentScale;
+                        while (!label.empty() && measureText(label)>maxWidth) label.resize(text::lastUtf8Start(label));
+                        if (!label.empty()) { const float labelWidth=measureText(label); diagramRect({x-labelWidth*0.5F-4.0F*contentScale,y-lineHeight*0.5F,x+labelWidth*0.5F+4.0F*contentScale,y+lineHeight*0.5F},2.0F*contentScale,0.0F,0.98F,ui::theme::kSurface,ui::theme::kSurface); appendText(diagramVertices,label,x-labelWidth*0.5F,y+fontCenter,normalText); }
+                    }
+                }
+                for (const auto& node : state.diagramNodes) {
+                    const float nx0 = px(node.x), ny0 = py(node.y), nx1 = px(node.x + node.width), ny1 = py(node.y + node.height);
+                    diagramRect({nx0, ny0, nx1, ny1}, 4.0F * contentScale, 1.0F * contentScale, 1.0F, ui::theme::kBackground, ui::theme::kBorder);
+                    std::string label = node.label; const float maxWidth = std::max(0.0F, nx1 - nx0 - 12.0F * contentScale);
+                    while (!label.empty() && measureText(label) > maxWidth) label.resize(text::lastUtf8Start(label));
+                    if (!label.empty() && ny1 - ny0 >= lineHeight) appendText(diagramVertices, label, (nx0 + nx1 - measureText(label)) * 0.5F, (ny0 + ny1) * 0.5F + fontCenter, normalText);
+                }
+            }
+        }
+
+        if (!state.visualPreview && !state.diagramPreviewVisible && !state.commandVisible && state.settingsErrorVisible &&
             !state.settingsErrorText.empty()) {
             const ui::SettingsErrorLayout layout =
                 ui::settingsErrorLayout(logicalWidth, logicalHeight);
@@ -999,7 +1126,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                        errorText);
         }
 
-        if (state.diagnosticsVisible) {
+        if (!state.visualPreview && !state.diagramPreviewVisible && state.diagnosticsVisible) {
             const ui::DiagnosticCardLayout layout =
                 state.diagnosticAnchorValid
                     ? ui::diagnosticCardLayoutAt(
@@ -1461,7 +1588,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                                           int columns, float left,
                                           bool alignLeft,
                                           const std::array<float, 4>& textColor) {
-        constexpr std::array<WelcomeShortcut, 21> shortcuts{{
+        constexpr std::array<WelcomeShortcut, 27> shortcuts{{
             {true, false, "K", "Open file"},
             {true, false, "E", "Switch file"},
             {true, false, ",", "Settings"},
@@ -1470,7 +1597,13 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             {true, false, "R", "Run"},
             {true, true, "F", "Search project"},
             {false, false, "F12", "Definition"},
+            {true, false, "F12", "Declaration"},
             {false, true, "F12", "References"},
+            {false, false, "F2", "Rename symbol"},
+            {true, true, "I", "Language status"},
+            {false, true, "S", "Signature help", true},
+            {false, true, "O", "Project symbols", true},
+            {false, false, "F4", "File symbols"},
             {true, true, "Space", "Complete"},
             {true, true, "A", "Ask AI"},
             {true, true, "L", "Clean code"},
@@ -1493,6 +1626,11 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         const float rowHeight = 24.0F * contentScale;
         const float commandKeyWidth = commandTextWidth + keyPad * 2.0F;
         const float shiftKeyWidth = shiftTextWidth + keyPad * 2.0F;
+#if defined(__APPLE__)
+        constexpr std::string_view altName = "Option";
+#else
+        constexpr std::string_view altName = "Alt";
+#endif
         const auto keyWidth = [&](std::string_view key) {
             return measureText(key) + keyPad * 2.0F;
         };
@@ -1507,6 +1645,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 width += shiftKeyWidth;
                 ++keys;
             }
+            if (shortcut.alt) { width += keyWidth(altName); ++keys; }
             width += keyGap * static_cast<float>(keys - 1);
             return width + labelGap + measureText(shortcut.label);
         };
@@ -1609,6 +1748,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                     addKeycap(commandKeyWidth, useCommandGlyph, kCommandGlyph,
                               kCommandFallback);
                 }
+                if (shortcut.alt) addKeycap(keyWidth(altName), false, {}, altName);
                 addKeycap(keyWidth(shortcut.key), false, {}, shortcut.key);
                 appendText(vertices, shortcut.label, x, baseline, rowHintColor);
             }
@@ -2047,6 +2187,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 if (selectionOpacity > 0.01F && state.selectedSuggestion >= 0 &&
                     static_cast<std::size_t>(state.selectedSuggestion) < count &&
                     state.suggestions[static_cast<std::size_t>(state.selectedSuggestion)].kind != ui::SuggestionKind::ReadOnlyText &&
+                    state.suggestions[static_cast<std::size_t>(state.selectedSuggestion)].kind != ui::SuggestionKind::MarkdownHeading &&
+                    state.suggestions[static_cast<std::size_t>(state.selectedSuggestion)].kind != ui::SuggestionKind::MarkdownCode &&
                     state.suggestionSelectionRow >= -0.5F) {
                     const float selectedTop =
                         suggestionTop + state.suggestionSelectionRow * suggestionLineHeight;
@@ -2102,8 +2244,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                     const std::size_t rowFirst = vertices.size();
                     const std::size_t iconFirst = suggestionIcons.size();
 
-                    if (suggestion.kind == ui::SuggestionKind::ReadOnlyText) {
-                        appendText(vertices, suggestion.path, pathX, suggestionBaseline, primaryColor);
+                    if (suggestion.kind == ui::SuggestionKind::ReadOnlyText || suggestion.kind == ui::SuggestionKind::MarkdownHeading || suggestion.kind == ui::SuggestionKind::MarkdownCode) {
+                        appendText(vertices, suggestion.path, pathX, suggestionBaseline, suggestion.kind == ui::SuggestionKind::MarkdownHeading ? accentColor : suggestion.kind == ui::SuggestionKind::MarkdownCode ? mutedColor : primaryColor);
                     } else if (suggestion.kind == ui::SuggestionKind::Function ||
                         suggestion.kind == ui::SuggestionKind::Task) {
                         float pen = pathX;
@@ -2825,6 +2967,14 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         }
     }
 
+    const auto diagramFirst=vertices.size();
+    vertices.insert(vertices.end(),diagramVertices.begin(),diagramVertices.end());
+    const TextRange diagramRange{static_cast<std::uint32_t>(diagramFirst),static_cast<std::uint32_t>(diagramVertices.size()),diagramScissor};
+    const auto previewFirst = vertices.size();
+    for (const auto& q : previewQuads) {
+        const TextVertex a{q.x0,q.y0,0,0,1,1,1,1}, b{q.x1,q.y0,1,0,1,1,1,1}, c{q.x1,q.y1,1,1,1,1,1,1}, d{q.x0,q.y1,0,1,1,1,1,1};
+        vertices.insert(vertices.end(), {a,b,c,a,c,d});
+    }
     const Buffer& vertexBuffer = m_vertexBuffers[frameIndex % kFramesInFlight];
     if (!vertices.empty()) {
         const std::size_t vertexCount =
@@ -3028,6 +3178,25 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
         drawRect(commandBuffer, rectPushConstants);
     }
 
+    if (state.visualPreview && state.visualPreview->generation == m_previewGeneration && previewFirst + previewQuads.size() * 6 <= kMaxTextVertices) {
+        vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_imagePipeline);
+        TextPushConstants push{}; push.viewport[0] = viewportWidth; push.viewport[1] = viewportHeight; push.blur = isSrgbFormat(m_format) ? 1.0F : 0.0F; push.opacity = 1.0F;
+        vkCmdPushConstants(commandBuffer, m_textPipelineLayout, static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT), 0, sizeof(push), &push);
+        const VkBuffer buffers[] = {vertexBuffer.handle()}; const VkDeviceSize offsets[] = {0}; vkCmdBindVertexBuffers(commandBuffer, 0, 1, buffers, offsets);
+        for (std::size_t i = 0; i < previewQuads.size(); ++i) {
+            const auto descriptor = m_previewSets[previewQuads[i].image];
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_textPipelineLayout, 0, 1, &descriptor, 0, nullptr);
+            vkCmdDraw(commandBuffer, 6, 1, static_cast<std::uint32_t>(previewFirst + i * 6), 0);
+        }
+    }
+
+    if (state.diagramPreviewVisible && diagramScissor.extent.width && diagramScissor.extent.height) {
+        vkCmdSetScissor(commandBuffer,0,1,&diagramScissor);
+        for (const auto& spec : diagramRects) { RectPushConstants push{}; fillRectPushConstants(push,spec.x0,spec.y0,spec.x1,spec.y1,spec.radius,spec.borderWidth,spec.blur,spec.opacity,spec.fill,spec.border); drawRect(commandBuffer,push); }
+        if (diagramFirst + diagramVertices.size() <= kMaxTextVertices) drawTextRange(diagramRange,0.0F,1.0F);
+        vkCmdSetScissor(commandBuffer,0,1,&fullScissor);
+    }
     if (hasOverlayText) {
         drawTextRange(overlayTextRange, 0.0F, 1.0F);
     }

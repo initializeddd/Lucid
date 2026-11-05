@@ -566,6 +566,8 @@ with `[]`, parentheses and regex metacharacters are matched literally; some othe
 builds outside the open project are not yet supported.
 
 Hex Editor opens a project-local file up to 16 MiB in a paged hexadecimal view.
+Selections of 1, 2, 4 or 8 bytes show their unsigned and two's-complement signed
+integer values in little- and big-endian order; interpretation does not edit bytes.
 Choose a row or offset to overwrite or insert bytes, select and delete a range,
 search byte sequences, and undo or redo edits. Find next and previous continue the
 last search, select each matching range, include overlapping matches, and wrap at
@@ -633,7 +635,11 @@ automatic symbol download or direct core dump parsing are supported. Saved GDB `
 
 Rust Ownership Lens reads saved rustc or Cargo newline-delimited JSON diagnostics
 from the project. It presents supported ownership and borrowing errors, compiler
-notes, explanations, spans and suggestions without applying changes. Source
+notes, explanations, spans and suggestions. Eligible single-span
+`MachineApplicable` suggestions can be reviewed and applied as an undoable,
+unsaved edit after their compiler source lines and the saved file are checked.
+Multipart fixes, missing source excerpts, and replacements over 2048 bytes cannot
+be applied this way; matching excerpts do not prove other project files are current. Source
 navigation is limited to Rust files inside the project. Primary, related and note
 spans are labelled; all compiler-provided source lines are checked before opening,
 and dirty open documents must be resolved first. Spans without source text are

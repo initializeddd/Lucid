@@ -9,6 +9,7 @@
 #include <system_error>
 namespace lucid::modules {
 bool supportsCapability(std::string_view capability) noexcept {
+    if (capability == "rust-suggestion-v1") return true;
     if (capability == "snippet-linked-v1") return true;
     if (capability == "snippet-indent-v1") return true;
     if (capability == "api-response-assertions-v1" || capability == "api-response-save-v1") return true;

@@ -605,6 +605,9 @@ private:
     std::shared_ptr<std::atomic_bool> m_rustOwnershipCancel;
     std::vector<modules::RustOwnershipDiagnostic> m_rustOwnershipDiagnostics;
     std::vector<modules::RustOwnershipSpan> m_rustOwnershipSpans;
+    std::vector<modules::RustOwnershipSpan> m_rustSuggestionCandidates;
+    std::optional<modules::RustSuggestionEdit> m_rustSuggestionEdit;
+    std::string m_rustSuggestionFile, m_rustSuggestionSnapshot, m_rustSuggestionModule;
     std::optional<std::size_t> m_rustOwnershipSelected;
     std::string m_rustOwnershipRoot;
     bool m_rustOwnershipShowing = false;

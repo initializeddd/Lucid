@@ -640,6 +640,18 @@ int main() {
     const auto beforeRedo = largeHistory.toUtf8(); largeHistory.redo();
     if (largeHistory.toUtf8() == beforeRedo) return 124;
 
+    // Linked-field mirroring amends one already recorded edit; stale revisions,
+    // invalid UTF-8 and a missing undo record must never alter the document.
+    auto linked = Document::fromUtf8("a + a");
+    if (linked.amendLastEditUtf8("b + b", linked.revision()) || linked.toUtf8() != "a + a") return 127;
+    linked.setCursor(0, 0); linked.extendSelectionTo(0, 1); linked.insert(U'b');
+    const auto editRevision = linked.revision();
+    if (linked.amendLastEditUtf8("b + b", editRevision - 1) || linked.toUtf8() != "b + a") return 128;
+    if (linked.amendLastEditUtf8(std::string(1, static_cast<char>(0xff)), editRevision) || linked.toUtf8() != "b + a") return 129;
+    if (!linked.amendLastEditUtf8("b + b", editRevision) || linked.toUtf8() != "b + b") return 130;
+    linked.undo(); if (linked.toUtf8() != "a + a" || linked.dirty()) return 131;
+    linked.redo(); if (linked.toUtf8() != "b + b" || !linked.dirty()) return 132;
+
     // Compare direct validation with the editor's actual decode/encode behavior,
     // including malformed UTF-8 and all pairs of byte values.
     std::string validationError;

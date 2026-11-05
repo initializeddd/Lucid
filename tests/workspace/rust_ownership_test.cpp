@@ -12,5 +12,16 @@ int main() {
     ok = ok && !parseRustOwnershipDiagnostics(R"({"code":{"code":"E0382"},"level":"error","message":"x","spans":[{"file_name":"x","line_start":1,"column_start":1,"line_end":1,"column_end":1,"is_primary":true,"text":[{"text":"x","highlight_start":2,"highlight_end":1}]}],"children":[]})", result, error);
     ok = ok && !parseRustOwnershipDiagnostics(R"({"code":{"code":"E0382"},"level":"error","message":"x","spans":[{"file_name":"x","line_start":1,"column_start":1,"line_end":1,"column_end":1,"is_primary":true,"text":[{"text":"β","highlight_start":1,"highlight_end":3}]}],"children":[]})", result, error);
     ok = ok && parseRustOwnershipDiagnostics(R"({"code":{"code":"E0382"},"level":"error","message":"x","spans":[{"file_name":"x","line_start":1,"column_start":1,"line_end":1,"column_end":1,"is_primary":true,"text":[{"text":"β","highlight_start":1,"highlight_end":2}]}],"children":[]})", result, error);
+    RustOwnershipSpan fix; fix.file="src/main.rs"; fix.lineStart=1; fix.lineEnd=1; fix.columnStart=2; fix.columnEnd=3;
+    fix.hasReplacement=true; fix.applicability="MachineApplicable"; fix.replacement="a"; fix.sourceLines.push_back({"xβy",2,3});
+    auto document=lucid::editor::Document::fromUtf8("xβy\nsecond"); RustSuggestionEdit edit;
+    ok = ok && prepareRustSuggestion(fix,document,edit,error) && edit.start.line==0 && edit.start.column==1 && edit.end.column==2 && edit.replacement=="a";
+    auto stale=lucid::editor::Document::fromUtf8("xγy\nsecond"); ok=ok && !prepareRustSuggestion(fix,stale,edit,error);
+    fix.applicability="MaybeIncorrect"; ok=ok && !prepareRustSuggestion(fix,document,edit,error);
+    fix.applicability="MachineApplicable"; fix.sourceLines.clear(); ok=ok && !prepareRustSuggestion(fix,document,edit,error);
+    fix.sourceLines.push_back({"xβy",2,3}); fix.columnEnd=20; ok=ok && !prepareRustSuggestion(fix,document,edit,error);
+    fix.columnStart=2; fix.columnEnd=2; fix.replacement=".clone()"; ok=ok && prepareRustSuggestion(fix,document,edit,error) && edit.start.column==edit.end.column;
+    fix.lineEnd=2; fix.columnEnd=3; fix.sourceLines.push_back({"second",1,3}); ok=ok && prepareRustSuggestion(fix,document,edit,error) && edit.end.line==1;
+    fix.replacement=std::string("\xff",1); ok=ok && !prepareRustSuggestion(fix,document,edit,error);
     return ok ? 0 : 1;
 }

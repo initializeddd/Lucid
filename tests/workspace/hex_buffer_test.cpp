@@ -32,5 +32,12 @@ int main() {
     if (search.rfind("")!=HexBuffer::notFound) return 23;
     std::string repetitive(100000,'a'); repetitive += 'b';
     if (!search.load(repetitive) || search.find(std::string(50000,'a')+'b')!=50000) return 24;
+    lucid::modules::HexIntegerInterpretation number;
+    HexBuffer values; if(!values.load(std::string("\x01\x80\x00\x00\x00\x00\x00\x80",8))) return 25;
+    if(values.interpretSelection(number) || !values.select(0,2) || !values.interpretSelection(number) || number.littleUnsigned!="32769" || number.littleSigned!="-32767" || number.bigUnsigned!="384" || number.bigSigned!="384") return 26;
+    if(!values.select(0,8) || !values.interpretSelection(number) || number.littleUnsigned!="9223372036854808577" || number.littleSigned!="-9223372036854743039") return 27;
+    if(!values.select(1,1) || !values.interpretSelection(number) || number.littleSigned!="-128" || number.bigUnsigned!="128") return 28;
+    if(!values.select(0,3) || values.interpretSelection(number) || !number.littleSigned.empty()) return 29;
+    if(!values.load(std::string("\x00\x00\x00\x00\x00\x00\x00\x80",8)) || !values.select(0,8) || !values.interpretSelection(number) || number.littleSigned!="-9223372036854775808") return 30;
     return 0;
 }

@@ -1046,6 +1046,7 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
             if (m_sqlShowing) { if (m_sqlChangeSaveFuture.valid()) { if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); setCommandStatus("Cancelling database copy; it may already have been created",true); return; } if (m_sqlColumnsCancel) m_sqlColumnsCancel->store(true); if (m_sqlSchemaCancel) m_sqlSchemaCancel->store(true); m_sqlSchemaShowing = false; m_sqlSchemaSelected.reset(); m_sqlSnapshot.reset(); if (m_sqlCancel) m_sqlCancel->store(true); if (m_sqlRowCancel) m_sqlRowCancel->store(true); if (m_sqlChangeCancel) m_sqlChangeCancel->store(true); if (m_sqlCsvCancel) m_sqlCsvCancel->store(true); m_sqlCsvStage = 0; m_sqlCsv = {}; m_sqlChange = {}; m_sqlRowShowing=false; m_sqlRowDiff={}; m_sqlChangeBindingsSnapshot.reset(); m_sqlChangeBindingsPath.clear(); m_sqlChangeStage = 0; m_sqlChangeMode = false; m_sqlShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_releaseNotesShowing) { if (m_releaseNotesPreview) { m_releaseNotesPreview=false; m_releaseNotesDraft={}; } else m_releaseNotesShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_accessibilityShowing) { m_accessibilityShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_rustOwnershipShowing && m_rustSuggestionEdit) {m_rustSuggestionEdit.reset();m_rustSuggestionSnapshot.clear();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();return;}
             if (m_rustOwnershipShowing) { if(m_rustRunFuture.valid()){if(m_rustRunCancel)m_rustRunCancel->store(true);setCommandStatus("Cancellation requested; build scripts may have changed files",true);return;} if(m_rustRunStage && m_rustRunStage!=4){m_rustRunStage=0;} else if (m_rustOwnershipSelected) m_rustOwnershipSelected.reset(); else { if (m_rustOwnershipCancel) m_rustOwnershipCancel->store(true); m_rustOwnershipDiagnostics.clear(); m_rustOwnershipSpans.clear(); m_rustOwnershipShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_crashShowing) { if (m_crashCancel) m_crashCancel->store(true); m_crashDump = {}; m_crashShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_svdShowing) { if (m_svdSelected) m_svdSelected.reset(); else { if (m_svdCancel) m_svdCancel->store(true); m_svdShowing=false; } m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
@@ -2675,6 +2676,7 @@ void Application::applyRecovery() {
         m_hasDocument = true; m_filePath = snapshot.file; m_diskContents.clear();
     }
     const bool sameAsDisk = diskReadable && currentDisk == snapshot.contents;
+    m_snippetSession.reset();
     m_document = editor::Document::fromUtf8(snapshot.contents);
     m_accessibilityKey.clear();
     if (!sameAsDisk) m_document.markRecovered();
@@ -2772,10 +2774,19 @@ void Application::refreshModuleSuggestions() {
             add(m_rustOwnershipSelected ? "< Back to diagnostics" : "< Back to module commands", "", -59);
             m_rustOwnershipSpans.clear();
             const auto safe = [](const std::string& value) { std::string error; return value.size() <= 4096 && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(value, error) ? value : std::string("(unreadable text)"); };
-            if(m_rustRunStage==2) {add("Review Cargo check","Runs Cargo, build scripts and procedural macros with your privileges; --offline does not sandbox scripts",-60,ui::SuggestionKind::ReadOnlyText);add("Cargo executable",safe(m_rustRunPlan.cargo.generic_string()),-60,ui::SuggestionKind::ReadOnlyText);for(const auto& arg:m_rustRunPlan.arguments)add("Argument",safe(arg),-60,ui::SuggestionKind::ReadOnlyText);add("Confirm Cargo check","Runs project code; output may contain sensitive data",-403);}
+            if (m_rustSuggestionEdit) {
+                add("Review compiler suggestion", "Source excerpt matched; other changes may exist", -60, ui::SuggestionKind::ReadOnlyText);
+                add("File",safe(m_rustSuggestionFile),-60,ui::SuggestionKind::ReadOnlyText);
+                std::string shown; for(unsigned char c:m_rustSuggestionEdit->replacement) { if(c=='\n') shown+="\\n"; else if(c=='\t') shown+="\\t"; else if(c=='\\') shown+="\\\\"; else if(c=='\r') shown+="\\r"; else shown+=static_cast<char>(c); }
+                add("Replacement (escaped)",shown.empty()?"[empty: delete selected text]":"Complete replacement follows",-60,ui::SuggestionKind::ReadOnlyText);
+                for(const auto& line:text::wrapLines(shown,58)) add(line.empty()?" ":line,"",-60,ui::SuggestionKind::ReadOnlyText);
+                add("Apply suggestion", "Makes one undoable unsaved edit after checking the source again",-731);
+                add("< Cancel suggestion", "Return without editing",-732);
+            } else if(m_rustRunStage==2) {add("Review Cargo check","Runs Cargo, build scripts and procedural macros with your privileges; --offline does not sandbox scripts",-60,ui::SuggestionKind::ReadOnlyText);add("Cargo executable",safe(m_rustRunPlan.cargo.generic_string()),-60,ui::SuggestionKind::ReadOnlyText);for(const auto& arg:m_rustRunPlan.arguments)add("Argument",safe(arg),-60,ui::SuggestionKind::ReadOnlyText);add("Confirm Cargo check","Runs project code; output may contain sensitive data",-403);}
             else if(m_rustRunStage==3) add("Running Cargo check…","Escape requests cancellation; project scripts may have changed files",-60,ui::SuggestionKind::ReadOnlyText);
             else if (m_rustOwnershipSelected && *m_rustOwnershipSelected < m_rustOwnershipDiagnostics.size()) {
                 const auto& diagnostic = m_rustOwnershipDiagnostics[*m_rustOwnershipSelected]; std::size_t previewRows = 0;
+                m_rustSuggestionCandidates.clear();
                 const auto message = [&](const std::string& title, const std::string& value) {
                     if (value.empty() || previewRows >= 256) return;
                     add(title, "Compiler-provided text", -60, ui::SuggestionKind::ReadOnlyText); ++previewRows;
@@ -2790,6 +2801,12 @@ void Application::refreshModuleSuggestions() {
                     if (item.hasReplacement) message("Suggested replacement (not applied)", item.replacement + "\nApplicability: " + item.applicability);
                 };
                 message(diagnostic.code, diagnostic.message); message("Compiler explanation", diagnostic.explanation);
+                const auto candidate=[&](const std::vector<modules::RustOwnershipSpan>& spans) {
+                    if(spans.size()!=1 || !spans[0].hasReplacement || spans[0].applicability!="MachineApplicable" || m_rustSuggestionCandidates.size()>=128) return;
+                    const auto index=static_cast<int>(m_rustSuggestionCandidates.size()); m_rustSuggestionCandidates.push_back(spans[0]);
+                    add("Review compiler fix: "+safe(spans[0].file)+":"+std::to_string(spans[0].lineStart),"Single machine-applicable span; source will be checked",10000+index);
+                };
+                if(std::find(m.requirements.begin(),m.requirements.end(),"rust-suggestion-v1")!=m.requirements.end()) { candidate(diagnostic.spans); for(const auto& note:diagnostic.notes) candidate(note.spans); }
                 for (const auto& item : diagnostic.spans) span(item, item.primary ? "Primary span" : "Related span");
                 for (const auto& note : diagnostic.notes) { message("Compiler " + safe(note.level), note.message); for (const auto& item : note.spans) span(item, "Related " + safe(note.level) + " span"); }
                 if (previewRows >= 256 || m_rustOwnershipSpans.size() >= 512) add("Preview limited", "Some compiler details were omitted", -60, ui::SuggestionKind::ReadOnlyText);
@@ -2926,6 +2943,11 @@ void Application::refreshModuleSuggestions() {
                 if (m_hexFile->buffer().selectionLength()) {
                     add("Overwrite selection", std::to_string(m_hexFile->buffer().selectionLength()) + " bytes selected", -50);
                     add("Delete selection", "Undoable until saved", -51);
+                    modules::HexIntegerInterpretation number;
+                    if (m_hexFile->buffer().interpretSelection(number)) {
+                        add("Little-endian integer", "Unsigned " + number.littleUnsigned + " · signed " + number.littleSigned, -38, ui::SuggestionKind::ReadOnlyText);
+                        add("Big-endian integer", "Unsigned " + number.bigUnsigned + " · signed " + number.bigSigned, -38, ui::SuggestionKind::ReadOnlyText);
+                    }
                 }
                 add("Find bytes", "Search hexadecimal bytes", -45);
                 if (!m_hexLastNeedle.empty()) {
@@ -4375,7 +4397,7 @@ void Application::applyModuleCommand() {
         if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "review-rust-ownership"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
         if (m_rustOwnershipFuture.valid()) { setCommandStatus("A Rust diagnostic read is still finishing", false); return; }
         const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative JSON diagnostics path", true); return; }
-        auto project = m_project; m_rustOwnershipDiagnostics.clear(); m_rustOwnershipSelected.reset(); m_rustOwnershipShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        auto project = m_project; m_rustSuggestionEdit.reset(); m_rustSuggestionSnapshot.clear(); m_rustOwnershipDiagnostics.clear(); m_rustOwnershipSelected.reset(); m_rustOwnershipShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
         m_rustOwnershipCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
         m_rustOwnershipFuture = std::async(std::launch::async, [project, path, cancel = m_rustOwnershipCancel] {
             RustOwnershipResult result; std::string contents;
@@ -5542,6 +5564,19 @@ void Application::applyModuleCommand() {
         if((m_hasDocument && m_document.dirty()) || std::any_of(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[](const auto& d){return d.document.dirty();})){setCommandStatus("Save or resolve open project edits before running Cargo",true);return;}
         auto project=m_project;auto plan=m_rustRunPlan;m_rustRunCancel=std::make_shared<std::atomic_bool>(false);auto cancel=m_rustRunCancel;m_rustRunStage=3;m_rustRunFuture=std::async(std::launch::async,[project,plan,cancel]{return modules::runRustDiagnostic(project,plan,true,cancel.get());});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Running Cargo; cancellation may leave changed files",false);return;
     }
+    if (m_rustOwnershipShowing && m_rustSuggestionEdit && (choice==-59 || choice==-732)) {m_rustSuggestionEdit.reset();m_rustSuggestionSnapshot.clear();m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();return;}
+    if (m_rustOwnershipShowing && m_rustSuggestionEdit && choice==-731) {
+        std::string contents,error; const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc){return doc.path==m_rustSuggestionFile;});
+        std::vector<modules::Module> fresh;
+        if(m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_rustSuggestionModule || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& module){return module.id==m_rustSuggestionModule && module.enabled && module.valid && module.project && std::find(module.requirements.begin(),module.requirements.end(),"rust-suggestion-v1")!=module.requirements.end();})) {setCommandStatus("Module changed; review again",true);return;}
+        if(!m_hasProject || m_project.root().generic_string()!=m_rustOwnershipRoot || !m_project.readFileBounded(m_rustSuggestionFile,contents,error,workspace::Project::maxFileSize) || contents!=m_rustSuggestionSnapshot || (m_hasDocument && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty())) {setCommandStatus("Source changed or has open edits; review again",true);return;}
+        const auto edit=*m_rustSuggestionEdit; const auto path=m_rustSuggestionFile;
+        if(!m_hasDocument || m_filePath!=path) openFile(path,false);
+        if(!m_hasDocument || m_filePath!=path || m_document.toUtf8()!=contents) {setCommandStatus("Source could not be opened unchanged",true);return;}
+        m_document.setCursor(edit.start.line,edit.start.column);m_document.extendSelectionTo(edit.end.line,edit.end.column);
+        if(edit.replacement.empty()) m_document.deleteSelection(); else m_document.pasteUtf8(edit.replacement);
+        m_rustSuggestionEdit.reset();m_rustSuggestionSnapshot.clear();m_rustOwnershipShowing=false;m_searchBar.close();m_followCursor=true;setStatus("Compiler suggestion applied as an unsaved edit",false);return;
+    }
     if (choice == -59 && m_rustOwnershipShowing) { if(m_rustRunFuture.valid()){if(m_rustRunCancel)m_rustRunCancel->store(true);setCommandStatus("Cancellation requested; build scripts may have changed files",true);return;} if(m_rustRunStage && m_rustRunStage!=4){m_rustRunStage=0;} else if (m_rustOwnershipSelected) m_rustOwnershipSelected.reset(); else { if (m_rustOwnershipCancel) m_rustOwnershipCancel->store(true); m_rustOwnershipDiagnostics.clear(); m_rustOwnershipSpans.clear(); m_rustOwnershipShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if ((choice == -54 || choice == -55) && m_linkerShowing) {
         if (choice == -54 && m_linkerSectionOffset) m_linkerSectionOffset -= std::min<std::size_t>(256, m_linkerSectionOffset);
@@ -5735,6 +5770,21 @@ void Application::applyModuleCommand() {
             if (!m_rustOwnershipSelected) {
                 if (static_cast<std::size_t>(choice) >= m_rustOwnershipDiagnostics.size()) return;
                 m_rustOwnershipSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+            }
+            if (choice>=10000) {
+                const auto index=static_cast<std::size_t>(choice-10000); if(index>=m_rustSuggestionCandidates.size() || !m_hasProject || m_project.root().generic_string()!=m_rustOwnershipRoot) return;
+                const auto span=m_rustSuggestionCandidates[index]; std::error_code ec; const auto root=std::filesystem::canonical(m_project.root(),ec); if(ec){setCommandStatus("Project unavailable",true);return;}
+                const auto input=std::filesystem::path(std::u8string(span.file.begin(),span.file.end())); const auto absolute=std::filesystem::canonical(input.is_absolute()?input:root/input,ec);
+                if(ec || absolute.extension()!=".rs") {setCommandStatus("Rust source unavailable",true);return;}
+                const auto relative=absolute.lexically_relative(root); if(relative.empty() || relative.is_absolute() || *relative.begin()=="..") {setCommandStatus("Compiler span is outside the project",true);return;}
+                const auto raw=relative.generic_u8string(); const std::string path(reinterpret_cast<const char*>(raw.data()),raw.size()); std::string contents,error;
+                if(!m_project.readFileBounded(path,contents,error,workspace::Project::maxFileSize) || !editor::Document::canEditLosslessly(contents,error)) {setCommandStatus("Source is unavailable or not editable",true);return;}
+                const auto cached=std::find_if(m_inactiveDocuments.begin(),m_inactiveDocuments.end(),[&](const auto& doc){return doc.path==path;});
+                if((m_hasDocument && m_document.dirty()) || (cached!=m_inactiveDocuments.end() && cached->document.dirty())) {setCommandStatus("Save or resolve open edits first",true);return;}
+                const auto doc=editor::Document::fromUtf8(contents); modules::RustSuggestionEdit edit;
+                if(doc.toUtf8()!=contents || !modules::prepareRustSuggestion(span,doc,edit,error)) {setCommandStatus(error.empty()?"Source cannot be checked exactly":error,true);return;}
+                if(m_moduleSelected>=m_modules.size()) return;
+                m_rustSuggestionFile=path;m_rustSuggestionModule=m_modules[m_moduleSelected].id;m_rustSuggestionSnapshot=std::move(contents);m_rustSuggestionEdit=std::move(edit);m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();return;
             }
             if (!m_hasProject || m_project.root().generic_string() != m_rustOwnershipRoot || static_cast<std::size_t>(choice) >= m_rustOwnershipSpans.size()) return;
             const auto span = m_rustOwnershipSpans[static_cast<std::size_t>(choice)];
@@ -7498,6 +7548,7 @@ void Application::pollGitRemote() {
                 else if (!editor::Document::canEditLosslessly(disk, error)) { m_document.markRecovered(); message += "; updated file cannot be reloaded safely"; warning = true; }
                 else {
                     const auto line = m_document.cursorLine(), column = m_document.cursorColumn();
+                    m_snippetSession.reset();
                     m_document = editor::Document::fromUtf8(disk); m_document.setCursor(line, column); m_diskContents = disk;
                     m_syntaxValid = false; m_compileScriptValid = false; resetDiagnostics(); m_followCursor = true;
                 }
@@ -8238,6 +8289,7 @@ void Application::applyProjectSearch() {
                     reloadWarning = "; open file could not be reloaded safely; its previous text remains open";
                 } else if (contents != m_diskContents) {
                     const auto line = m_document.cursorLine(), column = m_document.cursorColumn();
+                    m_snippetSession.reset();
                     m_document = editor::Document::fromUtf8(contents); m_document.setCursor(line, column); m_diskContents = contents; m_syntaxValid = false; m_compileScriptValid = false; resetDiagnostics();
                 }
             }
@@ -9459,6 +9511,10 @@ void Application::openFile(const std::string& path, bool allowCreate) {
                 setCommandStatus(message, true); setStatus(message, true); return;
             }
             const auto line = m_document.cursorLine(), column = m_document.cursorColumn();
+            // A reload replaces the document and its history. The old snippet
+            // ranges and revision no longer refer to this document, even when
+            // the path itself has not changed.
+            m_snippetSession.reset();
             m_document = editor::Document::fromUtf8(content);
             m_document.setCursor(line, column);
             m_diskContents = content;
@@ -12055,6 +12111,7 @@ bool Application::persistSettings() {
     if (m_hasDocument && isSettingsDocument()) {
         if (m_document.toUtf8() != text) {
             const auto line = m_document.cursorLine(), column = m_document.cursorColumn();
+            m_snippetSession.reset();
             m_document = editor::Document::fromUtf8(text);
             m_document.setCursor(line, column);
             m_followCursor = false;

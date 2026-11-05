@@ -13,6 +13,27 @@ bool HexBuffer::select(std::size_t offset, std::size_t length) {
     if (offset > bytes_.size() || length > bytes_.size() - offset) return false;
     offset_ = offset; length_ = length; anchor_ = offset; caret_ = offset + length; return true;
 }
+bool HexBuffer::interpretSelection(HexIntegerInterpretation& result) const {
+    result = {};
+    if (length_ != 1 && length_ != 2 && length_ != 4 && length_ != 8) return false;
+    if (offset_ > bytes_.size() || length_ > bytes_.size() - offset_) return false;
+    std::uint64_t little=0, big=0;
+    for(std::size_t i=0;i<length_;++i) {
+        const auto byte=static_cast<std::uint8_t>(bytes_[offset_+i]);
+        little |= static_cast<std::uint64_t>(byte) << (8*i);
+        big=(big<<8) | byte;
+    }
+    const auto signedText=[this](std::uint64_t value) {
+        const auto bits=length_*8;
+        if ((value & (std::uint64_t{1} << (bits-1))) == 0) return std::to_string(value);
+        // Compute magnitude without signed overflow or implementation-defined casts.
+        const auto mask=bits==64 ? std::numeric_limits<std::uint64_t>::max() : (std::uint64_t{1} << bits)-1;
+        return std::string("-")+std::to_string(((~value)&mask)+1);
+    };
+    result.littleUnsigned=std::to_string(little); result.littleSigned=signedText(little);
+    result.bigUnsigned=std::to_string(big); result.bigSigned=signedText(big);
+    return true;
+}
 bool HexBuffer::setCaret(std::size_t position, bool extend) {
     if (position > bytes_.size()) return false;
     if (!extend) anchor_ = position;

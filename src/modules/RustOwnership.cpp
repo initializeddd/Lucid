@@ -107,4 +107,21 @@ bool parseRustOwnershipDiagnostics(std::string_view input, std::vector<RustOwner
     }
     diagnostics = std::move(result); return true;
 }
+bool prepareRustSuggestion(const RustOwnershipSpan& span, const editor::Document& document,
+                           RustSuggestionEdit& edit, std::string& error) {
+    edit = {}; error.clear();
+    const auto fail=[&](const char* message) { error=message; return false; };
+    if (!span.hasReplacement || span.applicability!="MachineApplicable") return fail("Suggestion is not machine-applicable.");
+    if (span.replacement.size()>2048 || !editor::Document::canEditLosslessly(span.replacement,error)) return fail("Suggestion replacement is not editable text or exceeds preview limit.");
+    if (!span.lineStart || span.lineEnd<span.lineStart || span.lineEnd>document.lineCount() || !span.columnStart || !span.columnEnd) return fail("Suggestion range is invalid.");
+    const auto first=span.lineStart-1, last=span.lineEnd-1;
+    if (last-first>=200 || span.sourceLines.size()!=last-first+1) return fail("Compiler source context is incomplete.");
+    for(std::size_t i=0;i<span.sourceLines.size();++i) {
+        if(document.lineUtf8(first+i)!=span.sourceLines[i].text) return fail("Compiler source context does not match the document.");
+    }
+    const auto start=span.columnStart-1,end=span.columnEnd-1;
+    if (start>document.line(first).size() || end>document.line(last).size() || (first==last && end<start)) return fail("Suggestion range is invalid.");
+    edit.start={first,start}; edit.end={last,end}; edit.replacement=span.replacement;
+    return true;
+}
 }

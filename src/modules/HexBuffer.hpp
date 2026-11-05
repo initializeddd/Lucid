@@ -4,6 +4,9 @@
 #include <string_view>
 #include <vector>
 namespace lucid::modules {
+struct HexIntegerInterpretation {
+    std::string littleUnsigned, littleSigned, bigUnsigned, bigSigned;
+};
 class HexBuffer {
 public:
     explicit HexBuffer(std::size_t maxBytes = 16 * 1024 * 1024, std::size_t maxHistoryBytes = 4 * 1024 * 1024);
@@ -12,6 +15,9 @@ public:
     [[nodiscard]] bool select(std::size_t offset, std::size_t length);
     [[nodiscard]] std::size_t selectionOffset() const { return offset_; }
     [[nodiscard]] std::size_t selectionLength() const { return length_; }
+    // Interpret exactly 1, 2, 4, or 8 selected bytes as two's-complement
+    // integers in both byte orders. No data is modified.
+    [[nodiscard]] bool interpretSelection(HexIntegerInterpretation& result) const;
     // Caret is a byte boundary in [0, size]; extending selects between anchor and caret.
     [[nodiscard]] bool moveCaret(std::ptrdiff_t delta, bool extend = false);
     [[nodiscard]] bool setCaret(std::size_t position, bool extend = false);

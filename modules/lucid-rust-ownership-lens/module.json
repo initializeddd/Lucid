@@ -4,7 +4,8 @@
   "description": "Review Rust compiler ownership and borrowing diagnostics and source spans.",
   "requires": [
     "rust-ownership-lens-v1",
-    "rust-diagnostic-run-v1"
+    "rust-diagnostic-run-v1",
+    "rust-suggestion-v1"
   ],
   "permissions": {
     "project": true,

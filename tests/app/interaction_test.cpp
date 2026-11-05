@@ -946,6 +946,19 @@ struct ApplicationInteractionTest {
         app.openExternalPath((temp / "nested" / "example.txt").string());
         if (!app.m_hasDocument || app.m_document.toUtf8() != "opened externally") return 24;
         {
+            // Reopening the unchanged file keeps a live snippet, but replacing
+            // its underlying document must discard its old field coordinates.
+            app.m_snippetSession = Application::SnippetSession{app.m_filePath, app.m_project.root().generic_string(), app.m_document.toUtf8(), {{0, 6, 1}}, 0, 6, 1, app.m_document.revision()};
+            app.openFile("example.txt", false);
+            if (!app.m_snippetSession) return 1160;
+            { std::ofstream out(temp / "nested" / "example.txt", std::ios::trunc); out << "externally replaced"; }
+            app.openFile("example.txt", false);
+            if (app.m_snippetSession || app.m_document.toUtf8() != "externally replaced") return 1161;
+            { std::ofstream out(temp / "nested" / "example.txt", std::ios::trunc); out << "opened externally"; }
+            app.openFile("example.txt", false);
+            if (app.m_document.toUtf8() != "opened externally") return 1162;
+        }
+        {
             const auto oldRoot=app.m_moduleRoot; auto oldModules=app.m_modules; const auto oldSelected=app.m_moduleSelected; std::string error;
             {std::ofstream out(temp/"nested"/"usb-boards.json"); out << R"({"boards":[{"name":"Test board","vendorId":"1234","productId":"abcd","profile":"board.cfg"}]})";}
             app.m_moduleRoot=temp/"usb-board-modules";
@@ -1708,7 +1721,7 @@ struct ApplicationInteractionTest {
             { std::ofstream out(temp / "outside.rs"); out << "outside\n"; }
             { std::ofstream out(temp / "nested" / "rust.json"); out << R"({"code":{"code":"E0382"},"level":"error","message":"borrow of moved value","spans":[{"file_name":"sample.rs","line_start":1,"column_start":3,"line_end":1,"column_end":4,"is_primary":true,"text":[{"text":"  let x = thing;","highlight_start":3,"highlight_end":4}]},{"file_name":"../outside.rs","line_start":1,"column_start":1,"line_end":1,"column_end":2,"is_primary":false}],"children":[{"level":"note","message":"value used here","spans":[{"file_name":"sample.rs","line_start":1,"column_start":3,"line_end":2,"column_end":4,"is_primary":false,"text":[{"text":"  let x = thing;","highlight_start":3,"highlight_end":17},{"text":"  use_it(x);","highlight_start":1,"highlight_end":4}]}],"children":[]}]})"; }
             app.m_moduleRoot = temp / "rust-modules"; std::string error;
-            const std::string manifest = R"({"name":"Rust","version":"1","requires":["rust-ownership-lens-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Review","action":"review-rust-ownership"}]})";
+            const std::string manifest = R"({"name":"Rust","version":"1","requires":["rust-ownership-lens-v1","rust-suggestion-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Review","action":"review-rust-ownership"}]})";
             if (!modules::install(app.m_moduleRoot, "rust", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "rust", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 493;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleRustPath) return 494;
@@ -1727,6 +1740,16 @@ struct ApplicationInteractionTest {
             { std::ofstream out(temp / "nested" / "sample.rs", std::ios::trunc); out << "changed source\n"; }
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.m_modulePage = 0; app.refreshSuggestions();
             if (!chooseSpan(0) || !app.m_commandStatusIsError || app.m_commandStatus.find("fresh diagnostics") == std::string::npos) return 498;
+            { std::ofstream out(temp / "nested" / "sample.rs",std::ios::trunc); out << "  let x = thing;\n  use_it(x);\n"; }
+            modules::RustOwnershipSpan fix; fix.file="sample.rs";fix.lineStart=1;fix.lineEnd=1;fix.columnStart=7;fix.columnEnd=8;fix.hasReplacement=true;fix.applicability="MachineApplicable";fix.replacement="y";fix.sourceLines.push_back({"  let x = thing;",7,8});
+            modules::RustOwnershipNote fixNote;fixNote.level="help";fixNote.message="rename";fixNote.spans.push_back(fix);app.m_rustOwnershipDiagnostics[0].notes.push_back(fixNote);
+            app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.m_modulePage=0;app.refreshSuggestions();
+            if(!chooseSpan(10000) || !app.m_rustSuggestionEdit) return 1140;
+            { std::ofstream out(temp / "nested" / "sample.rs",std::ios::trunc); out << "modified\n"; }
+            if(!chooseSpan(-731) || !app.m_commandStatusIsError || !app.m_rustSuggestionEdit) return 1141;
+            { std::ofstream out(temp / "nested" / "sample.rs",std::ios::trunc); out << "  let x = thing;\n  use_it(x);\n"; }
+            if(!chooseSpan(-731) || app.m_document.toUtf8()!="  let y = thing;\n  use_it(x);\n") return 1142;
+            app.m_document.undo(); if(app.m_document.toUtf8()!="  let x = thing;\n  use_it(x);\n") return 1143;
             app.m_rustOwnershipShowing = false; app.m_rustOwnershipSelected.reset(); app.m_searchBar.close(); app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected;
             app.openFile("example.txt", false); std::filesystem::remove(temp / "nested" / "sample.rs"); std::filesystem::remove(temp / "nested" / "rust.json"); std::filesystem::remove(temp / "outside.rs");
         }
@@ -1927,6 +1950,12 @@ struct ApplicationInteractionTest {
             { std::ofstream out(temp / "nested" / "sample.bin", std::ios::binary | std::ios::trunc); out.write(original.data(), static_cast<std::streamsize>(original.size())); }
             if (!choose(-41)) return 476; wait(); if (app.m_hexFuture.valid() || app.m_commandStatusIsError || !app.m_project.readFile("sample.bin", disk, error) || disk[1] != static_cast<char>(0xff)) return 477;
             if (!choose(-45)) return 478; app.m_searchBar.setQuery("FF 22"); app.applyModuleCommand(); if (app.m_hexEditOffset != 1 || app.m_hexFile->buffer().selectionLength() != 2) return 479;
+            bool littleInteger=false, bigInteger=false;
+            for (std::size_t page=0; page<8; ++page) {app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions) {
+                if(row.path=="Little-endian integer" && row.detail=="Unsigned 8959 · signed 8959") littleInteger=true;
+                if(row.path=="Big-endian integer" && row.detail=="Unsigned 65314 · signed -222") bigInteger=true;
+            }}
+            if(!littleInteger || !bigInteger) return 1130;
             if (!choose(-50)) return 480; app.m_searchBar.setQuery("AA BB"); app.applyModuleCommand();
             if (static_cast<unsigned char>(app.m_hexFile->buffer().bytes()[1]) != 0xaa || !choose(-42) || static_cast<unsigned char>(app.m_hexFile->buffer().bytes()[1]) != 0xff) return 481;
             if (!choose(-49)) return 482; app.m_searchBar.setQuery("1"); app.applyModuleCommand(); app.m_searchBar.setQuery("2"); app.applyModuleCommand();

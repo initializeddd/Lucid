@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "editor/document/Document.hpp"
 namespace lucid::modules {
 struct RustOwnershipSourceLine {
     std::string text;
@@ -26,4 +27,15 @@ struct RustOwnershipDiagnostic {
 // No project file access, process execution, network, inference, or fix application.
 [[nodiscard]] bool parseRustOwnershipDiagnostics(std::string_view input,
     std::vector<RustOwnershipDiagnostic>& diagnostics, std::string& error);
+
+struct RustSuggestionEdit {
+    editor::TextPosition start{}, end{};
+    std::string replacement;
+};
+// Prepares a single compiler-suggested edit, without mutating the document.
+// The caller must independently ensure this is not part of a multipart fix,
+// verify project/file identity, and check the same document revision on apply.
+// Every covered compiler source line must exactly match the current document.
+[[nodiscard]] bool prepareRustSuggestion(const RustOwnershipSpan& span,
+    const editor::Document& document, RustSuggestionEdit& edit, std::string& error);
 }

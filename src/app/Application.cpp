@@ -1065,7 +1065,7 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
             if (m_localizationShowing && m_localizationEditPreview) { m_localizationEditPreview = false; m_localizationEditPlan = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_localizationShowing) { if (m_localizationSelected) m_localizationSelected.reset(); else { if (m_localizationCancel) m_localizationCancel->store(true); m_localizationShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_binaryShowing) { if (m_binaryCategory) m_binaryCategory.reset(); else { if (m_binaryCancel) m_binaryCancel->store(true); m_binaryShowing = false; m_binarySnapshot.reset(); } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
-            if (m_benchmarkShowing) { if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_benchmarkShowing) { if(m_benchmarkRunCancel)m_benchmarkRunCancel->store(true);m_benchmarkRunStage=0; if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_moduleHistoryShowing) { if(m_moduleHistorySnapshotShowing) {m_moduleHistorySnapshotShowing=false;m_moduleHistoryDiffShowing=false;} else if (m_moduleHistoryDiffShowing) m_moduleHistoryDiffShowing = false; else m_moduleHistoryShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_coverageShowing) { if (m_coverageCancel) m_coverageCancel->store(true); if(m_coverageRunCancel)m_coverageRunCancel->store(true); m_coverageRunStage=0; m_coverageChoosingBaseline = false; m_coverageShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_markdownLinksShowing) { if (m_markdownExternalCancel) m_markdownExternalCancel->store(true); if (m_markdownExternalSelected) m_markdownExternalSelected.reset(); else { if (m_markdownLinksCancel) m_markdownLinksCancel->store(true); m_markdownLinksShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
@@ -1083,7 +1083,7 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
         if (kind == ui::PromptKind::ModuleSqlExportPath) { if (m_sqlChangeMode) m_sqlChangeStage = 1; m_sqlCsvStage = 0; m_sqlCsv = {}; m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::ModuleVisualPath && m_visualConfigStage==2) { m_visualConfigStage=1; m_searchBar.open(ui::PromptKind::ModuleCommands); m_selectedSuggestion=-1; refreshSuggestions(); return; }
         if(kind==ui::PromptKind::ModuleCTestInput && m_junitInputMode) {m_junitInputMode=0;m_searchBar.open(ui::PromptKind::ModuleCommands);m_selectedSuggestion=-1;refreshSuggestions();return;}
-        if (kind == ui::PromptKind::ModuleCMakePath || kind == ui::PromptKind::ModuleCoveragePath || kind == ui::PromptKind::ModuleBenchmarkPath || kind == ui::PromptKind::ModuleBinaryPath || kind == ui::PromptKind::ModuleLocalizationPath || kind == ui::PromptKind::ModuleDesignTokensPath || kind == ui::PromptKind::ModuleLogsInput || kind == ui::PromptKind::ModulePythonInterpreterPath || kind == ui::PromptKind::ModulePythonCreatePath || kind == ui::PromptKind::ModuleCTestInput || kind == ui::PromptKind::ModuleHexPath || kind == ui::PromptKind::ModuleHexOffset || kind == ui::PromptKind::ModuleHexLength || kind == ui::PromptKind::ModuleHexBytes || kind == ui::PromptKind::ModuleHexSearch || kind == ui::PromptKind::ModuleLinkerPath || kind == ui::PromptKind::ModuleToolchainPath || kind == ui::PromptKind::ModuleCrashPath || kind == ui::PromptKind::ModuleRustPath || kind == ui::PromptKind::ModuleSqlPath || kind == ui::PromptKind::ModuleVisualPath || kind == ui::PromptKind::ModuleApiEnvironmentPath || kind == ui::PromptKind::ModuleContainerActionPath || kind == ui::PromptKind::ModuleContainerPath || kind == ui::PromptKind::ModuleShaderCompiler || kind == ui::PromptKind::ModuleShaderOutput || kind == ui::PromptKind::ModulePullRequestUrl || kind == ui::PromptKind::ModulePullRequestComment) { m_visualBaseline.clear(); if (kind == ui::PromptKind::ModuleCMakePath) {m_cmakeValueInput=false;if(m_cmakeBuildStage==1)m_cmakeBuildStage=0;} if (kind == ui::PromptKind::ModuleRustPath && m_rustRunStage==1) m_rustRunStage=0; if (kind == ui::PromptKind::ModuleCrashPath) m_crashMapInput = false; if (kind == ui::PromptKind::ModuleToolchainPath && (m_toolchainEditMode==1 || m_toolchainEditMode==2)) m_toolchainEditMode=0; if(kind==ui::PromptKind::ModuleToolchainPath && (m_targetConfigureStage==1 || m_targetConfigureStage==2)) m_targetConfigureStage=0; m_searchBar.open(ui::PromptKind::ModuleCommands); if (kind == ui::PromptKind::ModuleCoveragePath) { m_coverageChoosingBaseline = false; m_coverageRunStage = 0; } if (kind == ui::PromptKind::ModulePullRequestComment) { m_pullReviewMode = 0; m_pullRequestGeneration = m_searchBar.generation(); } m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
+        if (kind == ui::PromptKind::ModuleCMakePath || kind == ui::PromptKind::ModuleCoveragePath || kind == ui::PromptKind::ModuleBenchmarkPath || kind == ui::PromptKind::ModuleBinaryPath || kind == ui::PromptKind::ModuleLocalizationPath || kind == ui::PromptKind::ModuleDesignTokensPath || kind == ui::PromptKind::ModuleLogsInput || kind == ui::PromptKind::ModulePythonInterpreterPath || kind == ui::PromptKind::ModulePythonCreatePath || kind == ui::PromptKind::ModuleCTestInput || kind == ui::PromptKind::ModuleHexPath || kind == ui::PromptKind::ModuleHexOffset || kind == ui::PromptKind::ModuleHexLength || kind == ui::PromptKind::ModuleHexBytes || kind == ui::PromptKind::ModuleHexSearch || kind == ui::PromptKind::ModuleLinkerPath || kind == ui::PromptKind::ModuleToolchainPath || kind == ui::PromptKind::ModuleCrashPath || kind == ui::PromptKind::ModuleRustPath || kind == ui::PromptKind::ModuleSqlPath || kind == ui::PromptKind::ModuleVisualPath || kind == ui::PromptKind::ModuleApiEnvironmentPath || kind == ui::PromptKind::ModuleContainerActionPath || kind == ui::PromptKind::ModuleContainerPath || kind == ui::PromptKind::ModuleShaderCompiler || kind == ui::PromptKind::ModuleShaderOutput || kind == ui::PromptKind::ModulePullRequestUrl || kind == ui::PromptKind::ModulePullRequestComment) { m_visualBaseline.clear(); if (kind == ui::PromptKind::ModuleCMakePath) {m_cmakeValueInput=false;if(m_cmakeBuildStage==1)m_cmakeBuildStage=0;} if (kind == ui::PromptKind::ModuleRustPath && m_rustRunStage==1) m_rustRunStage=0; if (kind == ui::PromptKind::ModuleCrashPath) m_crashMapInput = false; if (kind == ui::PromptKind::ModuleToolchainPath && (m_toolchainEditMode==1 || m_toolchainEditMode==2)) m_toolchainEditMode=0; if(kind==ui::PromptKind::ModuleToolchainPath && (m_targetConfigureStage==1 || m_targetConfigureStage==2)) m_targetConfigureStage=0; m_searchBar.open(ui::PromptKind::ModuleCommands); if (kind == ui::PromptKind::ModuleCoveragePath) { m_coverageChoosingBaseline = false; m_coverageRunStage = 0; } if (kind == ui::PromptKind::ModuleBenchmarkPath) { m_benchmarkRunStage = 0; m_benchmarkRunCandidate.clear(); } if (kind == ui::PromptKind::ModulePullRequestComment) { m_pullReviewMode = 0; m_pullRequestGeneration = m_searchBar.generation(); } m_selectedSuggestion = -1; clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::ModuleReleaseHeader) { m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage=0; m_selectedSuggestion=-1; clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::ModuleImport || kind == ui::PromptKind::ModuleSnippetName || kind == ui::PromptKind::ModulePreview || kind == ui::PromptKind::ModuleCatalog) { m_personalSnippetDraft.clear(); ++m_moduleFetchGeneration; m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); clearCommandFeedback(); refreshSuggestions(); return; }
         if (kind == ui::PromptKind::ModuleActions) { m_modulePage = 0; m_searchBar.open(ui::PromptKind::ModuleList); refreshSuggestions(); return; }
@@ -3202,6 +3202,15 @@ void Application::refreshModuleSuggestions() {
                 }
             }
         } else if (m.enabled && m_benchmarkShowing) {
+            if(m_benchmarkRunStage==2) {
+                add("Review benchmark generator", "Runs project code; an existing report may remain unchanged",-21,ui::SuggestionKind::ReadOnlyText);
+                add("Executable",m_benchmarkRunPlan.executable.generic_string(),-21,ui::SuggestionKind::ReadOnlyText);
+                for(const auto& arg:m_benchmarkRunPlan.arguments) add("Argument",arg,-21,ui::SuggestionKind::ReadOnlyText);
+                add("Report",m_benchmarkRunPlan.reportPath,-21,ui::SuggestionKind::ReadOnlyText);
+                add("Confirm benchmark run", "Runs the reviewed executable from the project root",-750);
+                add("Cancel", "Return without running",-751);
+            } else if(m_benchmarkRunStage==3) add("Running benchmark…", "Escape requests cancellation; changes may remain",-21,ui::SuggestionKind::ReadOnlyText);
+            else {
             add(m_benchmarkSelected ? "< Back to comparisons" : "< Back to module commands", "", -21);
             const auto safe = [](const std::string& value) { std::string error; if (!editor::Document::canEditLosslessly(value,error)) return std::string("(invalid text)"); auto text=value.substr(0,512); for (char& c : text) if (static_cast<unsigned char>(c)<32 || c==127) c=' '; while (!text.empty() && !editor::Document::canEditLosslessly(text,error)) text.pop_back(); return text; };
             const auto number = [](double value) { std::ostringstream out; out.precision(10); out << value; return out.str(); };
@@ -3242,6 +3251,7 @@ void Application::refreshModuleSuggestions() {
                 if (entry.hasPercentChange) detail += " · " + number(entry.percentChange) + "%";
                 if (!entry.reason.empty()) detail += " · " + safe(entry.reason);
                 add(safe(entry.name), detail, static_cast<int>(i));
+            }
             }
             }
         } else if (m.enabled && m_moduleHistoryShowing) {
@@ -4746,10 +4756,16 @@ void Application::applyModuleCommand() {
         refreshSuggestions(); setCommandStatus("Inspecting binary without running it… Escape cancels", false); return;
     }
     if (m_searchBar.kind() == ui::PromptKind::ModuleBenchmarkPath) {
+        if(m_benchmarkRunStage==1) {
+            if(!m_hasProject || m_project.root().generic_string()!=m_benchmarkRoot || m_benchmarkRunFuture.valid()) {setCommandStatus("Benchmark context changed or a run is still finishing",true);return;}
+            auto plan=modules::prepareCoverageRun(m_project,std::string(m_searchBar.query()),modules::ReportRunKind::Benchmark);
+            if(!plan.error.empty()) {setCommandStatus(plan.error,true);return;}
+            m_benchmarkRunPlan=std::move(plan);m_benchmarkRunStage=2;m_benchmarkShowing=true;m_modulePage=0;m_selectedSuggestion=-1;m_searchBar.open(ui::PromptKind::ModuleCommands);refreshSuggestions();setCommandStatus("Review the benchmark command before running",false);return;
+        }
         if (!m_hasProject || m_project.root().generic_string() != m_benchmarkRoot || m_moduleSelected >= m_modules.size()) { setCommandStatus("Project or module changed; reopen the command", true); return; }
         const std::string path(m_searchBar.query());
         if (path.empty()) { setCommandStatus("Enter a project-relative report path", true); return; }
-        if (!m_benchmarkSelectingCandidate) { m_benchmarkBaseline = path; m_benchmarkSelectingCandidate = true; m_searchBar.setQuery(""); setCommandStatus("Enter the candidate report path", false); return; }
+        if (!m_benchmarkSelectingCandidate) { m_benchmarkBaseline = path; m_benchmarkSelectingCandidate = true; m_searchBar.setQuery(m_benchmarkRunCandidate); m_benchmarkRunCandidate.clear(); setCommandStatus("Enter the candidate report path; generated reports may be stale", false); return; }
         const auto& reviewed = m_modules[m_moduleSelected]; std::vector<modules::Module> fresh; std::string error;
         if (!modules::list(m_moduleRoot, fresh, error)) { setCommandStatus(error, true); return; }
         const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
@@ -5485,7 +5501,15 @@ void Application::applyModuleCommand() {
         m_coverageFilter = choice == -151 ? 0 : choice == -152 ? 1 : choice == -153 ? 2 : choice == -701 ? 3 : 4;
         m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
     }
-    if (choice == -21 && m_benchmarkShowing) { if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if(choice==-751 && m_benchmarkShowing && m_benchmarkRunStage==2) {m_benchmarkRunStage=0;m_benchmarkShowing=false;m_modulePage=0;refreshSuggestions();return;}
+    if(choice==-750 && m_benchmarkShowing && m_benchmarkRunStage==2) {
+        std::string error;std::vector<modules::Module> fresh;
+        if(!m_hasProject || m_project.root().generic_string()!=m_benchmarkRoot || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_benchmarkRunModule && m.enabled && m.valid && m.project && m.processes && std::find(m.requirements.begin(),m.requirements.end(),"benchmark-run-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="run-benchmark";});})) {setCommandStatus("Benchmark context changed; review again",true);return;}
+        if(m_benchmarkRunFuture.valid()) {setCommandStatus("Benchmark run is still finishing",true);return;}
+        auto project=m_project;auto plan=m_benchmarkRunPlan;m_benchmarkRunCancel=std::make_shared<std::atomic_bool>(false);auto cancel=m_benchmarkRunCancel;m_benchmarkRunStage=3;m_modulePage=0;m_selectedSuggestion=-1;
+        m_benchmarkRunFuture=std::async(std::launch::async,[project,plan,cancel]{return modules::runCoverageGenerator(project,plan,true,cancel.get());});refreshSuggestions();setCommandStatus("Running benchmark… Escape cancels",false);return;
+    }
+    if (choice == -21 && m_benchmarkShowing) { if(m_benchmarkRunCancel)m_benchmarkRunCancel->store(true);m_benchmarkRunStage=0; if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if (m_benchmarkShowing && !m_benchmarkSelected && (choice == -177 || choice == -178 || choice == -179)) { m_benchmarkFilter = choice == -177 ? 0 : choice == -178 ? 1 : 2; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if (choice == -23 && m_binaryShowing) { if (m_binaryCategory) m_binaryCategory.reset(); else { if (m_binaryCancel) m_binaryCancel->store(true); m_binaryShowing = false; m_binarySnapshot.reset(); } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if (choice == -272 && m_localizationShowing && m_localizationEditPreview) { m_localizationEditPreview = false; m_localizationEditPlan = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
@@ -5809,7 +5833,10 @@ void Application::applyModuleCommand() {
         m_moduleFetchFuture = std::async(std::launch::async, [entry, generation] {
             ModuleFetchResult result; result.id = entry.id; result.generation = generation;
             result.source = "ghcr.io/" + entry.package + ":" + entry.version;
-            try { (void)modules::fetchPackage(entry.package, entry.version, "application/vnd.lucid.module.v1+json", result.manifest, result.error); }
+            try {
+                if (modules::fetchPackage(entry.package, entry.version, "application/vnd.lucid.module.v1+json", result.manifest, result.error) &&
+                    !modules::catalogManifestMatches(entry, result.manifest, result.error)) result.manifest.clear();
+            }
             catch (const std::exception& e) { result.error = std::string("Module download failed: ") + e.what(); }
             return result;
         });
@@ -6087,10 +6114,14 @@ void Application::applyModuleCommand() {
             m_coverageRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleCoveragePath);
             m_searchBar.setQuery(m_coverageCobertura ? "coverage.xml" : "coverage.info"); clearCommandFeedback(); setCommandStatus(m_coverageCobertura ? "Enter a project-relative Cobertura XML report path" : "Enter a project-relative LCOV report path", false); return;
         }
+        if(found->commands[static_cast<std::size_t>(choice)].action=="run-benchmark") {
+            if(!m_hasProject || m_benchmarkRunFuture.valid()) {setCommandStatus("Open a project and wait for any previous run",true);return;}
+            m_benchmarkRoot=m_project.root().generic_string();m_benchmarkRunModule=found->id;m_benchmarkRunStage=1;m_searchBar.open(ui::PromptKind::ModuleBenchmarkPath);m_searchBar.setQuery(".lucid/benchmark.json");clearCommandFeedback();setCommandStatus("Enter the project-relative benchmark configuration",false);return;
+        }
         if (found->commands[static_cast<std::size_t>(choice)].action == "benchmark-comparison") {
             if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
             if (m_benchmarkFuture.valid()) { setCommandStatus("A comparison is still finishing", false); return; }
-            m_benchmarkRoot = m_project.root().generic_string(); m_benchmarkBaseline.clear(); m_benchmarkSelectingCandidate = false;
+            m_benchmarkRoot = m_project.root().generic_string(); m_benchmarkBaseline.clear(); m_benchmarkRunCandidate.clear(); m_benchmarkSelectingCandidate = false;
             m_searchBar.open(ui::PromptKind::ModuleBenchmarkPath); clearCommandFeedback(); setCommandStatus("Enter the baseline report path", false); return;
         }
         if (found->commands[static_cast<std::size_t>(choice)].action == "binary-inspector") {
@@ -7151,6 +7182,16 @@ void Application::pollModules() {
             if (!m_binaryInspection.error.empty()) setCommandStatus("Binary inspection failed: " + m_binaryInspection.error, true);
             else setCommandStatus(m_binaryInspection.incomplete ? "Some metadata is malformed, unsupported, or omitted by limits" : "Read-only inspection; stripped or unsupported metadata may be absent", m_binaryInspection.incomplete);
             m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
+        }
+    }
+    if(m_benchmarkRunFuture.valid() && m_benchmarkRunFuture.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        const bool cancelled=m_benchmarkRunCancel && m_benchmarkRunCancel->load();m_benchmarkRunCancel.reset();modules::ModuleProcessResult result;
+        try {result=m_benchmarkRunFuture.get();} catch(const std::exception&) {result.error="Benchmark generator failed";}
+        if(!cancelled && m_benchmarkShowing && m_benchmarkRunStage==3 && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands) {
+            m_benchmarkRunStage=0;std::string error;std::vector<modules::Module> fresh;
+            const bool enabled=m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_benchmarkRunModule && modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_benchmarkRunModule && m.enabled && m.valid && m.project && m.processes && std::find(m.requirements.begin(),m.requirements.end(),"benchmark-run-v1")!=m.requirements.end();});
+            if(!m_hasProject || m_project.root().generic_string()!=m_benchmarkRoot || !enabled || !result.error.empty() || result.exitCode!=0 || result.timedOut || result.cancelled) {setCommandStatus("Benchmark run failed or context changed; review again",true);refreshSuggestions();}
+            else {m_benchmarkRunCandidate=m_benchmarkRunPlan.reportPath;m_benchmarkSelectingCandidate=false;m_benchmarkBaseline.clear();m_benchmarkShowing=false;m_searchBar.open(ui::PromptKind::ModuleBenchmarkPath);m_searchBar.setQuery("");setCommandStatus("Enter baseline report; generated report may be stale",false);}
         }
     }
     if (m_benchmarkFuture.valid() && m_benchmarkFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -12530,7 +12571,7 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     case ui::PromptKind::ModuleReleaseHeader: state.commandPlaceholder = m_releaseNotesEditingDate ? "Release date (optional)..." : "Release version (optional)..."; break;
     case ui::PromptKind::ModuleCMakePath: state.commandPlaceholder = m_cmakeBuildStage==1 ? "Absolute CMake executable..." : m_cmakeValueInput ? "Replacement cache value..." : "Project-relative CMake build directory..."; break;
     case ui::PromptKind::ModuleCoveragePath: state.commandPlaceholder = m_coverageRunStage==1 ? "Project-relative generator configuration..." : "Project-relative coverage report..."; break;
-    case ui::PromptKind::ModuleBenchmarkPath: state.commandPlaceholder = m_benchmarkSelectingCandidate ? "Project-relative candidate report..." : "Project-relative baseline report..."; break;
+    case ui::PromptKind::ModuleBenchmarkPath: state.commandPlaceholder = m_benchmarkRunStage==1 ? "Project-relative benchmark configuration..." : m_benchmarkSelectingCandidate ? "Project-relative candidate report..." : "Project-relative baseline report..."; break;
     case ui::PromptKind::ModuleBinaryPath: state.commandPlaceholder = "Project-relative binary file..."; break;
     case ui::PromptKind::ModuleLocalizationEdit: state.commandPlaceholder = "Single-line translation..."; break;
     case ui::PromptKind::ModuleLocalizationPath: state.commandPlaceholder = m_localizationSelectingTranslation ? "Project-relative translation JSON..." : "Project-relative source JSON..."; break;

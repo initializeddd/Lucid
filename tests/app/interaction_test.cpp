@@ -2367,7 +2367,7 @@ struct ApplicationInteractionTest {
             const auto report = [&](const char* file, int value) { std::ofstream out(temp / "nested" / file); out << "{\"context\":{\"machine\":\"host\",\"build\":\"release\",\"environment\":\"local\"},\"measurements\":[{\"name\":\"parse\",\"unit\":\"ms\",\"direction\":\"lower\",\"value\":" << value << "}]}"; };
             report("before.json", 100); report("after.json", 120);
             app.m_moduleRoot = temp / "benchmark-modules"; std::string error;
-            const std::string manifest = R"({"name":"Benchmark","version":"1","requires":["benchmark-comparison-v1","benchmark-samples-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Compare","action":"benchmark-comparison"}]})";
+            const std::string manifest = R"({"name":"Benchmark","version":"1","requires":["benchmark-comparison-v1","benchmark-samples-v1","benchmark-run-v1"],"permissions":{"project":true,"network":false,"processes":true,"settings":false},"commands":[{"title":"Compare","action":"benchmark-comparison"},{"title":"Run","action":"run-benchmark"}]})";
             if (!modules::install(app.m_moduleRoot, "benchmark", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "benchmark", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 430;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleBenchmarkPath) return 431;
@@ -2390,6 +2390,20 @@ struct ApplicationInteractionTest {
             auto sampleRow=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0); if(sampleRow==app.m_moduleChoices.end()) return 1052; app.m_selectedSuggestion=static_cast<int>(sampleRow-app.m_moduleChoices.begin()); app.applyModuleCommand();
             bool spreadVisible=false, inferenceVisible=false; for(std::size_t page=0;page<10;++page) {app.m_modulePage=page;app.refreshSuggestions();for(const auto& item:app.m_suggestions){spreadVisible |= item.path=="Baseline variability" && item.detail.find("min 90")!=std::string_view::npos && item.detail.find("sample SD 10")!=std::string_view::npos; inferenceVisible |= item.path=="Descriptive samples only" && item.detail.find("do not establish")!=std::string_view::npos;}}
             if(!spreadVisible || !inferenceVisible) return 1053;
+#if !defined(_WIN32)
+            const auto generator=temp/"nested"/"benchmark-generator"; {std::ofstream script(generator);script<<"#!/bin/sh\ncp after.json generated-benchmark.json\n";} std::filesystem::permissions(generator,std::filesystem::perms::owner_all);
+            {std::ofstream config(temp/"nested"/"benchmark-run.json");config<<"{\"executable\":\""<<generator.generic_string()<<"\",\"arguments\":[],\"report\":\"generated-benchmark.json\",\"format\":\"benchmark\"}";}
+            app.m_benchmarkShowing=false;app.m_modulePage=0;app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();
+            auto run=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),1);if(run==app.m_moduleChoices.end())return 1170;app.m_selectedSuggestion=static_cast<int>(run-app.m_moduleChoices.begin());app.applyModuleCommand();
+            app.m_searchBar.setQuery("benchmark-run.json");app.applyModuleCommand();if(app.m_benchmarkRunStage!=2 || std::filesystem::exists(temp/"nested"/"generated-benchmark.json"))return 1171;
+            auto confirm=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-750);if(confirm==app.m_moduleChoices.end())return 1172;app.m_selectedSuggestion=static_cast<int>(confirm-app.m_moduleChoices.begin());app.applyModuleCommand();
+            const auto runDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);while(app.m_benchmarkRunFuture.valid() && std::chrono::steady_clock::now()<runDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_benchmarkRunFuture.valid() || app.m_searchBar.kind()!=ui::PromptKind::ModuleBenchmarkPath || !std::filesystem::exists(temp/"nested"/"generated-benchmark.json"))return 1173;
+            app.m_searchBar.setQuery("before.json");app.applyModuleCommand();if(app.m_searchBar.query()!="generated-benchmark.json")return 1174;app.applyModuleCommand();
+            while(app.m_benchmarkFuture.valid() && std::chrono::steady_clock::now()<runDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_benchmarkFuture.valid() || app.m_commandStatusIsError || app.m_benchmarkComparison.entries.size()!=1)return 1175;
+            std::filesystem::remove(generator);std::filesystem::remove(temp/"nested"/"benchmark-run.json");std::filesystem::remove(temp/"nested"/"generated-benchmark.json");
+#endif
             app.m_benchmarkShowing = false; app.m_searchBar.close(); app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected;
             std::filesystem::remove(temp / "nested" / "before.json"); std::filesystem::remove(temp / "nested" / "after.json");
         }

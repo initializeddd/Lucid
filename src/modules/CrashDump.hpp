@@ -16,7 +16,7 @@ struct CrashThread {
 struct CrashException { bool present = false; std::uint32_t threadId = 0, code = 0, flags = 0; std::uint64_t address = 0; };
 struct CrashModule { std::string name; std::uint64_t base = 0; std::uint32_t size = 0; std::string debugId = {}; };
 struct CrashDump { std::string format, error, architecture; CrashException exception; std::vector<CrashThread> threads; std::vector<CrashModule> modules; bool incomplete = false; };
-// Parses supplied minidump bytes only. x86-64 contexts provide an initial PC
+// Parses supplied minidump bytes only. x86 and x86-64 contexts provide an initial PC
 // and up to 63 plausible frame-pointer-chain candidates from the saved stack.
 // Candidates are heuristic, may be false, and are not a reliable stack unwind.
 // At most 4096 threads and 4096 modules are retained even if larger limits are requested.

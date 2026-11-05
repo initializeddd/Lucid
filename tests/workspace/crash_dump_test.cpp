@@ -56,5 +56,25 @@ int main() {
     r=readCrashDump(cv); if (!r.error.empty() || r.modules.size()!=1 || r.modules[0].debugId!="030201000504070608090A0B0C0D0E0F12") return 16;
     sc(48+76,23,4); if (readCrashDump(cv).error.empty()) return 17;
     sc(48+76,24,4); sc(48+80,999,4); if (readCrashDump(cv).error.empty()) return 18;
+    // Windows x86 control context and a two-entry EBP chain.
+    std::string i386(32+24+52+56+200+32, '\0');
+    auto si=[&](std::size_t p,unsigned long long v,unsigned n) {for(unsigned i=0;i<n;++i)i386[p+i]=static_cast<char>(v>>(8*i));};
+    i386.replace(0,4,"MDMP"); si(4,0xa793,4); si(8,2,4); si(12,32,4);
+    si(32,3,4); si(36,52,4); si(40,56,4); si(44,7,4); si(48,56,4); si(52,108,4);
+    si(56,1,4); si(60,11,4); si(84,0x1000,8); si(92,32,4); si(96,364,4); si(100,200,4); si(104,164,4);
+    si(108,0,2); si(164,0x10001,4); si(164+180,0x1008,4); si(164+184,0x12345678,4); si(164+196,0x1000,4);
+    si(364+8,0x1010,4); si(364+12,0x11112222,4); si(364+16,0,4); si(364+20,0x33334444,4);
+    r=readCrashDump(i386);
+    if(!r.error.empty() || r.architecture!="x86" || r.threads.size()!=1 || r.threads[0].frames.size()!=3 ||
+       r.threads[0].frames[0].address!=0x12345678 || r.threads[0].frames[1].address!=0x11112222 ||
+       r.threads[0].frames[1].stackPointer!=0x1010 || r.threads[0].frames[2].address!=0x33334444 || !r.threads[0].framesIncomplete) return 19;
+    si(164,0x10000,4); r=readCrashDump(i386); if(!r.error.empty() || !r.threads[0].frames.empty()) return 20;
+    si(164,0x10001,4); si(100,199,4); r=readCrashDump(i386); if(!r.error.empty() || !r.threads[0].frames.empty()) return 21;
+    si(100,200,4); si(164+180,0x1009,4); r=readCrashDump(i386); if(!r.error.empty() || r.threads[0].frames.size()!=1) return 22;
+    si(164+180,0x101c,4); r=readCrashDump(i386); if(!r.error.empty() || r.threads[0].frames.size()!=1) return 23;
+    si(164+180,0x1008,4); si(364+8,0x1008,4); r=readCrashDump(i386); if(!r.error.empty() || r.threads[0].frames.size()!=2) return 24;
+    sz(120,0,2); sz(344,0x10001,4); sz(344+196,0x1000,4); sz(344+184,0x1111,4);
+    sz(600,0x10001,4); sz(600+196,0x1000,4); sz(600+184,0x2222,4);
+    r=readCrashDump(z); if(!r.error.empty() || r.architecture!="x86" || r.threads.size()!=1 || r.threads[0].frames.size()!=1 || r.threads[0].frames[0].address!=0x2222) return 25;
     return 0;
 }

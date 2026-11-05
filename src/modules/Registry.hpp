@@ -10,6 +10,7 @@ namespace lucid::modules {
 struct RegistryEntry {
     std::string id, package, version, name, description;
     std::vector<std::string> requirements;
+    bool nameProvided = false, descriptionProvided = false, requirementsProvided = false;
 };
 using RegistryRequest = std::function<bool(std::string_view, const std::vector<std::string>&,
                                            std::string&, std::string&)>;
@@ -23,6 +24,9 @@ using RegistryRequest = std::function<bool(std::string_view, const std::vector<s
 // can be moved by the publisher; layer digest validation is not a signature.
 [[nodiscard]] bool parseCatalog(std::string_view json, std::vector<RegistryEntry>& entries,
                                 std::string& error);
+// Catalog metadata is advisory but must not contradict a selected package's
+// manifest. A catalog version is an OCI tag and need not equal manifest version.
+[[nodiscard]] bool catalogManifestMatches(const RegistryEntry& entry, std::string_view manifest, std::string& error);
 // Fetch a single Lucid JSON layer from a public GHCR OCI package, verifying its digest.
 [[nodiscard]] bool fetchPackage(std::string_view package, std::string_view version,
                                 std::string_view mediaType, std::string& contents,

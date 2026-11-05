@@ -22,5 +22,11 @@ int main() {
 #if !defined(_WIN32)
     auto result=runCoverageGenerator(project,plan,true);if(!result.error.empty() || result.exitCode || !fs::exists(root/"generated.info"))return 6;
 #endif
+    const auto benchmarkConfig=std::string("{\"executable\":\"")+executable.generic_string()+"\",\"arguments\":[],\"report\":\"bench.json\",\"format\":\"benchmark\"}";
+    std::ofstream(root/"benchmark.json")<<benchmarkConfig;
+    auto benchmark=prepareCoverageRun(project,"benchmark.json",ReportRunKind::Benchmark);
+    if(!benchmark.error.empty() || benchmark.reportPath!="bench.json" || benchmark.kind!=ReportRunKind::Benchmark) return 7;
+    if(prepareCoverageRun(project,"benchmark.json").error.empty() || prepareCoverageRun(project,"coverage.json",ReportRunKind::Benchmark).error.empty()) return 8;
+    if(runCoverageGenerator(project,benchmark,false).error.empty()) return 9;
     fs::remove_all(root);return 0;
 }

@@ -1,4 +1,5 @@
 #include "modules/Registry.hpp"
+#include "modules/Modules.hpp"
 
 #include "editor/json/Json.hpp"
 #include <curl/curl.h>
@@ -142,12 +143,28 @@ bool parseCatalog(std::string_view text, std::vector<RegistryEntry>& entries, st
         entries.push_back({id->stringValue, package->stringValue, version->stringValue,
                            name ? name->stringValue : std::string{},
                            description ? description->stringValue : std::string{}, {}});
+        entries.back().nameProvided = name != nullptr;
+        entries.back().descriptionProvided = description != nullptr;
+        entries.back().requirementsProvided = requirements != nullptr;
         if (requirements) for (const auto& capability : requirements->children) {
             auto& values = entries.back().requirements;
             if (capability.type != editor::JsonType::String || capability.stringValue.empty() || capability.stringValue.size() > 80 ||
                 std::find(values.begin(), values.end(), capability.stringValue) != values.end()) { entries.clear(); error = "Invalid module catalog requirements"; return false; }
             values.push_back(capability.stringValue);
         }
+    }
+    error.clear(); return true;
+}
+
+bool catalogManifestMatches(const RegistryEntry& entry, std::string_view manifest, std::string& error) {
+    const auto module = preview(entry.id, manifest);
+    if (!module.valid) { error = "Invalid downloaded module manifest"; return false; }
+    if ((entry.nameProvided && entry.name != module.name) ||
+        (entry.descriptionProvided && entry.description != module.description) ||
+        (entry.requirementsProvided && (entry.requirements.size() != module.requirements.size() ||
+          !std::is_permutation(entry.requirements.begin(), entry.requirements.end(), module.requirements.begin())))) {
+        error = "Module metadata differs from the selected catalog entry; refresh the catalog";
+        return false;
     }
     error.clear(); return true;
 }

@@ -461,7 +461,11 @@ private:
     std::future<BenchmarkResult> m_benchmarkFuture;
     std::shared_ptr<std::atomic_bool> m_benchmarkCancel;
     modules::BenchmarkComparison m_benchmarkComparison;
-    std::string m_benchmarkRoot, m_benchmarkBaseline;
+    std::string m_benchmarkRoot, m_benchmarkBaseline, m_benchmarkRunModule, m_benchmarkRunCandidate;
+    modules::CoverageRunPlan m_benchmarkRunPlan;
+    std::future<modules::ModuleProcessResult> m_benchmarkRunFuture;
+    std::shared_ptr<std::atomic_bool> m_benchmarkRunCancel;
+    int m_benchmarkRunStage = 0;
     std::optional<std::size_t> m_benchmarkSelected;
     int m_benchmarkFilter = 0;
     bool m_benchmarkSelectingCandidate = false, m_benchmarkShowing = false;

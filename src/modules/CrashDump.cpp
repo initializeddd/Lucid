@@ -92,8 +92,8 @@ CrashDump readCrashDump(std::string_view bytes, std::size_t threadLimit, std::si
             exceptionContextRva = ctxRva; exceptionContextSize = ctxSize;
         }
     }
-    // AMD64 CONTEXT uses Windows-defined offsets. Do not interpret a different
-    // architecture or a truncated context as an AMD64 register set.
+    // Windows AMD64 and x86 CONTEXT structures have different layouts. Only
+    // read control registers when the matching architecture flag is present.
     for (std::size_t i = 0; i < out.threads.size(); ++i) {
         auto& thread = out.threads[i]; const auto& data = threadData[i];
         thread.framesIncomplete = true;
@@ -101,20 +101,23 @@ CrashDump readCrashDump(std::string_view bytes, std::size_t threadLimit, std::si
         if (out.exception.present && out.exception.threadId == thread.id && exceptionContextSize) {
             contextRva = exceptionContextRva; contextSize = exceptionContextSize;
         }
-        if (out.architecture != "x86-64" || contextSize < 256) continue;
+        const bool x64=out.architecture=="x86-64", x86=out.architecture=="x86";
+        if ((!x64 && !x86) || contextSize < (x64 ? 256U : 200U)) continue;
         std::uint64_t flags = 0, pc = 0, sp = 0, bp = 0;
-        if (!r.read(contextRva + 48, 4, flags) || (flags & 0x100001U) != 0x100001U ||
-            !r.read(contextRva + 152, 8, sp) || !r.read(contextRva + 160, 8, bp) ||
-            !r.read(contextRva + 248, 8, pc) || !pc) continue;
+        const auto width=x64 ? 8U : 4U;
+        const auto required=x64 ? 0x100001U : 0x10001U;
+        if (!r.read(contextRva + (x64 ? 48 : 0), 4, flags) || (flags & required) != required ||
+            !r.read(contextRva + (x64 ? 152 : 196), width, sp) || !r.read(contextRva + (x64 ? 160 : 180), width, bp) ||
+            !r.read(contextRva + (x64 ? 248 : 184), width, pc) || !pc) continue;
         thread.frames.push_back({pc, sp, CrashFrameSource::Context});
         if (thread.stackBytes > std::numeric_limits<std::uint64_t>::max() - thread.stackStart) continue;
         const auto end = thread.stackStart + thread.stackBytes;
         for (std::size_t frame = 1; frame < 64; ++frame) {
-            if ((bp & 7U) || bp < sp || bp < thread.stackStart || bp > end || end - bp < 16) break;
+            if ((bp & (width-1U)) || bp < sp || bp < thread.stackStart || bp > end || end - bp < 2U*width) break;
             const auto offset = data.stackRva + (bp - thread.stackStart);
             std::uint64_t next = 0, returnAddress = 0;
-            if (!r.read(offset, 8, next) || !r.read(offset + 8, 8, returnAddress) || !returnAddress) break;
-            thread.frames.push_back({returnAddress, bp + 16, CrashFrameSource::FramePointerHeuristic});
+            if (!r.read(offset, width, next) || !r.read(offset + width, width, returnAddress) || !returnAddress) break;
+            thread.frames.push_back({returnAddress, bp + 2U*width, CrashFrameSource::FramePointerHeuristic});
             if (!next || next <= bp) break;
             bp = next;
         }

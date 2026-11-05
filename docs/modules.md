@@ -26,6 +26,9 @@ To publish a module, package its `module.json` as the single OCI layer with
 media type `application/vnd.lucid.module.v1+json`. Catalog entries contain an
 `id`, a GitHub Container Registry `package` (`owner/name`), and a `version`;
 optional `name` and `description` fields make entries easier to find.
+When the catalog provides a name, description or capability list, Lucid checks
+those fields against the downloaded manifest before showing its preview. A mismatch
+requires a catalog refresh; an OCI version tag need not equal the manifest's version.
 The catalog is an OCI package with one layer of type
 `application/vnd.lucid.catalog.v1+json`. See the starter module and
 `.github/workflows/publish-modules.yml` for examples. The publishing workflow
@@ -462,7 +465,13 @@ estimate is implied. Google Benchmark repetitions are averaged; sample ranges
 and standard deviation are shown when available. Time units `ns`, `us`, `ms`
 and `s` are converted for comparison while the original values and units remain
 visible. Other mismatched units remain incomparable. Significance tests are not
-performed, and the module does not run benchmarks.
+performed. **Run configured benchmark** reads a project-relative JSON configuration such as
+`{"executable":"/absolute/path/to/benchmark","arguments":["--output=bench.json"],"report":"bench.json","format":"benchmark"}`.
+Review the executable and arguments before confirmation. The command runs from the
+project root with your privileges, can execute code or use the network, and is
+bounded and cancellable. It may leave changes after cancellation. After success,
+choose a baseline; the configured candidate path is prefilled for comparison.
+An existing report may remain unchanged or stale even when the command succeeds.
 
 Binary Inspector reads a project-local file of up to 128 MiB without executing it.
 It shows architecture, sections, available symbols and linked libraries for ELF,
@@ -653,7 +662,7 @@ and active target management are not supported.
 
 Crash Dump Reader inspects a project-local minidump up to 128 MiB without uploading
 it. It shows available exception, thread, architecture and loaded-module metadata.
-For supported x86-64 contexts it also shows the initial program counter and
+For supported Windows x86 and x86-64 contexts it also shows the initial program counter and
 frame-pointer candidates. These candidates are heuristic, may be wrong or
 incomplete, and are not a reliable stack unwind. The display is limited to 512
 threads, modules and frame candidates each. Minidumps can contain sensitive data.

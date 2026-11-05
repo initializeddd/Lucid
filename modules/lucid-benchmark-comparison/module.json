@@ -4,18 +4,23 @@
   "description": "Compare benchmark reports with descriptive variability; observed changes can reflect noise.",
   "requires": [
     "benchmark-comparison-v1",
-    "benchmark-samples-v1"
+    "benchmark-samples-v1",
+    "benchmark-run-v1"
   ],
   "permissions": {
     "project": true,
     "network": false,
-    "processes": false,
+    "processes": true,
     "settings": false
   },
   "commands": [
     {
       "title": "Compare benchmark reports",
       "action": "benchmark-comparison"
+    },
+    {
+      "title": "Run configured benchmark",
+      "action": "run-benchmark"
     }
   ]
 }

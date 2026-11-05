@@ -47,5 +47,11 @@ int main() {
     if (!packageModuleId("other/my.module", other, error) || id == other) return 15;
     if (!packageModuleId("owner/" + std::string(100,'a'), id, error) || id.size()!=80) return 16;
     if (packageModuleId("owner/../escape", id, error) || !id.empty()) return 17;
+    const std::string module = R"({"name":"Example","version":"1.0","description":"Example module","requires":["snippet-v1","snippet-placeholders-v2"],"permissions":{"project":false,"network":false,"processes":false,"settings":false},"commands":[{"title":"Insert","insert":"x"}]})";
+    if (!parseCatalog(R"({"modules":[{"id":"example","package":"owner/example","version":"latest","name":"Example","description":"Example module","requires":["snippet-placeholders-v2","snippet-v1"]}]})",entries,error) || !catalogManifestMatches(entries[0],module,error)) return 18;
+    entries[0].name="Different"; if (catalogManifestMatches(entries[0],module,error) || error.empty()) return 19;
+    entries[0].name="Example"; entries[0].requirements.clear(); if (catalogManifestMatches(entries[0],module,error)) return 20;
+    if (!parseCatalog(R"({"modules":[{"id":"example","package":"owner/example","version":"latest"}]})",entries,error) || !catalogManifestMatches(entries[0],module,error)) return 21;
+    if (catalogManifestMatches(entries[0],"{}",error)) return 22;
     return 0;
 }

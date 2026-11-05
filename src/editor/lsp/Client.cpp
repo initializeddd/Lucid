@@ -1,6 +1,8 @@
 #include "editor/lsp/Client.hpp"
 #include "editor/json/Json.hpp"
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 namespace lucid::editor::lsp {
 std::string fileUri(const std::filesystem::path& path) {
@@ -110,7 +112,13 @@ bool Client::cancel(std::uint64_t id, std::string& error) {
 bool Client::poll(std::vector<std::string>& messages, std::string& error) {
     std::string output; std::vector<std::string> incoming;
     const auto fail = [this]() { close(); return false; };
-    if (!m_process.poll(output, error) || !m_decoder.append(output, incoming, error)) return fail();
+    if (!m_process.poll(output, error)) return fail();
+    if (std::getenv("LUCID_LSP_DIAGNOSTIC") && !output.empty()) {
+        std::fprintf(stderr, "client bytes=%zu hex=", output.size());
+        for (unsigned char byte : output) std::fprintf(stderr, "%02x", byte);
+        std::fprintf(stderr, "\n");
+    }
+    if (!m_decoder.append(output, incoming, error)) return fail();
     for (auto& body : incoming) {
         JsonError parseError; const auto json = parseJson(body, parseError);
         if (!json || json->type != JsonType::Object) { error = "Invalid language server response"; return fail(); }

@@ -28,6 +28,7 @@ int main() {
         std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
         const char* old = std::getenv("PATH"); const bool hadPath = old != nullptr; const std::string oldPath = old ? old : "";
         if (setenv("PATH", fakeDir.c_str(), 1) != 0) return 30;
+        setenv("LUCID_LSP_DIAGNOSTIC", "1", 1);
         Client capabilities; std::string error; std::vector<std::string> messages;
         const bool started = capabilities.start(fakeDir, error);
         if (hadPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
@@ -66,7 +67,7 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (!receivedCancel) { std::ifstream recorded(fakeDir / "received"); const std::string data((std::istreambuf_iterator<char>(recorded)), {}); std::fprintf(stderr, "cancel test failed: error=%s received=%s\n", error.c_str(), data.c_str()); return 36; }
-        capabilities.close(); std::filesystem::remove_all(fakeDir);
+        capabilities.close(); unsetenv("LUCID_LSP_DIAGNOSTIC"); std::filesystem::remove_all(fakeDir);
         if (capabilities.supports("textDocument/completion")) return 34;
     }
     {

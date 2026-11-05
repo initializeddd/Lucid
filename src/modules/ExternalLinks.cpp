@@ -107,7 +107,7 @@ LinkCheck checkApprovedExternalLink(std::string_view url, const std::atomic_bool
 }
 LinkCheck checkExternalLink(std::string_view url, const LinkTransport& transport, unsigned maxRedirects) {
     init(); std::string current; if (!transport || !normalize(url,current)) return {LinkState::Unverified,0,"Invalid or credential-bearing URL"};
-    maxRedirects=std::min(maxRedirects, 10u);
+    maxRedirects=(std::min)(maxRedirects, 10u);
     for (unsigned redirects=0;;) {
         auto response=transport(current,true);
         if (!response.error.empty()) return {LinkState::Unverified,response.status,"Request failed"};

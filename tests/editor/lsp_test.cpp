@@ -43,24 +43,26 @@ int main() {
             !capabilities.supports("textDocument/formatting") || capabilities.supports("textDocument/references") ||
             capabilities.supports("textDocument/rangeFormatting") || capabilities.request("textDocument/references", "{}", requestId, error) ||
             requestId != 0 || error.find("does not support") == std::string::npos) { std::fprintf(stderr, "capabilities test failed: ready=%d error=%s messages=%zu\n", capabilities.ready(), error.c_str(), messages.size());
-            lucid::debug::AdapterProcess probe; std::string probeError, bytes, chunk;
-            setenv("PATH", fakeDir.c_str(), 1);
-            const bool probeStarted = probe.start("clangd", {"--background-index"}, probeError);
-            if (hadPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
-            if (probeStarted) {
-                if (!probe.send(lucid::debug::frame(R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})"), probeError)) std::fprintf(stderr, "probe send failed: %s\n", probeError.c_str());
-                const auto probeLimit = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-                while (std::chrono::steady_clock::now() < probeLimit) {
-                    if (!probe.poll(chunk, probeError)) break;
-                    bytes += chunk;
-                    if (bytes.size() >= response.size() + config.size()) break;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            for (int variant = 0; variant < 4; ++variant) {
+                lucid::debug::AdapterProcess probe; std::string probeError, bytes, chunk;
+                const auto path = variant == 3 ? std::string("clangd") : (fakeDir / "clangd").string();
+                setenv("PATH", fakeDir.c_str(), 1);
+                const bool probeStarted = probe.start(path, variant == 0 ? std::vector<std::string>{} : std::vector<std::string>{"--background-index"}, probeError);
+                if (hadPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
+                if (probeStarted) {
+                    if (variant >= 2 && !probe.send(lucid::debug::frame("{}"), probeError)) std::fprintf(stderr, "probe send failed: %s\n", probeError.c_str());
+                    const auto probeLimit = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                    while (std::chrono::steady_clock::now() < probeLimit) {
+                        if (!probe.poll(chunk, probeError)) break;
+                        bytes += chunk;
+                        if (bytes.size() >= response.size() + config.size()) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    probe.close();
                 }
-                probe.close();
+                std::fprintf(stderr, "probe variant=%d error=%s bytes=%zu\n", variant, probeError.c_str(), bytes.size());
             }
-            std::fprintf(stderr, "probe error=%s bytes=%zu hex=", probeError.c_str(), bytes.size());
-            for (unsigned char byte : bytes) std::fprintf(stderr, "%02x", byte);
-            std::fprintf(stderr, "\n"); return 33; }
+            return 33; }
         if (capabilities.request("textDocument/signatureHelp", "{}", requestId, error) || requestId != 0 || error.find("does not support") == std::string::npos) return 42;
         if (!capabilities.request("textDocument/definition", "{}", requestId, error) || !capabilities.cancel(requestId, error)) return 35;
         bool receivedCancel = false;

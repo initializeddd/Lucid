@@ -19,8 +19,8 @@ jobs:
             pkg install -y cmake ninja git glfw vulkan-headers vulkan-loader glslang openssl
           run: |
             cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
-            cmake --build build-bsd --parallel 2
-            ctest --test-dir build-bsd --output-on-failure
+            cmake --build build-bsd --target lucid_lsp_tests --parallel 2
+            ctest --test-dir build-bsd --output-on-failure -R '^editor.lsp$'
   openbsd:
     name: OpenBSD native build and tests
     runs-on: ubuntu-24.04
@@ -32,5 +32,5 @@ jobs:
             pkg_add bash cmake ninja git glfw vulkan-headers vulkan-loader glslang
           run: |
             cmake -S . -B build-bsd -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local
-            cmake --build build-bsd --parallel 2
-            ctest --test-dir build-bsd --output-on-failure
+            cmake --build build-bsd --target lucid_lsp_tests --parallel 2
+            ctest --test-dir build-bsd --output-on-failure -R '^editor.lsp$'

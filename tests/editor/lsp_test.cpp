@@ -44,7 +44,11 @@ int main() {
             capabilities.supports("textDocument/rangeFormatting") || capabilities.request("textDocument/references", "{}", requestId, error) ||
             requestId != 0 || error.find("does not support") == std::string::npos) { std::fprintf(stderr, "capabilities test failed: ready=%d error=%s messages=%zu\n", capabilities.ready(), error.c_str(), messages.size());
             lucid::debug::AdapterProcess probe; std::string probeError, bytes, chunk;
-            if (probe.start((fakeDir / "clangd").string(), {}, probeError)) {
+            setenv("PATH", fakeDir.c_str(), 1);
+            const bool probeStarted = probe.start("clangd", {"--background-index"}, probeError);
+            if (hadPath) setenv("PATH", oldPath.c_str(), 1); else unsetenv("PATH");
+            if (probeStarted) {
+                if (!probe.send(lucid::debug::frame(R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})"), probeError)) std::fprintf(stderr, "probe send failed: %s\n", probeError.c_str());
                 const auto probeLimit = std::chrono::steady_clock::now() + std::chrono::seconds(1);
                 while (std::chrono::steady_clock::now() < probeLimit) {
                     if (!probe.poll(chunk, probeError)) break;

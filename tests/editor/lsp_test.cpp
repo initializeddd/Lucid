@@ -23,7 +23,7 @@ int main() {
         std::filesystem::create_directories(fakeDir);
         const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"completionProvider":{},"signatureHelpProvider":false,"workspaceSymbolProvider":true,"documentSymbolProvider":{},"definitionProvider":true,"declarationProvider":true,"referencesProvider":false,"documentFormattingProvider":{},"documentRangeFormattingProvider":false}}})";
         const std::string config = R"({"jsonrpc":"2.0","id":"config-1","method":"workspace/configuration","params":{"items":[{"section":"clangd"},{"section":"other"}]}})";
-        { std::ofstream script(fakeDir / "clangd"); script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nprintf 'Content-Length: " << config.size() << "\\r\\n\\r\\n%s' '" << config << "'\nexec /bin/cat > '" << (fakeDir / "received").string() << "'\n"; }
+        { std::ofstream script(fakeDir / "clangd"); script << "#!/bin/sh\n/usr/bin/printf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\n/usr/bin/printf 'Content-Length: " << config.size() << "\\r\\n\\r\\n%s' '" << config << "'\nexec /bin/cat > '" << (fakeDir / "received").string() << "'\n"; }
         std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
         const char* old = std::getenv("PATH"); const bool hadPath = old != nullptr; const std::string oldPath = old ? old : "";
         if (setenv("PATH", fakeDir.c_str(), 1) != 0) return 30;
@@ -82,7 +82,7 @@ int main() {
         std::filesystem::create_directories(fakeDir);
         const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-8"}}})";
         { std::ofstream script(fakeDir / "clangd");
-          script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/sleep 5\n"; }
+          script << "#!/bin/sh\n/usr/bin/printf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/sleep 5\n"; }
         std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
         const char* pathValue = std::getenv("PATH"); const bool hadPath = pathValue != nullptr;
         const std::string oldPath = pathValue ? pathValue : "";
@@ -112,7 +112,7 @@ int main() {
         std::filesystem::create_directories(fakeDir);
         const auto interpreter = fakeDir / "chosen python";
         const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"completionProvider":{}}}})";
-        { std::ofstream script(interpreter); script << "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" << (fakeDir / "args").string() << "'\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/cat > /dev/null\n"; }
+        { std::ofstream script(interpreter); script << "#!/bin/sh\n/usr/bin/printf '%s\\n' \"$@\" > '" << (fakeDir / "args").string() << "'\n/usr/bin/printf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/cat > /dev/null\n"; }
         std::filesystem::permissions(interpreter, std::filesystem::perms::owner_all);
         Client python; std::string error; std::vector<std::string> messages;
         if (python.startPython(fakeDir, "relative-python", error) || python.alive()) return 43;

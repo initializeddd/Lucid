@@ -79,6 +79,8 @@ def collect(owner):
             raise ValueError(f"Invalid capability requirements: {path}")
         if "snippet-linked-v1" in requirements and "snippet-placeholders-v2" not in requirements:
             raise ValueError(f"Linked fields require multiple snippet placeholders: {path}")
+        if "crash-ips-breakpad-v1" in requirements and "crash-ips-source-map-v1" not in requirements:
+            raise ValueError(f"IPS Breakpad symbols require IPS source mapping: {path}")
         permissions, commands = manifest.get("permissions"), manifest.get("commands")
         if not isinstance(permissions, dict) or set(permissions) not in ({"project", "network", "processes", "settings"}, {"project", "network", "processes", "settings", "devices"}) or ("devices" in permissions and not isinstance(permissions["devices"], bool)) or not isinstance(permissions["project"], bool) or not isinstance(permissions["processes"], bool) or not isinstance(permissions["settings"], bool) or not isinstance(permissions["network"], bool):
             raise ValueError(f"Unsupported permissions: {path}")
@@ -195,7 +197,7 @@ def collect(owner):
             raise ValueError(f"SQL column inspection requires project access and a query command: {path}")
         if "api-collection-edit-v1" in requirements and not any(command.get("action") == "edit-api-collection" for command in commands):
             raise ValueError(f"API collection editing requires an editing command: {path}")
-        if ("dependency-risk-go-v1" in requirements or "dependency-risk-cargo-v1" in requirements or "dependency-provenance-v1" in requirements) and ("dependency-risk-review-v1" not in requirements or not permissions["network"] or not any(command.get("action") == "review-dependency-risk" for command in commands)):
+        if ("dependency-risk-go-v1" in requirements or "dependency-risk-cargo-v1" in requirements or "dependency-risk-pypi-v1" in requirements or "dependency-provenance-v1" in requirements) and ("dependency-risk-review-v1" not in requirements or not permissions["network"] or not any(command.get("action") == "review-dependency-risk" for command in commands)):
             raise ValueError(f"Extended dependency review requires the dependency review capability and command: {path}")
         if permissions["network"] and not any(command.get("action") in ("markdown-external-links", "install-python-pylsp", "web-preview", "fetch-pull-request", "open-api-requests", "open-api-environment", "review-dependency-risk", "inspect-containers", "configured-container-actions") for command in commands):
             raise ValueError(f"Unsupported network permission: {path}")

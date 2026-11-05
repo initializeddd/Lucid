@@ -596,6 +596,7 @@ private:
     std::shared_ptr<std::atomic_bool> m_crashCancel;
     modules::CrashDump m_crashDump;
     modules::CrashSourceMap m_crashSourceMap;
+    bool m_crashMapRequiresIpsBreakpad = false;
     std::string m_crashMapIdentity;
     bool m_crashMapInput = false;
     std::string m_crashRoot;

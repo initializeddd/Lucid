@@ -26,7 +26,7 @@ BreakpadSymbols parseBreakpadSymbols(std::string_view text, std::size_t maxBytes
         if (kind=="MODULE") {
             auto os=token(rest), arch=token(rest), id=token(rest); while(!rest.empty() && rest.front()==' ') rest.remove_prefix(1);
             if (!module.empty() || !clean(os) || !clean(arch) || !clean(id) || !clean(rest)) return fail("Invalid Breakpad MODULE");
-            module=std::string(rest); out.module=module; out.architecture=std::string(arch); out.debugId=std::string(id); haveFunction=false;
+            module=std::string(rest); out.module=module; out.architecture=std::string(arch); out.operatingSystem=std::string(os); out.debugId=std::string(id); haveFunction=false;
         } else if (kind=="FILE") {
             std::uint64_t id=0; auto number=token(rest); while(!rest.empty() && rest.front()==' ') rest.remove_prefix(1);
             if (!numeric(number,10,id) || !pathSafe(rest) || files.size()>=100000 || !files.emplace(id,std::string(rest)).second) return fail("Invalid Breakpad FILE"); haveFunction=false;

@@ -29,6 +29,9 @@ struct DependencyRiskReport {
 // Supports canonical crates.io registry entries in Cargo.lock v3/v4. Workspace,
 // Git and other registry entries are skipped and reported as coverage limits.
 [[nodiscard]] bool parseCargoDependencyRisk(std::string_view lockfile, DependencyRiskReport& report, std::string& error);
+// Reviews exact public-PyPI entries in Pipfile.lock; environment markers and
+// dependency reachability are not evaluated. No network request is made.
+[[nodiscard]] bool parsePipfileDependencyRisk(std::string_view lockfile, DependencyRiskReport& report, std::string& error);
 enum class DependencyArtifactStatus { Matched, Mismatched, Unsupported, Error, Cancelled };
 struct DependencyArtifactVerification {
     DependencyArtifactStatus status = DependencyArtifactStatus::Error;

@@ -9,16 +9,31 @@ extern "C" {
 
 namespace lucid::modules {
 namespace {
-struct Context { MarkdownPreview result; MarkdownBlock current; bool active = false, html = false; int listDepth = 0, quoteDepth = 0; std::size_t bytes = 0; };
+struct Context {
+    struct List { bool ordered; unsigned next; char delimiter; };
+    MarkdownPreview result; MarkdownBlock current; bool active = false, html = false; int listDepth = 0, quoteDepth = 0; std::size_t bytes = 0;
+    std::vector<List> lists;
+};
 int enterBlock(MD_BLOCKTYPE type, void* detail, void* data) {
     auto& c = *static_cast<Context*>(data);
     if (type == MD_BLOCK_HTML) { c.html = true; return 0; }
     if (type == MD_BLOCK_QUOTE) { ++c.quoteDepth; return 0; }
+    if (type == MD_BLOCK_UL) { c.lists.push_back({false,0,'.'}); return 0; }
+    if (type == MD_BLOCK_OL) { const auto* ordered=static_cast<MD_BLOCK_OL_DETAIL*>(detail); c.lists.push_back({true,ordered->start,ordered->mark_delimiter}); return 0; }
     if (type == MD_BLOCK_LI) {
         ++c.listDepth;
         if (c.active && !c.current.text.empty()) c.result.blocks.push_back(std::move(c.current));
         if (c.result.blocks.size() >= 10000) { c.result.truncated = true; return 1; }
-        c.current = {}; c.current.kind = MarkdownBlockKind::ListItem; c.active = true; return 0;
+        c.current = {}; c.current.kind = MarkdownBlockKind::ListItem; c.active = true;
+        if (!c.lists.empty() && c.lists.back().ordered) {
+            auto& list=c.lists.back(); c.current.text=std::to_string(list.next)+list.delimiter+" ";
+            if (list.next < std::numeric_limits<unsigned>::max()) ++list.next;
+        }
+        const auto* item=static_cast<MD_BLOCK_LI_DETAIL*>(detail);
+        if (item->is_task) c.current.text += item->task_mark == ' ' ? "[ ] " : "[x] ";
+        c.bytes += c.current.text.size();
+        if (c.bytes > 1024U*1024U) { c.result.truncated=true; return 1; }
+        return 0;
     }
     if (type != MD_BLOCK_H && type != MD_BLOCK_P && type != MD_BLOCK_CODE && type != MD_BLOCK_HR) return 0;
     if (type == MD_BLOCK_P && c.active && c.current.kind == MarkdownBlockKind::ListItem) return 0;
@@ -36,6 +51,7 @@ int leaveBlock(MD_BLOCKTYPE type, void*, void* data) {
     auto& c = *static_cast<Context*>(data);
     if (type == MD_BLOCK_HTML) { c.html = false; return 0; }
     if (type == MD_BLOCK_QUOTE) { --c.quoteDepth; return 0; }
+    if (type == MD_BLOCK_UL || type == MD_BLOCK_OL) { if (!c.lists.empty()) c.lists.pop_back(); return 0; }
     if (type == MD_BLOCK_LI) {
         if (c.active && c.current.kind == MarkdownBlockKind::ListItem) c.result.blocks.push_back(std::move(c.current));
         c.active = false; if (c.listDepth > 0) --c.listDepth; return 0;

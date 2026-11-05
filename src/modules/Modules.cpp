@@ -9,6 +9,8 @@
 #include <system_error>
 namespace lucid::modules {
 bool supportsCapability(std::string_view capability) noexcept {
+    if (capability == "crash-ips-breakpad-v1") return true;
+    if (capability == "dependency-risk-pypi-v1") return true;
     if (capability == "rust-suggestion-v1") return true;
     if (capability == "snippet-linked-v1") return true;
     if (capability == "snippet-indent-v1") return true;
@@ -68,6 +70,7 @@ Module parseManifest(std::string id, std::string_view text) {
         }
     }
     if (std::find(m.requirements.begin(),m.requirements.end(),"snippet-linked-v1")!=m.requirements.end() && std::find(m.requirements.begin(),m.requirements.end(),"snippet-placeholders-v2")==m.requirements.end()) {m.error="Linked fields require multiple placeholders";return m;}
+    if (std::find(m.requirements.begin(),m.requirements.end(),"crash-ips-breakpad-v1")!=m.requirements.end() && std::find(m.requirements.begin(),m.requirements.end(),"crash-ips-source-map-v1")==m.requirements.end()) {m.error="IPS Breakpad symbols require IPS source mapping";return m;}
     const auto* p = json->find("permissions"); const auto* c = json->find("commands");
     if (!p || p->type != JsonType::Object || (p->children.size() != 4 && p->children.size() != 5) || !boolField(*p, "project", m.project) ||
         !boolField(*p, "network", m.network) || !boolField(*p, "processes", m.processes) || !boolField(*p, "settings", m.settings) ||
@@ -106,7 +109,7 @@ Module parseManifest(std::string id, std::string_view text) {
     });
     if (unsupported != m.requirements.end()) m.error = "Requires unsupported capability: " + *unsupported;
     else if ((std::find(m.requirements.begin(), m.requirements.end(), "pull-request-review-v1") != m.requirements.end() || std::find(m.requirements.begin(), m.requirements.end(), "pull-request-comment-v1") != m.requirements.end()) && (!m.network || std::none_of(m.commands.begin(), m.commands.end(), [](const Command& c) { return c.action == "fetch-pull-request"; }))) m.error = "Pull request review requires network access and a pull request command";
-    else if ((std::find(m.requirements.begin(), m.requirements.end(), "dependency-risk-go-v1") != m.requirements.end() || std::find(m.requirements.begin(), m.requirements.end(), "dependency-risk-cargo-v1") != m.requirements.end() || std::find(m.requirements.begin(), m.requirements.end(), "dependency-provenance-v1") != m.requirements.end()) && (std::find(m.requirements.begin(), m.requirements.end(), "dependency-risk-review-v1") == m.requirements.end() || !m.network || std::none_of(m.commands.begin(), m.commands.end(), [](const Command& c) { return c.action == "review-dependency-risk"; }))) m.error = "Extended dependency review requires network access and a dependency review command";
+    else if ((std::find(m.requirements.begin(), m.requirements.end(), "dependency-risk-go-v1") != m.requirements.end() || std::find(m.requirements.begin(), m.requirements.end(), "dependency-risk-cargo-v1") != m.requirements.end() || std::find(m.requirements.begin(), m.requirements.end(), "dependency-risk-pypi-v1") != m.requirements.end() || std::find(m.requirements.begin(), m.requirements.end(), "dependency-provenance-v1") != m.requirements.end()) && (std::find(m.requirements.begin(), m.requirements.end(), "dependency-risk-review-v1") == m.requirements.end() || !m.network || std::none_of(m.commands.begin(), m.commands.end(), [](const Command& c) { return c.action == "review-dependency-risk"; }))) m.error = "Extended dependency review requires network access and a dependency review command";
     else if (std::find(m.requirements.begin(),m.requirements.end(),"cmake-build-target-v1")!=m.requirements.end() && (!m.project || !m.processes || std::find(m.requirements.begin(),m.requirements.end(),"cmake-codemodel-v1")==m.requirements.end() || std::none_of(m.commands.begin(),m.commands.end(),[](const Command& c){return c.action=="browse-cmake";}))) m.error="Target build requires CMake browsing and process access";
     else if (std::find(m.requirements.begin(),m.requirements.end(),"cmake-cache-values-v1")!=m.requirements.end() && (!m.project || std::find(m.requirements.begin(),m.requirements.end(),"cmake-cache-edit-v1")==m.requirements.end() || std::none_of(m.commands.begin(),m.commands.end(),[](const Command& c){return c.action=="edit-cmake-options";}))) m.error="Typed cache editing requires CMake cache edit access";
     else if (std::find(m.requirements.begin(),m.requirements.end(),"toolchain-configure-v1")!=m.requirements.end() && (!m.project || !m.processes || std::find(m.requirements.begin(),m.requirements.end(),"toolchain-profiles-v1")==m.requirements.end() || std::none_of(m.commands.begin(),m.commands.end(),[](const Command& c){return c.action=="inspect-toolchain-profiles";}))) m.error="Target configuration requires project, process and toolchain profile access";

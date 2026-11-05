@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 namespace lucid::modules {
-struct BreakpadSymbols { CrashSourceMap sourceMap; std::string module, debugId, architecture, error; bool incomplete = false; };
+struct BreakpadSymbols { CrashSourceMap sourceMap; std::string module, debugId, architecture, operatingSystem, error; bool incomplete = false; };
 enum class BreakpadIdentity { Match, Mismatch, Unavailable };
 // Match confirms metadata identity only, not trustworthy symbols or current source.
 [[nodiscard]] BreakpadIdentity compareBreakpadIdentity(const BreakpadSymbols& symbols, const CrashModule& module, std::string_view dumpArchitecture);

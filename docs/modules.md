@@ -189,7 +189,8 @@ has been verified on Windows; uncertain shutdown may leave a temporary profile.
 Markdown Studio can navigate ATX (`#`) and Setext headings in the current
 editor buffer, including unsaved text, while ignoring fenced code blocks. Its text preview shows
 headings, paragraphs, lists, quotes and code without executing raw HTML or loading
-remote images. Inline styling and table layout are simplified, and tables remain
+remote images. Task-list checkboxes and ordered-list numbering are retained in the
+text preview; the checkboxes are read-only. Inline styling and table layout are simplified, and tables remain
 text. The local link checker checks project-contained file and directory targets
 without making network requests. Filter missing or unchecked links and select a
 result to navigate to its label when a reliable source location is available;
@@ -646,7 +647,7 @@ remain unverified. Absolute FILE paths and PUBLIC-only symbols are not mapped. M
 candidates are unverified and may be wrong or stale; ambiguous matches are not
 navigable. Source must be inside the project, readable as text and contain the
 specified line; resolve unsaved edits before navigation. No PDB/DWARF parsing,
-automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Saved LLDB `thread backtrace all` text is also accepted within those limits, showing reported threads and frames as unverified, without navigation or symbolication. Unsupported LLDB records are marked incomplete. Legacy Apple crash report text is also accepted with the same limits; reported code type, exception, threads and frames are unverified and cannot be navigated. Unsupported sections are marked incomplete. Current JSON `.ips` reports are accepted for a bounded subset of exception, image and thread/frame metadata. The reader omits image paths and process details, but the input, image names and symbols can contain sensitive information. Addresses and symbols are unverified. An explicitly selected project-local TSV map can offer source navigation for a complete report with an unambiguous image name and non-overlapping matching range; the map and source remain unverified, and the same project and unsaved-edit checks apply. UUID identity is not checked, and Breakpad maps are not supported for IPS. Unsupported variants, thread state, symbolication and other debugger text formats are not supported.
+automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Saved LLDB `thread backtrace all` text is also accepted within those limits, showing reported threads and frames as unverified, without navigation or symbolication. Unsupported LLDB records are marked incomplete. Legacy Apple crash report text is also accepted with the same limits; reported code type, exception, threads and frames are unverified and cannot be navigated. Unsupported sections are marked incomplete. Current JSON `.ips` reports are accepted for a bounded subset of exception, image and thread/frame metadata. The reader omits image paths and process details, but the input, image names and symbols can contain sensitive information. Addresses and symbols are unverified. An explicitly selected project-local TSV map can offer source navigation for a complete report with an unambiguous image name and non-overlapping matching range; the map and source remain unverified, and the same project and unsaved-edit checks apply. TSV maps do not establish UUID identity. An explicitly selected local Breakpad .sym file can also provide IPS source candidates when its unique image name, Mac UUID-derived debug ID and architecture match the complete report. The match checks metadata only; neither the symbol file nor source contents are authenticated. Unsupported variants, thread state, symbolication and other debugger text formats are not supported.
 
 Rust Ownership Lens reads saved rustc or Cargo newline-delimited JSON diagnostics
 from the project. It presents supported ownership and borrowing errors, compiler
@@ -669,18 +670,23 @@ are marked incomplete. Save open edits first. The runner inherits Lucid's workin
 directory; other source files, lockfile and executable may change after review.
 
 Dependency Risk Review parses the open, possibly unsaved npm `package-lock.json`
-(v1/v2/v3), Go `go.sum`, or Cargo `Cargo.lock` (v3/v4) locally. npm v1 nested
+(v1/v2/v3), Go `go.sum`, Cargo `Cargo.lock` (v3/v4), or `Pipfile.lock` locally. npm v1 nested
 entries are checked but direct dependencies cannot be inferred from that lockfile
 alone. After the user confirms, it sends eligible package
 names, ecosystems and exact versions to `api.osv.dev` and shows returned advisory IDs. Selecting an ID
 offers a separate confirmation to fetch its summary, aliases, references and reported
-npm, Go or crates.io fixed versions; verify the affected range before upgrading. Escape
+npm, Go, crates.io or PyPI fixed versions; verify the affected range before upgrading. Escape
 cancels; skipped aliases, noncanonical sources and unresolved packages are
 reported as coverage limits. For Go, `go.sum` is checksum history, not the selected
 build graph: findings can include unused versions, and local replacements, missing
 checksums and go.mod-only entries are not assessed. Cargo review covers exact
 checksummed crates.io packages only; workspace, Git and alternative registry entries
 are skipped, and direct dependencies and enabled features or targets are not inferred.
+Pipfile.lock review includes exactly pinned canonical public-PyPI versions in its
+default and develop groups only when the lockfile declares the canonical HTTPS
+PyPI index with TLS verification. Path, Git and alternate-index entries and
+unsupported versions are skipped. Markers are not evaluated, installed packages
+and directness are not inferred, and artifact hashes are not verified.
 Unsupported multiline TOML is rejected. OSV data may be incomplete and
 findings do not establish exploitability or reachability. Other ecosystems and full
 dependency provenance are not yet supported.

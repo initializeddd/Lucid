@@ -455,7 +455,7 @@ struct ApplicationInteractionTest {
             app.m_moduleRoot = settingsTemp / "MarkdownModules"; std::string error;
             const std::string manifest = R"({"name":"Markdown","version":"1","permissions":{"project":false,"network":false,"processes":false,"settings":false},"commands":[{"title":"Outline","action":"markdown-outline"},{"title":"Preview","action":"markdown-preview"}]})";
             if (!modules::install(app.m_moduleRoot, "markdown", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "markdown", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 401;
-            app.m_filePath = "notes.md"; app.m_document = editor::Document::fromUtf8("# First\ntext\n## Second\n"); app.m_hasDocument = true; app.m_moduleSelected = 0; app.m_modulePage = 0;
+            app.m_filePath = "notes.md"; app.m_document = editor::Document::fromUtf8("# First\ntext\n## Second\n\n- [x] shipped\n- [ ] pending\n\n3. third\n4. fourth\n"); app.m_hasDocument = true; app.m_moduleSelected = 0; app.m_modulePage = 0;
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (!app.m_moduleMarkdownShowing || app.m_moduleMarkdownOutline.headings.size() != 2) return 402;
             auto second = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), 1);
@@ -474,6 +474,8 @@ struct ApplicationInteractionTest {
             while (app.m_markdownPreviewFuture.valid() && std::chrono::steady_clock::now() < previewDeadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             if (app.m_markdownPreviewFuture.valid() || app.m_markdownPreviewLines.empty() || app.m_markdownPreviewLines[0].first != "First" ||
                 app.m_markdownPreviewLines[0].second != ui::SuggestionKind::MarkdownHeading || app.m_document.toUtf8() != beforePreview || app.m_document.revision() != beforeRevision) return 408;
+            for (const auto* expected : {"• [x] shipped", "• [ ] pending", "• 3. third", "• 4. fourth"})
+                if (std::none_of(app.m_markdownPreviewLines.begin(), app.m_markdownPreviewLines.end(), [&](const auto& line) { return line.first == expected; })) return 1130;
             input::KeyEvent dismissPreview{}; dismissPreview.key = input::Key::Escape; dismissPreview.action = input::KeyAction::Press; app.handleKey(dismissPreview);
             if (app.m_markdownPreviewShowing || app.m_searchBar.kind() != ui::PromptKind::ModuleCommands) return 409;
             app.m_document = editor::Document::fromUtf8("Intro\n=====\n\nText\n"); app.m_moduleMarkdownShowing = false; app.m_modulePage = 0; app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
@@ -1249,7 +1251,7 @@ struct ApplicationInteractionTest {
         {
             const auto oldRoot = app.m_moduleRoot; auto oldModules = app.m_modules; const auto oldSelected = app.m_moduleSelected; auto oldDocument = app.m_document; const auto oldPath = app.m_filePath;
             std::string error; app.m_moduleRoot = temp / "dependency-modules";
-            const std::string manifest = R"({"name":"Dependency","version":"1","requires":["dependency-risk-review-v1","dependency-risk-go-v1","dependency-risk-cargo-v1","dependency-provenance-v1"],"permissions":{"project":false,"network":true,"processes":false,"settings":false},"commands":[{"title":"Review","action":"review-dependency-risk"}]})";
+            const std::string manifest = R"({"name":"Dependency","version":"1","requires":["dependency-risk-review-v1","dependency-risk-go-v1","dependency-risk-cargo-v1","dependency-risk-pypi-v1","dependency-provenance-v1"],"permissions":{"project":false,"network":true,"processes":false,"settings":false},"commands":[{"title":"Review","action":"review-dependency-risk"}]})";
             if (!modules::install(app.m_moduleRoot, "dependency", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "dependency", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 560;
             app.m_document = editor::Document::fromUtf8(R"({"lockfileVersion":3,"packages":{"":{},"node_modules/foo":{"version":"1.2.3","resolved":"https://registry.npmjs.org/foo/-/foo-1.2.3.tgz"}}})");
             app.m_filePath = "package-lock.json"; app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
@@ -1307,6 +1309,12 @@ struct ApplicationInteractionTest {
             if (std::none_of(app.m_suggestions.begin(), app.m_suggestions.end(), [](const auto& item) { return item.path.find("crates.io packages with OSV") != std::string_view::npos; })) return 842;
             app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_dependencyShowing || app.m_dependencyFuture.valid()) return 843;
+            app.m_document = editor::Document::fromUtf8(R"({"_meta":{"sources":[{"name":"pypi","url":"https://pypi.org/simple","verify_ssl":true}]},"default":{"Requests":{"version":"==2.32.3"}},"develop":{}})");
+            app.m_filePath="Pipfile.lock"; app.m_modulePage=0; app.m_selectedSuggestion=0; app.applyModuleCommand();
+            const auto pipDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+            while(app.m_dependencyFuture.valid() && std::chrono::steady_clock::now()<pipDeadline) {app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(!app.m_dependencyShowing || !app.m_dependencyReady || app.m_dependencyReport.packages.size()!=1 || app.m_dependencyReport.packages[0].ecosystem!="PyPI" || app.m_dependencyReport.packages[0].name!="requests") return 1135;
+            app.m_modulePage=0; app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand();
             app.m_document = std::move(oldDocument); app.m_filePath = oldPath; app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected; app.m_searchBar.close();
         }
         {
@@ -1805,7 +1813,7 @@ struct ApplicationInteractionTest {
             put(56, 1, 4); put(60, 42, 4); put(84, 0x1234, 8); put(108, 42, 4); put(116, 0xc0000005, 4); put(132, 0xdeadbeef, 8);
             { std::ofstream out(temp / "nested" / "crash.dmp", std::ios::binary); out.write(dump.data(), static_cast<std::streamsize>(dump.size())); }
             app.m_moduleRoot = temp / "crash-modules"; std::string error;
-            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-lldb-text-v1","crash-apple-text-v1","crash-apple-ips-v1","crash-ips-source-map-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
+            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-lldb-text-v1","crash-apple-text-v1","crash-apple-ips-v1","crash-ips-source-map-v1","crash-ips-breakpad-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
             if (!modules::install(app.m_moduleRoot, "crash", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "crash", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 490;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleCrashPath) return 491;
@@ -1876,7 +1884,12 @@ struct ApplicationInteractionTest {
             bool foundIpsMap=false;for(std::size_t page=0;page<5 && !foundIpsMap;++page){app.m_modulePage=page;app.refreshSuggestions();auto row=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220);if(row!=app.m_moduleChoices.end()){app.m_selectedSuggestion=static_cast<int>(row-app.m_moduleChoices.begin());foundIpsMap=true;}}if(!foundIpsMap)return 1110;
             app.applyModuleCommand();app.m_searchBar.setQuery("ips-map.tsv");app.applyModuleCommand();if(app.m_crashMapInput || app.m_crashSourceMap.ranges.size()!=1)return 1111;
             app.m_modulePage=0;app.refreshSuggestions();if(std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0)!=app.m_moduleChoices.end())return 1112;
-            app.m_crashIps.incomplete=false; app.openFile("example.txt",false);app.m_searchBar.open(ui::PromptKind::ModuleCommands);
+            app.m_crashIps.incomplete=false; app.m_crashIps.images[0].uuid="00112233-4455-6677-8899-aabbccddeeff";
+            { std::ofstream out(temp / "nested" / "ips.sym"); out << "MODULE mac arm64 00112233445566778899AABBCCDDEEFF0 App\nFILE 0 crash-source.cpp\nFUNC 0 100 0 main\n0 100 2 0\n"; }
+            foundIpsMap=false;for(std::size_t page=0;page<5 && !foundIpsMap;++page){app.m_modulePage=page;app.refreshSuggestions();auto row=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220);if(row!=app.m_moduleChoices.end()){app.m_selectedSuggestion=static_cast<int>(row-app.m_moduleChoices.begin());foundIpsMap=true;}}if(!foundIpsMap)return 1401;
+            app.applyModuleCommand();app.m_searchBar.setQuery("ips.sym");app.applyModuleCommand();if(app.m_crashMapInput || !app.m_crashMapRequiresIpsBreakpad || app.m_crashSourceMap.ranges.size()!=1 || app.m_crashMapIdentity.find("UUID")==std::string::npos)return 1402;
+            std::filesystem::remove(temp / "nested" / "ips.sym");
+            app.openFile("example.txt",false);app.m_searchBar.open(ui::PromptKind::ModuleCommands);
             const auto chooseIpsFrame=[&](){for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();auto row=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0);if(row!=app.m_moduleChoices.end()){app.m_selectedSuggestion=static_cast<int>(row-app.m_moduleChoices.begin());return true;}}return false;};
             if(!chooseIpsFrame())return 1113;app.m_document.insert(U'X');app.applyModuleCommand();if(!app.m_commandStatusIsError || app.m_filePath=="crash-source.cpp")return 1114;app.m_document.undo();if(!chooseIpsFrame())return 1115;app.applyModuleCommand();if(app.m_filePath!="crash-source.cpp" || app.m_document.cursorLine()!=1 || app.m_searchBar.isOpen())return 1116;
             std::filesystem::remove(temp / "nested" / "ips-map.tsv");

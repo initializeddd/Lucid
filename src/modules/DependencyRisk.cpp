@@ -88,6 +88,23 @@ bool crateName(std::string_view name) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
     });
 }
+std::string pythonName(std::string_view name) {
+    const auto alnum=[](unsigned char c) { return (c>='a'&&c<='z') || (c>='A'&&c<='Z') || (c>='0'&&c<='9'); };
+    if(name.empty() || name.size()>214 || !alnum(static_cast<unsigned char>(name.front())) || !alnum(static_cast<unsigned char>(name.back()))) return {};
+    std::string out; bool separator=false;
+    for(unsigned char c:name) {
+        if(c=='.' || c=='_' || c=='-') { if(!separator) out+='-'; separator=true; }
+        else if(alnum(c)) {out+=static_cast<char>(c>='A' && c<='Z' ? c-'A'+'a' : c);separator=false;}
+        else return {};
+    }
+    return out;
+}
+bool pythonVersion(std::string_view version) {
+    // Conservative canonical PEP 440 public versions. Other valid forms are
+    // skipped rather than normalized or mistaken for exact public releases.
+    static const std::regex pattern(R"(^([0-9]+!)?[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$)");
+    return !version.empty() && version.size()<=256 && std::regex_match(version.begin(),version.end(),pattern);
+}
 bool supportedSri(std::string_view value) {
     std::size_t prefix = 0, encoded = 0, padding = 0;
     if (value.starts_with("sha256-")) { prefix = 7; encoded = 44; padding = 1; }
@@ -101,6 +118,47 @@ bool supportedSri(std::string_view value) {
     }
     return std::all_of(value.end() - static_cast<std::ptrdiff_t>(padding), value.end(), [](char c) { return c == '='; });
 }
+}
+bool parsePipfileDependencyRisk(std::string_view lockfile, DependencyRiskReport& report, std::string& error) {
+    report={}; error.clear(); JsonValue json;
+    if(!parse(lockfile,json,error)) return false;
+    const auto* meta=field(json,"_meta",JsonType::Object);
+    const auto* sources=meta ? field(*meta,"sources",JsonType::Array) : nullptr;
+    if(!sources || sources->children.empty() || sources->children.size()>64) {error="Pipfile.lock sources are missing or invalid.";return false;}
+    std::set<std::string> names; std::string publicIndex;
+    for(const auto& source:sources->children) {
+        if(source.type!=JsonType::Object) {error="Invalid Pipfile.lock source.";return false;}
+        const auto* name=field(source,"name",JsonType::String); const auto* url=field(source,"url",JsonType::String);
+        if(!name || !url || name->stringValue.empty() || name->stringValue.size()>128 || !names.insert(name->stringValue).second) {error="Invalid or duplicate Pipfile.lock source.";return false;}
+        if((url->stringValue=="https://pypi.org/simple" || url->stringValue=="https://pypi.org/simple/") && flag(source,"verify_ssl")) {
+            if(!publicIndex.empty()) {error="Ambiguous public PyPI sources.";return false;} publicIndex=name->stringValue;
+        }
+    }
+    const auto* firstName=field(sources->children.front(),"name",JsonType::String);
+    DependencyRiskReport result; std::set<std::pair<std::string,std::string>> seen; std::size_t visited=0,skipped=0,markerCount=0;
+    for(const auto* group:{"default","develop"}) {
+        const auto* entries=json.find(group); if(!entries) continue;
+        if(entries->type!=JsonType::Object) {error="Invalid Pipfile.lock dependency group.";return false;}
+        for(const auto& item:entries->children) {
+            if(++visited>maxPackages) {error="Too many lockfile packages.";return false;}
+            if(item.type!=JsonType::Object) {error="Invalid Pipfile.lock package entry.";return false;}
+            const auto name=pythonName(item.key); const auto* ver=field(item,"version",JsonType::String); const auto* index=item.find("index");
+            const bool validIndex=!publicIndex.empty() && (index ? index->type==JsonType::String && index->stringValue==publicIndex : firstName && firstName->stringValue==publicIndex);
+            const bool external=item.find("git") || item.find("path") || item.find("file") || item.find("url") || item.find("editable");
+            if(name.empty() || !ver || !ver->stringValue.starts_with("==") || !pythonVersion(std::string_view(ver->stringValue).substr(2)) || !validIndex || external) {++skipped;continue;}
+            const auto version=ver->stringValue.substr(2);
+            if(!seen.emplace(name,version).second) {++skipped;continue;}
+            if(item.find("markers")) ++markerCount;
+            result.packages.push_back({std::string(group)+"/"+item.key,name,version,"PyPI",false,std::string_view(group)=="develop",false,{}});
+            result.packages.back().declaredSource="Pipfile.lock declares public PyPI index; artifact source is unverified";
+        }
+    }
+    result.limitations.push_back("Only exactly pinned canonical public-PyPI entries in default and develop are assessed; other sources, unsupported versions and custom groups are skipped.");
+    result.limitations.push_back("Pipfile.lock markers are not evaluated; directness, installed environment and runtime reachability are not determined.");
+    result.limitations.push_back("OSV data may be incomplete; findings do not establish exploitability. Artifact hashes are not verified by this review.");
+    if(markerCount) result.limitations.push_back(std::to_string(markerCount)+" package entries have unevaluated markers.");
+    if(skipped) result.limitations.push_back(std::to_string(skipped)+" unsupported or duplicate package entries were skipped.");
+    report=std::move(result);return true;
 }
 bool parseCargoDependencyRisk(std::string_view lockfile, DependencyRiskReport& report, std::string& error) {
     report = {}; error.clear();
@@ -341,7 +399,7 @@ bool parseOsvDetail(std::string_view json, std::string_view expectedId, OsvDetai
             const auto* package = field(a, "package", JsonType::Object);
             const auto* ecosystem = package ? field(*package, "ecosystem", JsonType::String) : nullptr;
             const auto* name = package ? field(*package, "name", JsonType::String) : nullptr;
-            if (!ecosystem || (ecosystem->stringValue != "npm" && ecosystem->stringValue != "Go" && ecosystem->stringValue != "crates.io") || !name || !validIdentifier(name->stringValue, 512)) continue;
+            if (!ecosystem || (ecosystem->stringValue != "npm" && ecosystem->stringValue != "Go" && ecosystem->stringValue != "crates.io" && ecosystem->stringValue != "PyPI") || !name || !validIdentifier(name->stringValue, 512)) continue;
             const auto* ranges = a.find("ranges"); if (!ranges) continue;
             if (ranges->type != JsonType::Array || ranges->children.size() > 1000) { error = "Invalid affected ranges"; return false; }
             for (const auto& range : ranges->children) {
@@ -366,7 +424,8 @@ bool queryOsvAdvisories(DependencyRiskReport& report, const OsvTransport& transp
     for (const auto& package : report.packages) {
         if (!((package.ecosystem == "npm" && validIdentifier(package.name, 214) && exactVersion(package.version)) ||
               (package.ecosystem == "Go" && goModuleName(package.name) && goVersion(package.version)) ||
-              (package.ecosystem == "crates.io" && crateName(package.name) && exactVersion(package.version)))) { error = "Unsupported package identity."; return false; }
+              (package.ecosystem == "crates.io" && crateName(package.name) && exactVersion(package.version)) ||
+              (package.ecosystem == "PyPI" && !package.name.empty() && pythonName(package.name)==package.name && pythonVersion(package.version)))) { error = "Unsupported package identity."; return false; }
     }
     auto updated = report;
     for (auto& package : updated.packages) package.vulnerabilities.clear();

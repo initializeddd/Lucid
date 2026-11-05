@@ -25,6 +25,11 @@ int main() {
             rendered.blocks[2].kind != MarkdownBlockKind::ListItem) return 196;
         if (!parseMarkdownPreview({}, rendered, error) || !rendered.blocks.empty()) return 46;
         if (!parseMarkdownPreview("| a | b |\n|---|---|\n| x | y |\n", rendered, error) || rendered.blocks.empty() || rendered.blocks[0].text.find("| x | y |") == std::string::npos) return 47;
+        if (!parseMarkdownPreview("- [ ] draft\n- [x] done\n- [X] reviewed\n\n3. third\n4. fourth\n", rendered, error) || rendered.truncated || rendered.blocks.size()!=5 ||
+            rendered.blocks[0].text!="[ ] draft" || rendered.blocks[1].text!="[x] done" || rendered.blocks[2].text!="[x] reviewed" ||
+            rendered.blocks[3].text!="3. third" || rendered.blocks[4].text!="4. fourth") return 197;
+        if (!parseMarkdownPreview("5) outer\n   - [x] inner\n6) next\n", rendered, error) || rendered.blocks.size()!=3 ||
+            rendered.blocks[0].text!="5) outer" || rendered.blocks[1].text!="[x] inner" || rendered.blocks[2].text!="6) next") return 198;
     }
     {
         const auto document = lucid::editor::Document::fromUtf8("# Hello ##\n```cpp\n# not a heading\n```\n  ## Über\n####### no\n#bad\n#\n");

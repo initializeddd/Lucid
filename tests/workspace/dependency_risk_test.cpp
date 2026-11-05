@@ -92,5 +92,12 @@ int main() {
     ok = ok && !parseCargoDependencyRisk("version = 4\nx = \"\"\"multiline\"\"\"\n", report, error) && report.packages.empty();
     ok = ok && !parseCargoDependencyRisk("version = 4\n[[package]]\nname = \"x\"\ndependencies = [\n\"y\",\n", report, error) && report.packages.empty();
     ok = ok && !parseCargoDependencyRisk(std::string(8U * 1024U * 1024U + 1, 'x'), report, error) && report.packages.empty();
+    const std::string pip=R"({"_meta":{"sources":[{"name":"pypi","url":"https://pypi.org/simple","verify_ssl":true},{"name":"private","url":"https://private.example/simple","verify_ssl":true}]},"default":{"Requests":{"version":"==2.32.3","markers":"python_version >= '3.8'"},"bad":{"version":"==1.*"},"private":{"version":"==1.0","index":"private"},"local":{"version":"==1.0","path":"./x"}},"develop":{"Py_Test":{"version":"==8.3.0rc1","index":"pypi"}}})";
+    ok = ok && parsePipfileDependencyRisk(pip,report,error) && report.packages.size()==2 && report.packages[0].name=="requests" && report.packages[0].version=="2.32.3" && report.packages[0].ecosystem=="PyPI" && report.packages[1].name=="py-test" && report.packages[1].dev && report.limitations.size()==5;
+    calls=0;
+    const OsvTransport pipTransport=[&](std::string_view body,const std::atomic_bool*) -> OsvResponse {++calls; if(body.find("\"ecosystem\":\"PyPI\"")==std::string_view::npos || body.find("requests")==std::string_view::npos) return {500,{},{}}; return {200,R"({"results":[{},{}]})",{}};};
+    ok = ok && queryOsvAdvisories(report,pipTransport,error) && calls==1;
+    ok = ok && !parsePipfileDependencyRisk(R"({"_meta":{"sources":[{"name":"pypi","url":"https://pypi.org/simple","verify_ssl":true},{"name":"pypi","url":"https://bad","verify_ssl":true}]},"default":{}})",report,error) && report.packages.empty();
+    ok = ok && parsePipfileDependencyRisk(R"({"_meta":{"sources":[{"name":"pypi","url":"https://pypi.org/simple","verify_ssl":false}]},"default":{"foo":{"version":"==1.0"}}})",report,error) && report.packages.empty();
     return ok ? 0 : 1;
 }

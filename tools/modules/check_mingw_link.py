@@ -11,6 +11,12 @@ CASES = (
     ("diagram_preview", "DiagramPreview.cpp"),
     ("coverage_summary", "CoverageSummary.cpp"),
     ("test_runner_plus", "TestRunnerPlus.cpp"),
+    ("hex_buffer", "HexBuffer.cpp"),
+    ("rust_ownership", "RustOwnership.cpp"),
+    ("benchmark_comparison", "BenchmarkComparison.cpp"),
+    ("design_tokens", "DesignTokens.cpp"),
+    ("release_notes", "ReleaseNotes.cpp"),
+    ("accessibility_audit", "AccessibilityAudit.cpp"),
 )
 
 

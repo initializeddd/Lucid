@@ -34,7 +34,7 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
     bool inPeripheral=false, currentPeripheralIncomplete=false;
     auto warn = [&](const char* message) { if(inPeripheral) currentPeripheralIncomplete=true; out.incomplete=true; if (std::find(out.warnings.begin(),out.warnings.end(),message)==out.warnings.end() && out.warnings.size()<16) out.warnings.emplace_back(message); };
     Defaults deviceDefaults, peripheralDefaults; bool deviceRegistersSeen=false, peripheralRegistersSeen=false;
-    std::vector<PeripheralSource> peripheralSources; std::string peripheralDerivedFrom; std::size_t peripheralStart=0; bool peripheralOverrides=false;
+    std::vector<PeripheralSource> peripheralSources; std::string peripheralDerivedFrom; std::size_t peripheralStart=0; bool peripheralOverrides=false; std::optional<std::uint64_t> peripheralDim,peripheralIncrement; std::string peripheralIndexes;
     std::vector<Node> stack; stack.reserve(64); std::string peripheral, clusterName; std::optional<std::uint64_t> base, clusterOffset, clusterDim, clusterIncrement; std::string clusterIndexes; std::size_t clusterStart=0; bool inCluster=false, clusterRegistersSeen=false, clusterSkip=false; Reg reg; Field field; EnumItem enumItem; std::string enumUsage; bool peripheralSkip=false, inReg=false, inField=false, inEnum=false, rootSeen=false; std::size_t pos=0,nodes=0,totalFields=0,emittedFields=0,derivedComparisons=0,descriptionBytes=0,emittedEnums=0,constructedEnums=0,constructedDescriptions=0;
     while(pos<xml.size()) {
         auto lt=xml.find('<',pos); if(lt==std::string_view::npos) { if(!trim(xml.substr(pos)).empty()) return fail("Text outside XML root"); break; }
@@ -54,17 +54,18 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
             if ((name=="peripheral" && parentName!="peripherals") || (name=="register" && parentName!="registers" && parentName!="cluster") || (name=="field" && parentName!="fields")) return fail("Invalid SVD structure");
             const bool parentSkip=!stack.empty() && stack.back().skip; const bool registerArrayProperty = inReg && !inField && parentName=="register" && (name=="dim" || name=="dimIndex" || name=="dimIncrement");
             const bool fieldArrayProperty = inField && parentName=="field" && (name=="dim" || name=="dimIndex" || name=="dimIncrement");
+            const bool peripheralArrayProperty = inPeripheral && parentName=="peripheral" && (name=="dim" || name=="dimIndex" || name=="dimIncrement");
             const bool derived = attrs.find("derivedFrom")!=std::string_view::npos;
             const bool registerDerived = name=="register" && derived;
             const bool peripheralDerived = name=="peripheral" && derived;
             const bool supportedCluster = name=="cluster" && !inCluster && parentName=="registers" && !derived;
             const bool clusterArrayProperty = inCluster && !inReg && parentName=="cluster" && (name=="dim" || name=="dimIndex" || name=="dimIncrement");
-            const bool unsupported=(derived && !registerDerived && !peripheralDerived) || (name=="cluster" && !supportedCluster) || (!registerArrayProperty && !clusterArrayProperty && !fieldArrayProperty && (name=="dim" || name=="dimIndex" || name=="dimIncrement"));
+            const bool unsupported=(derived && !registerDerived && !peripheralDerived) || (name=="cluster" && !supportedCluster) || (!registerArrayProperty && !clusterArrayProperty && !fieldArrayProperty && !peripheralArrayProperty && (name=="dim" || name=="dimIndex" || name=="dimIncrement"));
             if(unsupported) {warn(name=="cluster" ? "Clusters are not expanded" : (name=="dim" || name=="dimIndex" || name=="dimIncrement") ? "Arrays are not expanded" : "derivedFrom definitions are not expanded"); if(name=="dim"||name=="dimIndex"||name=="dimIncrement") {if(inReg) reg.skip=true; else if(inCluster) {if(clusterRegistersSeen) return fail("Cluster array properties must precede registers"); clusterSkip=true;} else peripheralSkip=true;} }
             stack.push_back({std::string(name),{},parentSkip || unsupported});
             if(!parentSkip && name=="peripheral") {
                 inPeripheral=true;currentPeripheralIncomplete=false;peripheralStart=out.registers.size();peripheralDerivedFrom.clear();peripheralOverrides=false;
-                peripheral.clear();base.reset();peripheralDefaults={};peripheralRegistersSeen=false;peripheralSkip=unsupported;
+                peripheral.clear();base.reset();peripheralDefaults={};peripheralRegistersSeen=false;peripheralSkip=unsupported;peripheralDim.reset();peripheralIncrement.reset();peripheralIndexes.clear();
                 if(peripheralDerived) {auto a=trim(attrs);constexpr std::string_view key="derivedFrom";if(!a.starts_with(key))return fail("Unsupported peripheral derivedFrom attribute");a.remove_prefix(key.size());a=trim(a);if(a.empty()||a.front()!='=')return fail("Invalid peripheral derivedFrom attribute");a.remove_prefix(1);a=trim(a);if(a.size()<3||(a.front()!='\''&&a.front()!='"'))return fail("Invalid peripheral derivedFrom attribute");auto quote=a.front();a.remove_prefix(1);auto end=a.find(quote);if(end==std::string_view::npos||!trim(a.substr(end+1)).empty())return fail("Invalid peripheral derivedFrom attribute");auto ref=a.substr(0,end);if(ref.empty()||ref.size()>256||!std::all_of(ref.begin(),ref.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_';}))return fail("Unsupported peripheral derivedFrom reference");peripheralDerivedFrom=std::string(ref);}
             }
             if(!parentSkip && !peripheralDerivedFrom.empty() && parentName=="peripheral" && (name=="registers" || name=="size" || name=="access" || name=="resetValue" || name=="resetMask" || name=="protection")) {peripheralOverrides=true;stack.back().skip=true;warn("Derived peripheral overrides are not expanded");}
@@ -115,6 +116,11 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
             }
             if (inCluster && parent=="cluster" && (name=="size" || name=="access" || name=="resetValue" || name=="resetMask" || name=="protection")) warn("Cluster-level defaults are not inherited");
             if (inCluster && parent=="cluster" && (name=="name" || name=="addressOffset")) { if (clusterRegistersSeen) return fail("Cluster name and offset must precede registers"); if (name=="name") clusterName=std::string(value); else {if(!number(value,n)) return fail("Invalid cluster offset"); clusterOffset=n;} }
+            if(parent=="peripheral" && (name=="dim" || name=="dimIncrement" || name=="dimIndex")) {
+                if(peripheralRegistersSeen) return fail("Peripheral array properties must precede registers");
+                if(name=="dimIndex") {if(!peripheralIndexes.empty() || value.empty() || value.size()>4096)return fail("Invalid peripheral dimIndex");peripheralIndexes=std::string(value);}
+                else {if(!number(value,n))return fail("Invalid peripheral array value");auto& target=name=="dim"?peripheralDim:peripheralIncrement;if(target)return fail("Duplicate peripheral array value");target=n;}
+            }
             if(parent=="peripheral") {if(name=="name") peripheral=std::string(value); else if(name=="baseAddress") {if(!number(value,n)) return fail("Invalid peripheral base address");base=n;}}
             if (inReg && !inField && parent=="register" && (name=="dim" || name=="dimIncrement" || name=="dimIndex")) {
                 if (name=="dimIndex") { if (!reg.dimIndex.empty() || value.empty() || value.size()>4096) return fail("Invalid register dimIndex"); reg.dimIndex=std::string(value); }
@@ -187,6 +193,8 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
             }
         } else { if(name=="field") inField=false; if(name=="register") inReg=false; if(name=="enumeratedValue") inEnum=false; }
         if(name=="peripheral" && !node.skip) {
+            const bool peripheralArray=peripheralDim || peripheralIncrement || !peripheralIndexes.empty();
+            if(peripheralArray && !peripheralDerivedFrom.empty()) {warn("Derived peripheral arrays are not expanded");peripheralSkip=true;}
             if(!peripheralDerivedFrom.empty() && !peripheralOverrides && !peripheralSkip) {
                 const PeripheralSource* source=nullptr;bool ambiguous=false;
                 for(const auto& item:peripheralSources){if(++derivedComparisons>1000000){warn("Peripheral derivedFrom lookup limit reached");ambiguous=true;break;}if(item.name==peripheralDerivedFrom){if(source){ambiguous=true;break;}source=&item;}}
@@ -198,7 +206,21 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                     else for(std::size_t i=start;i<end;++i){const auto& item=out.registers[i];if(out.registers.size()>=maxRegisters){warn("Register limit reached");break;}if(item.fields.size()>100000-emittedFields){warn("Expanded field limit reached");break;}std::size_t descriptions=item.description.size(),enums=0;for(const auto& f:item.fields){descriptions+=f.description.size();enums+=f.values.size();}if(descriptions>16U*1024U*1024U-descriptionBytes){warn("Expanded description limit reached");break;}if(enums>100000-emittedEnums){warn("Expanded enumerated value limit reached");break;}auto copy=item;copy.peripheral=peripheral;copy.address=*base+(item.address-sourceBase);emittedFields+=item.fields.size();descriptionBytes+=descriptions;emittedEnums+=enums;out.registers.push_back(std::move(copy));}
                 }
             }
-            if(!peripheral.empty()&&base)peripheralSources.push_back({peripheral,*base,peripheralStart,out.registers.size(),!currentPeripheralIncomplete&&!peripheralSkip});
+            if(peripheralArray && peripheralDerivedFrom.empty() && !peripheralSkip) {
+                if(!peripheralDim || !peripheralIncrement || !*peripheralDim || !*peripheralIncrement || *peripheralDim>256 || !base || peripheral.find("%s")==std::string::npos || peripheral.find("%s")!=peripheral.rfind("%s"))return fail("Invalid peripheral array definition");
+                std::vector<std::string> indexes;
+                if(peripheralIndexes.empty()){for(std::uint64_t i=0;i<*peripheralDim;++i)indexes.push_back(std::to_string(i));}
+                else {std::string_view list=peripheralIndexes;while(true){auto comma=list.find(',');auto item=trim(list.substr(0,comma));if(item.empty()||item.size()>64||!std::all_of(item.begin(),item.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';})||std::find(indexes.begin(),indexes.end(),item)!=indexes.end())return fail("Unsupported peripheral dimIndex");indexes.emplace_back(item);if(comma==std::string_view::npos)break;list.remove_prefix(comma+1);if(indexes.size()>*peripheralDim)return fail("Peripheral dimIndex count mismatch");}if(indexes.size()!=*peripheralDim)return fail("Peripheral dimIndex count mismatch");}
+                const auto templateEnd=out.registers.size();const auto marker=peripheral.find("%s");
+                if((*peripheralDim-1)>(std::numeric_limits<std::uint64_t>::max()-*base)/ *peripheralIncrement)return fail("Peripheral array address overflow");
+                for(std::size_t i=peripheralStart;i<templateEnd;++i)if((*peripheralDim-1)>(std::numeric_limits<std::uint64_t>::max()-out.registers[i].address)/ *peripheralIncrement)return fail("Peripheral array address overflow");
+                for(std::size_t index=0;index<indexes.size();++index){auto instance=peripheral;instance.replace(marker,2,indexes[index]);const auto instanceStart=index?out.registers.size():peripheralStart;
+                    if(index==0){for(std::size_t i=peripheralStart;i<templateEnd;++i)out.registers[i].peripheral=instance;}
+                    else for(std::size_t i=peripheralStart;i<templateEnd;++i){const auto& item=out.registers[i];if(out.registers.size()>=maxRegisters){warn("Register limit reached");break;}if(item.fields.size()>100000-emittedFields){warn("Expanded field limit reached");break;}std::size_t descriptions=item.description.size(),enums=0;for(const auto& f:item.fields){descriptions+=f.description.size();enums+=f.values.size();}if(descriptions>16U*1024U*1024U-descriptionBytes){warn("Expanded description limit reached");break;}if(enums>100000-emittedEnums){warn("Expanded enumerated value limit reached");break;}auto copy=item;copy.peripheral=instance;copy.address+=index* *peripheralIncrement;emittedFields+=item.fields.size();descriptionBytes+=descriptions;emittedEnums+=enums;out.registers.push_back(std::move(copy));}
+                    peripheralSources.push_back({instance,*base+index* *peripheralIncrement,instanceStart,out.registers.size(),!currentPeripheralIncomplete});
+                    if(currentPeripheralIncomplete)break;
+                }
+            } else if(!peripheral.empty()&&base)peripheralSources.push_back({peripheral,*base,peripheralStart,out.registers.size(),!currentPeripheralIncomplete&&!peripheralSkip});
             inPeripheral=false;
         }
         if (name=="cluster" && !node.skip) {

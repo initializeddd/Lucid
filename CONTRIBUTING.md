@@ -33,7 +33,7 @@ run `python3 tools/modules/check_mingw.py`. Pass
 default 64-bit target. This checks module translation units except the three
 that require target-specific libcurl headers. It does not link or run Lucid and
 does not replace native Windows tests.
-`python3 tools/modules/check_mingw_link.py` additionally cross-links three
+`python3 tools/modules/check_mingw_link.py` additionally cross-links nine
 focused module test executables in a temporary directory; it does not run them.
 The same `--compiler` option selects a different MinGW target.
 

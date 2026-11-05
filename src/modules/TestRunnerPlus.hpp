@@ -51,4 +51,8 @@ struct FailedRerunCandidate {
 // and clear output on error. JUnit DTDs and custom entities are rejected.
 [[nodiscard]] bool parseCTestDiscovery(std::string_view input, TestDiscovery& result, std::string& error);
 [[nodiscard]] bool parseCTestJUnit(std::string_view input, TestResults& result, std::string& error);
+// Strict generic import refuses unknown tags, unsupported test attributes and
+// invalid hierarchy so unrecognized failure states cannot appear as passes.
+[[nodiscard]] bool parseStrictJUnit(std::string_view input, TestResults& result, std::string& error);
+
 }

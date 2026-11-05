@@ -44,6 +44,7 @@
 #include "modules/SqlChanges.hpp"
 #include "modules/SqlRowDiff.hpp"
 #include "modules/DesignTokenAliases.hpp"
+#include "modules/JUnitImport.hpp"
 #include "ui/VisualReviewCrop.hpp"
 #include "ui/VisualMaskSelection.hpp"
 #include "modules/VisualConfigEdit.hpp"
@@ -515,6 +516,16 @@ private:
     std::filesystem::path m_pythonProvisionInterpreter;
     std::uint64_t m_pythonProvisionGeneration = 0;
     bool m_pythonCreating = false;
+    struct JUnitImportResult { modules::JUnitReport report; std::string snapshot, path, error; };
+    std::future<JUnitImportResult> m_junitFuture;
+    std::shared_ptr<std::atomic_bool> m_junitCancel;
+    modules::JUnitReport m_junitCurrent, m_junitPrevious;
+    std::vector<modules::JUnitComparisonEntry> m_junitComparison;
+    std::string m_junitRoot, m_junitModule, m_junitPath, m_junitSnapshot, m_junitPreviousPath, m_junitPreviousSnapshot;
+    std::optional<std::size_t> m_junitSelected;
+    std::uint64_t m_junitGeneration=0;
+    int m_junitInputMode=0;
+    bool m_junitShowing=false, m_junitComparing=false;
     std::future<modules::CTestDiscoveryResult> m_ctestDiscoveryFuture;
     std::future<modules::CTestRunResult> m_ctestRunFuture;
     std::shared_ptr<std::atomic_bool> m_ctestCancel;

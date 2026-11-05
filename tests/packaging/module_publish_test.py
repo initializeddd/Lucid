@@ -334,6 +334,12 @@ class PublishTest(unittest.TestCase):
             self.invoke("--publish")
         self.assertFalse(self.registry)
 
+    def test_junit_import_requires_project_permission(self):
+        data={"name":"JUnit","version":"1","requires":["junit-import-v1"],"permissions":{"project":True,"network":False,"processes":False,"settings":False},"commands":[{"title":"Import","action":"import-junit"}]}
+        self.manifest.write_text(json.dumps(data));self.invoke("--publish");self.registry.clear();data["permissions"]["project"]=False;self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):self.invoke("--publish")
+        self.assertFalse(self.registry)
+
     def test_cobertura_branches_require_cobertura_import(self):
         data = {"name":"Coverage", "version":"1", "requires":["coverage-cobertura-v1","coverage-cobertura-branches-v1"], "permissions":{"project":True,"network":False,"processes":False,"settings":False}, "commands":[{"title":"Import","action":"coverage-cobertura"}]}
         self.manifest.write_text(json.dumps(data)); self.invoke("--publish"); self.registry.clear()

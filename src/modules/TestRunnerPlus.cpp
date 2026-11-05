@@ -1,4 +1,5 @@
 #include "modules/TestRunnerPlus.hpp"
+#include "text/Utf8.hpp"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -12,6 +13,11 @@ constexpr std::size_t maxBytes = 8U * 1024U * 1024U, maxTests = 10000;
 using editor::JsonType;
 const editor::JsonValue* field(const editor::JsonValue& obj, const char* key, JsonType type) {
     const auto* v = obj.find(key); return v && v->type == type ? v : nullptr;
+}
+bool xmlCharacter(unsigned c) { return c==9 || c==10 || c==13 || (c>=0x20 && c<=0xd7ff) || (c>=0xe000 && c<=0xfffd) || (c>=0x10000 && c<=0x10ffff); }
+bool validXmlUtf8(std::string_view input) {
+    for(std::size_t i=0;i<input.size();) {const auto start=i;const auto c=text::nextUtf8(input,i);if((c==U'\ufffd' && i==start+1 && static_cast<unsigned char>(input[start])>=0x80U) || !xmlCharacter(c)) return false;}
+    return true;
 }
 void appendUtf8(std::string& s, unsigned c) {
     if (c < 128) s.push_back(static_cast<char>(c));
@@ -29,7 +35,7 @@ bool decode(std::string_view in, std::string& out) {
             std::size_t j = 1; unsigned base = 10; if (j < e.size() && (e[j] == 'x' || e[j] == 'X')) { base = 16; ++j; }
             if (j == e.size()) return false;
             for (; j < e.size(); ++j) { unsigned digit; char ch = e[j]; if (ch >= '0' && ch <= '9') digit = ch - '0'; else if (ch >= 'a' && ch <= 'f') digit = ch - 'a' + 10; else if (ch >= 'A' && ch <= 'F') digit = ch - 'A' + 10; else return false; if (digit >= base || c > (0x10ffff - digit) / base) return false; c = c * base + digit; }
-            if (!c || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return false;
+            if (!xmlCharacter(c)) return false;
         } else return false;
         appendUtf8(out, c); i = end;
     }
@@ -48,7 +54,7 @@ bool parseTag(std::string_view t, Tag& tag) {
         start = i; while (i < t.size() && nameChar(t[i])) ++i; if (i == start) return false; std::string key(t.substr(start, i - start));
         ws(); if (i == t.size() || t[i++] != '=') return false; ws(); if (i == t.size() || (t[i] != '"' && t[i] != '\'')) return false;
         char quote = t[i++]; start = i; while (i < t.size() && t[i] != quote) ++i; if (i == t.size()) return false;
-        std::string value; if (!decode(t.substr(start, i - start), value) || !tag.attrs.emplace(std::move(key), std::move(value)).second) return false; ++i;
+        std::string value; if (t.substr(start,i-start).find('<')!=std::string_view::npos || !decode(t.substr(start, i - start), value) || !tag.attrs.emplace(std::move(key), std::move(value)).second) return false; ++i;
     }
 }
 }
@@ -70,13 +76,15 @@ bool parseCTestDiscovery(std::string_view input, TestDiscovery& result, std::str
     }
     result = std::move(output); return true;
 }
-bool parseCTestJUnit(std::string_view input, TestResults& result, std::string& error) {
+static bool parseJUnitImpl(std::string_view input, TestResults& result, std::string& error, bool strict) {
     result = {}; error.clear(); if (input.size() > maxBytes) { error = "JUnit report exceeds size limit"; return false; }
+    if(!validXmlUtf8(input)) {error="Invalid JUnit XML characters or UTF-8";return false;}
     TestResults output; std::vector<std::string> stack; bool rootSeen = false, rootClosed = false; std::size_t pos = 0; TestResult* test = nullptr;
     auto fail = [&]() { error = "Invalid or unsupported JUnit XML"; return false; };
     auto addText = [&](std::string_view raw, bool encoded) {
         std::string v; if (encoded) { if (!decode(raw, v)) return false; } else v = std::string(raw);
         if (test && !stack.empty()) { auto& tag = stack.back(); if (tag == "failure" || tag == "error") test->failureText += v; else if (tag == "system-out") test->output += v; else if (tag == "system-err") test->errorOutput += v; }
+        else if (!stack.empty() && (stack.back()=="system-out" || stack.back()=="system-err")) { /* Suite-level output is not attributed to a test. */ }
         else for (char c : v) if (!std::isspace(static_cast<unsigned char>(c))) return false;
         return true;
     };
@@ -90,6 +98,20 @@ bool parseCTestJUnit(std::string_view input, TestResults& result, std::string& e
         for (; end < input.size(); ++end) { char c = input[end]; if (quote) { if (c == quote) quote = 0; } else if (c == '\'' || c == '"') quote = c; else if (c == '>') break; }
         if (end == input.size()) return fail();
         Tag tag; if (!parseTag(input.substr(lt+1,end-lt-1),tag)) return fail(); pos = end+1;
+        if(strict && !tag.closing) {
+            const auto parent=stack.empty()?std::string_view{}:std::string_view(stack.back());
+            if(tag.name=="testsuites") {if(!stack.empty()) return fail();}
+            else if(tag.name=="testsuite") {if(!stack.empty() && parent!="testsuites" && parent!="testsuite") return fail();}
+            else if(tag.name=="testcase") {
+                if(parent!="testsuite") return fail();
+                for(const auto& [key,_]:tag.attrs) if(key!="name" && key!="classname" && key!="time" && key!="file" && key!="line" && key!="assertions") return fail();
+            }
+            else if(tag.name=="failure" || tag.name=="error" || tag.name=="skipped") {if(parent!="testcase") return fail();}
+            else if(tag.name=="system-out" || tag.name=="system-err") {if(parent!="testcase" && parent!="testsuite") return fail();}
+            else if(tag.name=="properties") {if(parent!="testcase" && parent!="testsuite") return fail();}
+            else if(tag.name=="property") {if(parent!="properties") return fail();}
+            else return fail();
+        }
         if (tag.closing) { if (stack.empty() || stack.back() != tag.name) return fail(); if (tag.name == "testcase") test = nullptr; stack.pop_back(); if (stack.empty()) rootClosed = true; continue; }
         if (stack.empty()) { if (rootSeen || (tag.name != "testsuite" && tag.name != "testsuites")) return fail(); rootSeen = true; }
         else if (rootClosed) return fail();
@@ -110,6 +132,8 @@ bool parseCTestJUnit(std::string_view input, TestResults& result, std::string& e
     if (!rootSeen || !rootClosed || !stack.empty()) return fail();
     result = std::move(output); return true;
 }
+bool parseCTestJUnit(std::string_view input, TestResults& result, std::string& error) {return parseJUnitImpl(input,result,error,false);}
+bool parseStrictJUnit(std::string_view input, TestResults& result, std::string& error) {return parseJUnitImpl(input,result,error,true);}
 std::vector<TestCorrelation> correlateCTestResults(const TestDiscovery& discovery, const TestResults& results) {
     std::map<std::string, TestCorrelation> entries;
     for (std::size_t i = 0; i < discovery.tests.size(); ++i) { auto& e = entries[discovery.tests[i].name]; e.name = discovery.tests[i].name; e.discoveryIndices.push_back(i); }

@@ -540,11 +540,11 @@ not live register values; wildcard/binary-pattern encodings and derived enumerat
 groups are not expanded. It does not access hardware. Its
 conservative XML subset accepts predefined and numeric text entities but rejects
 DTDs and custom or external entities. It does not expand field derived definitions,
-forward or qualified references, peripheral arrays, index
+forward or qualified references, derived peripheral arrays, index
 ranges or nested and derived clusters. Single-level clusters, including simple
 arrays with explicit increments and numeric or comma-separated indexes, expand
 register names and addresses; cluster-level defaults are not inherited. A peripheral can inherit from a unique earlier complete peripheral when it has an explicit name and base address and no register or default-property overrides; copied register addresses are relocated. Unsupported or ambiguous inheritance is marked incomplete. A register can inherit from a unique earlier register in the
-same peripheral, with complete explicit field overrides. Simple register arrays with explicit increments
+same peripheral, with complete explicit field overrides. Simple peripheral arrays expand up to 256 elements with one `%s` placeholder, a nonzero address increment and numeric or unique comma-separated literal indexes; array properties must precede registers. Simple register arrays with explicit increments
 and numeric or comma-separated indexes are expanded. Field arrays expand up to
 64 elements with a nonzero bit increment, one `%s` name placeholder and numeric
 or comma-separated literal indexes; bit ranges and expanded metadata are bounded.
@@ -728,3 +728,11 @@ rectangle and its effect on coverage counts. Escape cancels. Dragging outside th
 image is rejected; manual coordinate entry remains available from the keyboard.
 Applying the draft changes only the open configuration document and remains
 undoable, with the same screenshot and document checks as other config edits.
+
+Test Runner Plus can import an existing project-local JUnit XML report without
+running tests. It displays a read-only snapshot and can compare a second saved
+snapshot by exact class and test name. Duplicate identities are ambiguous, and
+one-sided tests may come from partial runs. Imported output may contain secrets;
+report snapshots may be stale. JUnit formats vary; unknown elements, unsupported testcase attributes and invalid
+hierarchies are rejected so unrecognized failure states are not shown as passes.
+No commands, test reruns or source locations are inferred from the report.

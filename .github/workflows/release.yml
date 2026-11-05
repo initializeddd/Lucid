@@ -107,8 +107,10 @@ jobs:
           mkdir -p "${stage}/licenses"
           cp third_party/sha2/LICENSE "${stage}/licenses/sha2-BSD-3-Clause.txt"
           cp packaging/linux/dev.lucid.editor.desktop packaging/linux/dev.lucid.editor.png "${stage}/"
+          release_name="Lucid"
+          if [[ "$RELEASE_TAG" == *-* ]]; then release_name="Lucid (Beta)"; fi
           printf '%s\n' \
-            "Lucid (Beta)" \
+            "$release_name" \
             "" \
             "Run: ./lucid" \
             "" \
@@ -235,7 +237,7 @@ jobs:
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          name: Lucid (Beta) ${{ github.ref_name }}
+          name: ${{ contains(github.ref_name, '-') && format('Lucid (Beta) {0}', github.ref_name) || format('Lucid {0}', github.ref_name) }}
           files: dist/*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}

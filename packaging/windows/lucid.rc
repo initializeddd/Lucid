@@ -14,12 +14,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Lucid contributors"
-            VALUE "FileDescription", "Lucid (Beta) code editor"
-            VALUE "FileVersion", "0.3.0-beta.1"
+            VALUE "FileDescription", "Lucid code editor"
+            VALUE "FileVersion", "0.3.0"
             VALUE "InternalName", "Lucid"
             VALUE "OriginalFilename", "Lucid.exe"
-            VALUE "ProductName", "Lucid (Beta)"
-            VALUE "ProductVersion", "0.3.0-beta.1"
+            VALUE "ProductName", "Lucid"
+            VALUE "ProductVersion", "0.3.0"
         END
     END
     BLOCK "VarFileInfo"

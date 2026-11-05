@@ -6,14 +6,14 @@
   <img src="assets/branding/lucid-dark.svg" width="88" alt="Lucid logo">
 </picture>
 
-# Lucid (Beta)
+# Lucid
 
 **A minimal, GPU-accelerated code editor built on Vulkan.**
 
 Keyboard-first. Path-native. Drawn entirely on the GPU.
 
 [![CI](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml)
-[![Status](https://img.shields.io/badge/status-beta-787EFF)](#downloads)
+[![Status](https://img.shields.io/badge/status-stable-787EFF)](#downloads)
 [![License](https://img.shields.io/github/license/initializeddd/Lucid?color=787EFF)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/initializeddd/Lucid?color=787EFF&include_prereleases)](https://github.com/initializeddd/Lucid/releases)
 
@@ -30,9 +30,9 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Beta software.** Features are at different stages of maturity, and file formats and behavior
+> Features are at different stages of maturity, and file formats and behavior
 > may change. This README describes the current source tree; the downloadable
-> `v0.3.0-beta.1` release may differ. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
+> `v0.3.0` release may differ. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
 ## Lucid in action
 
@@ -84,7 +84,7 @@ These short, sampled animations show the lighthouse scene in the welcome screen 
 
 ## Downloads
 
-Download [Lucid v0.3.0-beta.1](https://github.com/initializeddd/Lucid/releases/tag/v0.3.0-beta.1), or browse all [releases](https://github.com/initializeddd/Lucid/releases).
+Download [Lucid v0.3.0](https://github.com/initializeddd/Lucid/releases/tag/v0.3.0), or browse all [releases](https://github.com/initializeddd/Lucid/releases).
 
 | Platform | Artifacts | Notes |
 | --- | --- | --- |
@@ -95,7 +95,7 @@ Download [Lucid v0.3.0-beta.1](https://github.com/initializeddd/Lucid/releases/t
 
 The macOS build and local automated tests have been exercised on macOS 27.0.1.
 
-The release includes SHA-256 checksums. Beta builds are not signed with distribution certificates,
+The release includes SHA-256 checksums. Release builds are not signed with distribution certificates,
 so macOS Gatekeeper and Windows SmartScreen may warn on first launch. BSD builds have not had a
 full graphical desktop smoke test.
 

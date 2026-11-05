@@ -4,7 +4,7 @@ Lucid is a project-based editor. Open a project folder first, then open files in
 
 ## 1. Install and launch
 
-Download [Lucid v0.3.0-beta.1](https://github.com/initializeddd/Lucid/releases/tag/v0.3.0-beta.1)
+Download [Lucid v0.3.0](https://github.com/initializeddd/Lucid/releases/tag/v0.3.0)
 for your platform, or browse all [releases](https://github.com/initializeddd/Lucid/releases). The
 beta release page includes `SHA256SUMS.txt` for checking the downloaded files.
 
@@ -19,7 +19,7 @@ in `SHA256SUMS.txt`. On macOS use `shasum -a 256 <filename>`; on Linux use
 | Linux | Extract the Linux archive and run `./lucid`. A working Vulkan driver is required. |
 | FreeBSD or OpenBSD | Extract the matching archive and run `./lucid`; install GLFW, Vulkan and system cryptography libraries first. |
 
-Beta builds are not signed with distribution certificates. macOS Gatekeeper and Windows
+Release builds are not signed with distribution certificates. macOS Gatekeeper and Windows
 SmartScreen may display a warning. BSD graphical desktop testing is still limited.
 
 ### Build from source

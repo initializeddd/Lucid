@@ -73,7 +73,7 @@ Download the latest beta from the
 | Windows | MSI and standalone ZIP | MSI requires administrator access |
 | FreeBSD and OpenBSD | Standalone archives | Install GLFW, Vulkan and system crypto libraries |
 
-The release includes SHA-256 checksums. Beta builds are not signed with distribution certificates,
+The release includes SHA-256 checksums. Release builds are not signed with distribution certificates,
 so macOS Gatekeeper and Windows SmartScreen may warn on first launch.
 
 ## Documentation

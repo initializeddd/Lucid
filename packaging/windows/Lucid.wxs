@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="Lucid (Beta)" Language="1033" Version="0.3.0" Manufacturer="Lucid contributors" UpgradeCode="E2F83EC3-EBF5-4AB2-950C-39E57A69F8AA">
+  <Product Id="*" Name="Lucid" Language="1033" Version="0.3.0" Manufacturer="Lucid contributors" UpgradeCode="E2F83EC3-EBF5-4AB2-950C-39E57A69F8AA">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
     <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Lucid is already installed." />
     <MediaTemplate EmbedCab="yes" />
@@ -41,7 +41,7 @@
     </DirectoryRef>
     <DirectoryRef Id="LucidMenu">
       <Component Id="StartMenuShortcut" Guid="7D319C83-5C1A-4555-85E3-7C8BFCF50484">
-        <Shortcut Id="LucidShortcut" Name="Lucid (Beta)" Target="[INSTALLFOLDER]Lucid.exe" WorkingDirectory="INSTALLFOLDER" />
+        <Shortcut Id="LucidShortcut" Name="Lucid" Target="[INSTALLFOLDER]Lucid.exe" WorkingDirectory="INSTALLFOLDER" />
         <RemoveFolder Id="RemoveLucidMenu" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\Lucid" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
       </Component>

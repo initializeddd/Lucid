@@ -7,7 +7,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.3.0-beta.1] - 2026-11-05
+## [0.3.0] - 2026-11-05
 
 ### Added
 
@@ -126,8 +126,8 @@ First public beta. Download builds for macOS, Linux and Windows from the
 
 - Initial public foundation: Vulkan renderer, window layer, editor core and build system.
 
-[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.3.0-beta.1...HEAD
-[0.3.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.3.0-beta.1
+[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/initializeddd/Lucid/releases/tag/v0.3.0
 [0.2.1-beta.2]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2
 [0.2.1-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.1
 [0.2.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.0-beta.1

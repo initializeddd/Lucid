@@ -244,8 +244,8 @@ void installApplicationMenu(const MenuActions& actions) {
                                                          action:nil
                                                   keyEquivalent:@""];
         [mainMenu addItem:appItem];
-        NSMenu* appMenu = submenu(@"Lucid (Beta)", appItem);
-        [appMenu addItem:standardItem(@"About Lucid (Beta)",
+        NSMenu* appMenu = submenu(@"Lucid", appItem);
+        [appMenu addItem:standardItem(@"About Lucid",
                                       @selector(orderFrontStandardAboutPanel:),
                                       @"", 0)];
         [appMenu addItem:[NSMenuItem separatorItem]];
@@ -261,7 +261,7 @@ void installApplicationMenu(const MenuActions& actions) {
         [NSApp setServicesMenu:servicesMenu];
 
         [appMenu addItem:[NSMenuItem separatorItem]];
-        [appMenu addItem:standardItem(@"Hide Lucid (Beta)", @selector(hide:), @"h",
+        [appMenu addItem:standardItem(@"Hide Lucid", @selector(hide:), @"h",
                                       NSEventModifierFlagCommand)];
         [appMenu addItem:standardItem(@"Hide Others", @selector(hideOtherApplications:),
                                       @"h", NSEventModifierFlagCommand |
@@ -269,7 +269,7 @@ void installApplicationMenu(const MenuActions& actions) {
         [appMenu addItem:standardItem(@"Show All", @selector(unhideAllApplications:),
                                       @"", 0)];
         [appMenu addItem:[NSMenuItem separatorItem]];
-        [appMenu addItem:standardItem(@"Quit Lucid (Beta)", @selector(terminate:), @"q",
+        [appMenu addItem:standardItem(@"Quit Lucid", @selector(terminate:), @"q",
                                       NSEventModifierFlagCommand)];
 
         NSMenuItem* fileItem = [[NSMenuItem alloc] initWithTitle:@"File"

@@ -7,10 +7,10 @@
 namespace lucid {
 
 inline constexpr std::string_view kAppName = "Lucid";
-inline constexpr std::string_view kAppDisplayName = "Lucid (Beta)";
-inline constexpr std::string_view kReleaseChannel = "beta";
-inline constexpr bool kIsPrerelease = true;
-inline constexpr std::string_view kVersionString = "0.3.0-beta.1";
+inline constexpr std::string_view kAppDisplayName = "Lucid";
+inline constexpr std::string_view kReleaseChannel = "stable";
+inline constexpr bool kIsPrerelease = false;
+inline constexpr std::string_view kVersionString = "0.3.0";
 inline constexpr u32 kVersionMajor = 0;
 inline constexpr u32 kVersionMinor = 3;
 inline constexpr u32 kVersionPatch = 0;

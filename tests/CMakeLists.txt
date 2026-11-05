@@ -233,6 +233,8 @@ foreach(module_test IN ITEMS coverage_run cobertura_branches shader_preview_inte
 endforeach()
 find_program(LUCID_TEST_PYTHON NAMES python3 python)
 if(LUCID_TEST_PYTHON)
+    add_test(NAME packaging.release_metadata COMMAND "${LUCID_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/release_metadata_test.py")
     add_test(NAME packaging.sha2_notice COMMAND "${LUCID_TEST_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/sha2_notice_test.py")
     add_test(NAME packaging.webview2_sdk COMMAND "${LUCID_TEST_PYTHON}"

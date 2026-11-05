@@ -274,7 +274,7 @@ including unsaved edits. It accepts a small Mermaid flowchart subset: directed
 graphs, including cycles, self-loops and bidirectional `<-->` links, with plain node labels and simple edge labels such as `A -->|yes| B`,
 with one node or edge chain per line (for example, `A --> B -->|yes| C`).
 Branch groups such as `A & B --> C & D` expand to all four links; members of
-one group must be unique. Custom shapes and styling are unsupported. Edge labels are
+one group must be unique. Rounded `A(label)` and stadium `A([label])` nodes are supported; other custom shapes and styling are unsupported. Parentheses inside these labels are unsupported. Edge labels are
 plain text up to 256 bytes and may
 be truncated visually; their full text is exposed to screen readers. The preview limits
 graphs to 24 nodes and 48 edges after branch expansion and reports unsupported syntax instead of running
@@ -539,8 +539,7 @@ choices (including usage and defaults when supplied). Choices are unverified met
 not live register values; wildcard/binary-pattern encodings and derived enumeration
 groups are not expanded. It does not access hardware. Its
 conservative XML subset accepts predefined and numeric text entities but rejects
-DTDs and custom or external entities. It does not expand field derived definitions,
-forward or qualified references, derived peripheral arrays or nested and derived clusters. Single-level clusters, including simple
+DTDs and custom or external entities. It does not expand forward or qualified references, derived peripheral arrays or nested and derived clusters. A field can inherit from an earlier literal field in the same register, including its bit range, access, description and enumerations; supported explicit properties override them, and explicit enumeration groups replace inherited choices. An `lsb`/`msb` override must provide both, and mixed bit-range forms are rejected. Single-level clusters, including simple
 arrays with explicit increments and numeric or comma-separated indexes, expand
 register names and addresses; cluster-level defaults are not inherited. A peripheral can inherit from a unique earlier complete peripheral when it has an explicit name and base address and no register or default-property overrides; copied register addresses are relocated. Unsupported or ambiguous inheritance is marked incomplete. A register can inherit from a unique earlier register in the
 same peripheral, with complete explicit field overrides. Simple peripheral arrays expand up to 256 elements with one `%s` placeholder, a nonzero address increment and numeric or unique comma-separated literal indexes; array properties must precede registers. Simple register arrays with explicit increments

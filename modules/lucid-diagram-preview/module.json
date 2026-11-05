@@ -1,13 +1,14 @@
 {
   "name": "Diagram-as-Code Preview",
   "version": "0.1.0",
-  "description": "Preview a safe Mermaid flowchart subset offline, including branches, chains, cycles and two-way links.",
+  "description": "Preview a safe Mermaid flowchart subset offline, including rounded nodes, branches, chains, cycles and two-way links.",
   "requires": [
     "diagram-preview-v1",
     "diagram-flow-cycles-v1",
     "diagram-flow-chains-v1",
     "diagram-flow-bidirectional-v1",
-    "diagram-flow-branches-v1"
+    "diagram-flow-branches-v1",
+    "diagram-flow-rounded-v1"
   ],
   "permissions": {
     "project": false,

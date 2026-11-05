@@ -40,7 +40,7 @@ bool decodeXml(std::string_view input,std::string& output) {
     return true;
 }
 struct Node { std::string name, text; bool skip=false; };
-struct Field { std::string name,access,description; std::optional<std::uint64_t> off,width,lsb,msb,dim,increment; std::string dimIndex; std::vector<SvdEnumValue> values; };
+struct Field { std::string name,access,description; std::optional<std::uint64_t> off,width,lsb,msb,dim,increment; std::string dimIndex; std::vector<SvdEnumValue> values; bool inherited=false, explicitEnums=false, boundsLsb=false, boundsOffset=false; };
 struct EnumItem { std::string name; std::optional<std::uint64_t> value; bool isDefault=false, invalid=false; };
 struct Defaults { std::optional<std::uint64_t> size,reset; std::string access; };
 struct PeripheralSource { std::string name; std::uint64_t base; std::size_t start,end; bool complete; };
@@ -77,9 +77,10 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
             const bool derived = attrs.find("derivedFrom")!=std::string_view::npos;
             const bool registerDerived = name=="register" && derived;
             const bool peripheralDerived = name=="peripheral" && derived;
+            const bool fieldDerived = name=="field" && derived;
             const bool supportedCluster = name=="cluster" && !inCluster && parentName=="registers" && !derived;
             const bool clusterArrayProperty = inCluster && !inReg && parentName=="cluster" && (name=="dim" || name=="dimIndex" || name=="dimIncrement");
-            const bool unsupported=(derived && !registerDerived && !peripheralDerived) || (name=="cluster" && !supportedCluster) || (!registerArrayProperty && !clusterArrayProperty && !fieldArrayProperty && !peripheralArrayProperty && (name=="dim" || name=="dimIndex" || name=="dimIncrement"));
+            const bool unsupported=(derived && !registerDerived && !peripheralDerived && !fieldDerived) || (name=="cluster" && !supportedCluster) || (!registerArrayProperty && !clusterArrayProperty && !fieldArrayProperty && !peripheralArrayProperty && (name=="dim" || name=="dimIndex" || name=="dimIncrement"));
             if(unsupported) {warn(name=="cluster" ? "Clusters are not expanded" : (name=="dim" || name=="dimIndex" || name=="dimIncrement") ? "Arrays are not expanded" : "derivedFrom definitions are not expanded"); if(name=="dim"||name=="dimIndex"||name=="dimIncrement") {if(inReg) reg.skip=true; else if(inCluster) {if(clusterRegistersSeen) return fail("Cluster array properties must precede registers"); clusterSkip=true;} else peripheralSkip=true;} }
             stack.push_back({std::string(name),{},parentSkip || unsupported});
             if(!parentSkip && name=="peripheral") {
@@ -114,8 +115,15 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                     else {reg.offset=source->address-*base-(inCluster ? *clusterOffset : 0); if(source->sizeBits) reg.size=source->sizeBits; reg.reset=source->resetValue; reg.access=source->access; reg.fields=source->fields; reg.description=source->description;}
                 }
             }
-            if(!parentSkip && name=="field") {field={};inField=true;}
-            if(!parentSkip && name=="enumeratedValues") enumUsage.clear();
+            if(!parentSkip && name=="field") {
+                field={};inField=true;
+                if(fieldDerived){auto a=trim(attrs);constexpr std::string_view key="derivedFrom";if(!a.starts_with(key))return fail("Unsupported field derivedFrom attribute");a.remove_prefix(key.size());a=trim(a);if(a.empty()||a.front()!='=')return fail("Invalid field derivedFrom attribute");a.remove_prefix(1);a=trim(a);if(a.size()<3||(a.front()!='\''&&a.front()!='"'))return fail("Invalid field derivedFrom attribute");auto quote=a.front();a.remove_prefix(1);auto end=a.find(quote);if(end==std::string_view::npos||!trim(a.substr(end+1)).empty())return fail("Invalid field derivedFrom attribute");auto ref=a.substr(0,end);if(ref.empty()||ref.size()>256||!std::all_of(ref.begin(),ref.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_';}))return fail("Unsupported field derivedFrom reference");
+                    const SvdField* source=nullptr;bool ambiguous=false;for(const auto& candidate:reg.fields){if(++derivedComparisons>1000000){warn("Field derivedFrom lookup limit reached");ambiguous=true;break;}if(candidate.name==ref){if(source){ambiguous=true;break;}source=&candidate;}}
+                    if(!source||ambiguous){warn("Field derivedFrom reference unavailable or ambiguous");stack.back().skip=true;}
+                    else {field.inherited=true;field.access=source->access;field.description=source->description;field.off=source->offset;field.width=source->width;field.values=source->values;}
+                }
+            }
+            if(!parentSkip && name=="enumeratedValues" && !stack.back().skip){enumUsage.clear();if(field.inherited&&!field.explicitEnums){field.values.clear();field.explicitEnums=true;}}
             if(!parentSkip && name=="enumeratedValue" && parentName=="enumeratedValues") {enumItem={};inEnum=true;}
             if(!self) continue;
         }
@@ -161,7 +169,7 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                 if(name=="dimIndex") {if(!field.dimIndex.empty() || value.empty() || value.size()>4096) return fail("Invalid field dimIndex"); field.dimIndex=std::string(value);}
                 else {if(!number(value,n)) return fail("Invalid field array value"); auto& target=name=="dim" ? field.dim : field.increment; if(target) return fail("Duplicate field array value"); target=n;}
             }
-            if(inField && parent=="field") {if(name=="name") field.name=std::string(value); else if(name=="access") field.access=std::string(value); else if(name=="description") {if(value.size()<=512) field.description=std::string(value);else warn("Some descriptions exceed the display limit");} else if(name=="bitOffset"||name=="bitWidth"||name=="lsb"||name=="msb") {if(!number(value,n)) return fail("Invalid field value");if(name=="bitOffset") field.off=n;else if(name=="bitWidth") field.width=n;else if(name=="lsb") field.lsb=n;else field.msb=n;}}
+            if(inField && parent=="field") {if(name=="name") field.name=std::string(value); else if(name=="access") field.access=std::string(value); else if(name=="description") {if(value.size()<=512) field.description=std::string(value);else warn("Some descriptions exceed the display limit");} else if(name=="bitOffset"||name=="bitWidth"||name=="lsb"||name=="msb") {if(!number(value,n)) return fail("Invalid field value");if(name=="bitOffset"||name=="bitWidth"){if(field.boundsLsb)return fail("Mixed field bit range forms");field.boundsOffset=true;if(name=="bitOffset")field.off=n;else field.width=n;}else {if(field.boundsOffset)return fail("Mixed field bit range forms");if(!field.boundsLsb && field.inherited){field.off.reset();field.width.reset();}field.boundsLsb=true;if(name=="lsb")field.lsb=n;else field.msb=n;}}}
             if(name=="field" && inField) {
                 if(!field.off && field.lsb) field.off=field.lsb;
                 if(!field.width && field.lsb && field.msb && *field.msb<64 && *field.msb>=*field.lsb) field.width=*field.msb-*field.lsb+1;

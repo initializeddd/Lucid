@@ -2867,7 +2867,7 @@ void Application::refreshModuleSuggestions() {
             } else { if(std::find(m.requirements.begin(),m.requirements.end(),"toolchain-target-edit-v1")!=m.requirements.end()) add("Add target…","Review before saving",-250); if (m_toolchainProfiles.empty()) add("No profiles", "Add profiles to the selected JSON file",-194,ui::SuggestionKind::ReadOnlyText); for (std::size_t i=0;i<m_toolchainProfiles.size();++i) add(safe(m_toolchainProfiles[i].name),safe(m_toolchainProfiles[i].targetTriple) + " · select for details",static_cast<int>(i)); }
         } else if (m.enabled && m_svdShowing) {
             add(m_svdSelected ? "< Back to registers" : "< Back to module commands", "", -221);
-            add("Declared metadata only", "No hardware access; derived peripheral arrays or overrides, derived fields and nested clusters may be missing; index lists are literal", -222, ui::SuggestionKind::ReadOnlyText);
+            add("Declared metadata only", "No hardware access; derived peripheral arrays or overrides, cross-register fields and nested clusters may be missing; index lists are literal", -222, ui::SuggestionKind::ReadOnlyText);
             const auto safe=[](const std::string& v) { std::string e; return v.size()<=1024 && std::none_of(v.begin(),v.end(),[](unsigned char c){return c<32 || c==127;}) && editor::Document::canEditLosslessly(v,e) ? v : std::string("(unreadable name)"); };
             if (m_svdFuture.valid()) add("Reading SVD…", "Escape cancels", -222, ui::SuggestionKind::ReadOnlyText);
             else if (!m_svdRegisters.error.empty()) add("SVD inspection failed", safe(m_svdRegisters.error), -222, ui::SuggestionKind::ReadOnlyText);
@@ -11536,7 +11536,11 @@ void Application::syncAccessibility(const ui::FrameState& frame) {
         key = label + value;
     } else if (frame.diagramPreviewVisible) {
         label = "Diagram preview"; value = "Mermaid flowchart. Arrow keys pan; plus or minus zoom; zero resets to fit; Escape closes. Zoom " + std::to_string(static_cast<int>(m_diagramZoom*100)) + " percent.";
-        for (const auto& node : frame.diagramNodes) value += "\nNode " + node.id + ": " + node.label;
+        for (const auto& node : frame.diagramNodes) {
+            value += "\nNode " + node.id + ": " + node.label;
+            if (node.shape == modules::DiagramNodeShape::Rounded) value += " (rounded)";
+            else if (node.shape == modules::DiagramNodeShape::Stadium) value += " (stadium)";
+        }
         for (const auto& edge : frame.diagramEdges) value += "\n" + edge.from + (edge.bidirectional ? " bidirectional with " : " to ") + edge.to + (edge.label.empty() ? "" : ": " + edge.label);
         key = label + value;
     } else if (frame.settingsPanelVisible) {

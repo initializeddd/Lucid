@@ -25,15 +25,18 @@ Arrow findArrow(std::string_view text) {
     if(position>0 && text[position-1]=='<') return {position-1,4,true};
     return {position,3,false};
 }
-struct ParsedNode { std::string id, label; bool explicitLabel=false; };
+struct ParsedNode { std::string id, label; bool explicitLabel=false; DiagramNodeShape shape=DiagramNodeShape::Rectangle; };
 bool node(std::string_view s, ParsedNode& out) {
     s=trim(s); if (s.empty() || !letter(s.front())) return false;
     std::size_t i=1; while (i<s.size() && (letter(s[i]) || digit(s[i]))) ++i;
     if (i > 256) return false;
     out.id=std::string(s.substr(0,i)); s=trim(s.substr(i));
     if (s.empty()) { out.label=out.id; return true; }
-    if (s.size()<3 || s.front()!='[' || s.back()!=']') return false;
-    auto label=s.substr(1,s.size()-2);
+    std::string_view label;
+    if(s.size()>=5 && s.starts_with("([") && s.ends_with("])")) {out.shape=DiagramNodeShape::Stadium;label=s.substr(2,s.size()-4);if(label.find_first_of("()")!=label.npos)return false;}
+    else if(s.size()>=3 && s.front()=='[' && s.back()==']') {out.shape=DiagramNodeShape::Rectangle;label=s.substr(1,s.size()-2);}
+    else if(s.size()>=3 && s.front()=='(' && s.back()==')' && !s.starts_with("((") && !s.ends_with("))")) {out.shape=DiagramNodeShape::Rounded;label=s.substr(1,s.size()-2);if(label.find_first_of("()")!=label.npos)return false;}
+    else return false;
     if (!plainText(label, 4096)) return false;
     out.label=std::string(label); out.explicitLabel=true; return true;
 }
@@ -53,9 +56,9 @@ bool parseMermaidFlowchart(std::string_view source, DiagramGraph& graph, std::st
     auto bad=[&](std::string message) { error=std::move(message)+" on line "+std::to_string(line); return false; };
     auto add=[&](const ParsedNode& n) {
         auto it=indexes.find(n.id);
-        if (it==indexes.end()) { if (result.nodes.size()>=maxItems) return false; indexes[n.id]=result.nodes.size(); explicitLabels[n.id]=n.explicitLabel; result.nodes.push_back({n.id,n.label}); return true; }
-        if (n.explicitLabel && explicitLabels[n.id] && result.nodes[it->second].label!=n.label) return false;
-        if (n.explicitLabel) { result.nodes[it->second].label=n.label; explicitLabels[n.id]=true; }
+        if (it==indexes.end()) { if (result.nodes.size()>=maxItems) return false; indexes[n.id]=result.nodes.size(); explicitLabels[n.id]=n.explicitLabel; result.nodes.push_back({n.id,n.label,n.shape}); return true; }
+        if (n.explicitLabel && explicitLabels[n.id] && (result.nodes[it->second].label!=n.label || result.nodes[it->second].shape!=n.shape)) return false;
+        if (n.explicitLabel) { result.nodes[it->second].label=n.label; result.nodes[it->second].shape=n.shape; explicitLabels[n.id]=true; }
         return true;
     };
     while (pos<source.size()) {
@@ -116,7 +119,7 @@ bool layoutMermaidFlowchart(const DiagramGraph& graph, DiagramLayout& layout, st
         const auto& item = graph.nodes[i];
         if (item.id.empty() || item.id.size()>256 || !letter(item.id.front()) ||
             !std::all_of(item.id.begin()+1,item.id.end(),[](char c){ return letter(c) || digit(c); }) ||
-            !plainText(item.label,4096) || !indices.emplace(item.id,i).second) {
+            !plainText(item.label,4096) || (item.shape!=DiagramNodeShape::Rectangle && item.shape!=DiagramNodeShape::Rounded && item.shape!=DiagramNodeShape::Stadium) || !indices.emplace(item.id,i).second) {
             error = "Invalid, oversized or duplicate node"; return false;
         }
     }
@@ -154,7 +157,7 @@ bool layoutMermaidFlowchart(const DiagramGraph& graph, DiagramLayout& layout, st
         const auto layer=reverse ? maxLevel-level[i] : level[i]; const auto row=rows[level[i]]++;
         const double x=margin+(horizontal ? layer*(w+layerGap) : row*(w+rowGap));
         const double y=margin+(horizontal ? row*(h+rowGap) : layer*(h+layerGap));
-        out.nodes.push_back({graph.nodes[i].id,graph.nodes[i].label,x,y,w,h});
+        out.nodes.push_back({graph.nodes[i].id,graph.nodes[i].label,x,y,w,h,graph.nodes[i].shape});
         out.width=std::max(out.width,x+w+margin); out.height=std::max(out.height,y+h+margin);
     }
     std::size_t detourCount=0; double requiredWidth=out.width, requiredHeight=out.height;

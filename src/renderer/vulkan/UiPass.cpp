@@ -1108,7 +1108,10 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 }
                 for (const auto& node : state.diagramNodes) {
                     const float nx0 = px(node.x), ny0 = py(node.y), nx1 = px(node.x + node.width), ny1 = py(node.y + node.height);
-                    diagramRect({nx0, ny0, nx1, ny1}, 4.0F * contentScale, 1.0F * contentScale, 1.0F, ui::theme::kBackground, ui::theme::kBorder);
+                    float radius = 4.0F * contentScale;
+                    if (node.shape == modules::DiagramNodeShape::Rounded) radius = std::min((ny1 - ny0) * 0.2F, (nx1 - nx0) * 0.5F);
+                    else if (node.shape == modules::DiagramNodeShape::Stadium) radius = std::min(nx1 - nx0, ny1 - ny0) * 0.5F;
+                    diagramRect({nx0, ny0, nx1, ny1}, radius, 1.0F * contentScale, 1.0F, ui::theme::kBackground, ui::theme::kBorder);
                     std::string label = node.label; const float maxWidth = std::max(0.0F, nx1 - nx0 - 12.0F * contentScale);
                     while (!label.empty() && measureText(label) > maxWidth) label.resize(text::lastUtf8Start(label));
                     if (!label.empty() && ny1 - ny0 >= lineHeight) appendText(diagramVertices, label, (nx0 + nx1 - measureText(label)) * 0.5F, (ny0 + ny1) * 0.5F + fontCenter, normalText);

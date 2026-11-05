@@ -11,9 +11,11 @@ struct SvdField { std::string name, access; unsigned offset = 0, width = 0; std:
 struct SvdRegister { std::string peripheral, name, access; std::uint64_t address = 0; unsigned sizeBits = 0; std::optional<std::uint64_t> resetValue; std::vector<SvdField> fields; std::string description = {}; };
 struct SvdRegisters { std::vector<SvdRegister> registers; std::vector<std::string> warnings; std::string error; bool incomplete = false; };
 // A bounded, read-only CMSIS-SVD subset. No DTDs, custom/external entities,
-// field derivedFrom, derived peripheral arrays, nested/derived clusters, or hardware access.
+// qualified or forward field derivedFrom, derived peripheral arrays, nested/derived
+// clusters, or hardware access.
 // Single-level register clusters and simple cluster arrays are expanded.
 // Registers may derive from a unique earlier register in the same peripheral.
+// Fields may derive from an earlier local field and override supported properties.
 // Peripherals may derive from a unique earlier complete peripheral with an explicit
 // name/base and no register or default-property overrides.
 // Peripheral, register, field and cluster arrays support literal indexes and single

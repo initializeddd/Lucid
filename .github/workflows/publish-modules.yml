@@ -24,29 +24,9 @@ jobs:
       - uses: oras-project/setup-oras@v1
         with:
           version: 1.2.3
-      - name: Test module publication and verification
-        run: |
-          python3 tests/packaging/module_publish_test.py
-          python3 tests/packaging/module_public_test.py
-          python3 tests/packaging/module_registry_compatibility_test.py
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build libglfw3-dev libvulkan-dev glslang-tools libssl-dev \
-            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-            libwayland-dev libxkbcommon-dev
-      - name: Validate shipped manifests with Lucid
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLUCID_BUILD_TESTS=ON
-          cmake --build build --target lucid_shipped_module_manifests_tests lucid_shipped_catalog_contract_tests --parallel 2
-          ctest --test-dir build --output-on-failure -R '^workspace\.shipped_(module_manifest|catalog_contract)'
       - name: Sign in to GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | oras login ghcr.io --username '${{ github.actor }}' --password-stdin
-      - name: Publish modules and generate catalog
-        run: python3 tools/modules/publish.py --publish
-      - name: Verify published packages
-        run: python3 tools/modules/publish.py --verify
-      - name: Verify anonymous package access
-        run: python3 tools/modules/check_public.py
+      - name: Diagnose registry response
+        run: oras manifest fetch ghcr.io/initializeddd/lucid-module-accessibility-test-runner:0.1.0

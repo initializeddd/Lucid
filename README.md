@@ -32,7 +32,7 @@ on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
 > **Beta software.** Features are at different stages of maturity, and file formats and behavior
 > may change. This README describes the current source tree; the downloadable
-> `v0.2.1-beta.2` release may differ. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
+> `v0.3.0-beta.1` release may differ. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
 ## Lucid in action
 
@@ -84,7 +84,7 @@ These short, sampled animations show the lighthouse scene in the welcome screen 
 
 ## Downloads
 
-Download [Lucid v0.2.1-beta.2](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2), or browse all [releases](https://github.com/initializeddd/Lucid/releases).
+Download [Lucid v0.3.0-beta.1](https://github.com/initializeddd/Lucid/releases/tag/v0.3.0-beta.1), or browse all [releases](https://github.com/initializeddd/Lucid/releases).
 
 | Platform | Artifacts | Notes |
 | --- | --- | --- |

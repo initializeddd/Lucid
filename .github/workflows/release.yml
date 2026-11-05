@@ -27,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: python3 tests/packaging/release_metadata_test.py
+      - run: python3 tests/packaging/release_notices_test.py
       - run: python3 tools/check_release_metadata.py "$RELEASE_TAG"
 
   package:
@@ -113,6 +114,7 @@ jobs:
           cp build/bin/lucid-shader-preview-helper "${stage}/"
           cp -r build/bin/assets "${stage}/assets"
           cp LICENSE "${stage}/LICENSE"
+          cp THIRD_PARTY_NOTICES.md "${stage}/THIRD_PARTY_NOTICES.md"
           mkdir -p "${stage}/licenses"
           cp third_party/sha2/LICENSE "${stage}/licenses/sha2-BSD-3-Clause.txt"
           cp packaging/linux/dev.lucid.editor.desktop packaging/linux/dev.lucid.editor.png "${stage}/"
@@ -147,6 +149,8 @@ jobs:
           Copy-Item $exe.FullName $stage
           Copy-Item "$($exe.DirectoryName)\lucid-shader-preview-helper.exe" $stage
           Copy-Item "$($exe.DirectoryName)\assets" $stage -Recurse
+          Copy-Item LICENSE $stage
+          Copy-Item THIRD_PARTY_NOTICES.md $stage
           New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
           Copy-Item third_party/sha2/LICENSE "$stage\licenses\sha2-BSD-3-Clause.txt"
           if (Test-Path "$($exe.DirectoryName)\WebView2Loader.dll") {

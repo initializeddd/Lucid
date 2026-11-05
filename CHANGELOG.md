@@ -7,6 +7,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-11-05
+
 ### Added
 
 - Public documentation site built with MkDocs Material, including a landing page, screenshots and a demo.
@@ -19,6 +21,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - README now includes screenshots, a demo, documentation and community links.
 - Removed private-repository wording from release notes and documentation.
 - Improved module catalog validation, package reference handling, and conflict checks around selected editing actions. Platform-specific validation remains incomplete.
+
+### Fixed
+
+- Release archives now include Lucid's `LICENSE` and `THIRD_PARTY_NOTICES.md` on every platform.
+- Linux archives bundle every non-system shared library for both executables and verify resolution against the staged package.
 
 ## [0.2.1-beta.2] - 2026-11-03
 
@@ -119,7 +126,8 @@ First public beta. Download builds for macOS, Linux and Windows from the
 
 - Initial public foundation: Vulkan renderer, window layer, editor core and build system.
 
-[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.2.1-beta.2...HEAD
+[Unreleased]: https://github.com/initializeddd/Lucid/compare/v0.3.0-beta.1...HEAD
+[0.3.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.3.0-beta.1
 [0.2.1-beta.2]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2
 [0.2.1-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.1
 [0.2.0-beta.1]: https://github.com/initializeddd/Lucid/releases/tag/v0.2.0-beta.1

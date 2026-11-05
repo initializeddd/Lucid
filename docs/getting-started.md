@@ -4,7 +4,7 @@ Lucid is a project-based editor. Open a project folder first, then open files in
 
 ## 1. Install and launch
 
-Download [Lucid v0.2.1-beta.2](https://github.com/initializeddd/Lucid/releases/tag/v0.2.1-beta.2)
+Download [Lucid v0.3.0-beta.1](https://github.com/initializeddd/Lucid/releases/tag/v0.3.0-beta.1)
 for your platform, or browse all [releases](https://github.com/initializeddd/Lucid/releases). The
 beta release page includes `SHA256SUMS.txt` for checking the downloaded files.
 

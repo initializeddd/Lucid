@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="Lucid (Beta)" Language="1033" Version="0.2.1" Manufacturer="Lucid contributors" UpgradeCode="E2F83EC3-EBF5-4AB2-950C-39E57A69F8AA">
+  <Product Id="*" Name="Lucid (Beta)" Language="1033" Version="0.3.0" Manufacturer="Lucid contributors" UpgradeCode="E2F83EC3-EBF5-4AB2-950C-39E57A69F8AA">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
     <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Lucid is already installed." />
     <MediaTemplate EmbedCab="yes" />

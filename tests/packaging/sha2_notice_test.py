@@ -29,7 +29,7 @@ class NoticeTest(unittest.TestCase):
             root = Path(temporary)
             for directory in ("packaging/bsd", "packaging/linux", "third_party/sha2", "build-bsd/bin/assets", "fakebin"):
                 (root / directory).mkdir(parents=True, exist_ok=True)
-            for name in ("packaging/bsd/package.sh", "packaging/linux/dev.lucid.editor.desktop", "packaging/linux/dev.lucid.editor.png", "third_party/sha2/LICENSE", "LICENSE"):
+            for name in ("packaging/bsd/package.sh", "packaging/linux/dev.lucid.editor.desktop", "packaging/linux/dev.lucid.editor.png", "third_party/sha2/LICENSE", "LICENSE", "THIRD_PARTY_NOTICES.md"):
                 shutil.copy2(ROOT / name, root / name)
             for name in ("lucid", "lucid-shader-preview-helper"):
                 (root / "build-bsd/bin" / name).write_bytes(b"fixture")

@@ -6,6 +6,8 @@ frameworks="$app/Contents/Frameworks"
 icd="$app/Contents/Resources/vulkan/icd.d"
 mkdir -p "$app/Contents/Resources/licenses"
 cp "$(dirname "$0")/../../third_party/sha2/LICENSE" "$app/Contents/Resources/licenses/sha2-BSD-3-Clause.txt"
+cp "$(dirname "$0")/../../LICENSE" "$app/Contents/Resources/LICENSE"
+cp "$(dirname "$0")/../../THIRD_PARTY_NOTICES.md" "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 mkdir -p "$frameworks" "$icd"
 for spec in "glfw:libglfw.3.dylib" "vulkan-loader:libvulkan.1.dylib"; do
     formula=${spec%%:*}; name=${spec#*:}

@@ -88,6 +88,18 @@ class PublishTest(unittest.TestCase):
                     self.invoke("--publish")
                 self.assertFalse(self.registry)
 
+    def test_oras_not_found_requires_github_package_404(self):
+        error = subprocess.CalledProcessError(1, ["oras"], stderr=b"registry: not found")
+        for status, absent in ((b"gh: Package not found. (HTTP 404)", True),
+                               (b"gh: Forbidden (HTTP 403)", False)):
+            with self.subTest(status=status), patch.object(publisher.subprocess, "check_output", side_effect=error), \
+                 patch.object(publisher.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", status)):
+                if absent:
+                    self.assertFalse(publisher.module_version_exists("ghcr.io/test-owner/lucid-module-x:1", b"x"))
+                else:
+                    with self.assertRaisesRegex(ValueError, "Cannot establish"):
+                        publisher.module_version_exists("ghcr.io/test-owner/lucid-module-x:1", b"x")
+
     def test_all_versions_are_checked_before_any_new_module_is_pushed(self):
         self.invoke("--publish")
         original = dict(self.registry)

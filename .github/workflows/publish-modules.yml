@@ -28,8 +28,11 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | oras login ghcr.io --username '${{ github.actor }}' --password-stdin
-      - name: Diagnose package API
+      - name: Publish modules and generate catalog
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh api /user/packages/container/lucid-module-accessibility-test-runner
-
+        run: python3 tools/modules/publish.py --publish
+      - name: Verify published packages
+        run: python3 tools/modules/publish.py --verify
+      - name: Verify anonymous package access
+        run: python3 tools/modules/check_public.py

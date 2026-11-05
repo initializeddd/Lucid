@@ -15,16 +15,18 @@ struct PullRequestComment {
     bool hasLine = false;
 };
 struct PullRequestCheck { std::string name, status, conclusion, url; };
+struct PullRequestConversation { std::string author, body, createdAt; };
 struct PullRequestData {
     std::string number, title, state, body, url, author, baseRef, headRef, headSha;
     std::vector<PullRequestFile> files;
     std::vector<PullRequestComment> comments;
+    std::vector<PullRequestConversation> conversation;
     std::vector<PullRequestCheck> checks;
     std::vector<std::string> warnings;
     bool partial = false;
 };
 struct PullRequestEndpoints {
-    std::string pull, files, comments;
+    std::string pull, files, comments, conversation;
 };
 // Accepts a canonical public GitHub pull-request URL and returns fixed-host API
 // endpoints. No request or authentication is performed. Pagination and checks
@@ -36,4 +38,7 @@ struct PullRequestEndpoints {
 // all pages were supplied; no network calls are made.
 [[nodiscard]] bool parsePullRequestData(std::string_view pull, std::string_view files, std::string_view comments,
     std::string_view checks, bool allPagesSupplied, PullRequestData& output, std::string& error);
+// A bounded page of issue comments belonging to a pull request. Parsing never
+// performs I/O, and unsupported entries mark the supplied data incomplete.
+[[nodiscard]] bool parsePullRequestConversation(std::string_view json, PullRequestData& output, std::string& error);
 }

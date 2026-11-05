@@ -94,8 +94,10 @@ std::map<std::string, std::size_t> placeholders(std::string_view text) {
         const auto name = text.substr(i + 1, end - i - 1);
         const auto validFirst = [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; };
         const auto validRest = [&](unsigned char c) { return validFirst(c) || (c >= '0' && c <= '9'); };
-        if (!name.empty() && name.size() <= 128 && validFirst(static_cast<unsigned char>(name.front())) &&
-            std::all_of(name.begin() + 1, name.end(), validRest)) ++found[std::string(name)];
+        const auto digit = [](unsigned char c) { return c >= '0' && c <= '9'; };
+        if (!name.empty() && name.size() <= 128 &&
+            ((validFirst(static_cast<unsigned char>(name.front())) && std::all_of(name.begin() + 1, name.end(), validRest)) ||
+             std::all_of(name.begin(), name.end(), digit))) ++found[std::string(name)];
         i = end;
     }
     return found;

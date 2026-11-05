@@ -207,9 +207,11 @@ and a graphical configuration editor are not yet available.
 Pull-Request Companion accepts a GitHub pull request URL and asks before
 contacting GitHub. It can fetch anonymously or, if explicitly selected, use the
 `GH_TOKEN` environment variable; the token is not displayed or saved by the
-module. It shows bounded PR metadata, files, review comments and check runs,
+module. It shows bounded PR metadata, files, review comments, conversation comments and check runs,
 with incomplete results flagged,
 and selecting a file opens its provided patch with old and new line numbers.
+Conversation comments are read-only; displayed text is limited to 1,024 bytes
+and the overview may omit entries beyond its display limit.
 Patches are limited to 1000 displayed lines, and incomplete or unsupported
 hunks are reported instead of being shown as complete. Select a new-side line
 to draft an inline review comment, then explicitly confirm sending with
@@ -218,7 +220,7 @@ review, then inspect the decision, message, pull request and head commit before
 confirming. Lucid rechecks the head before submission and sends the reviewed
 commit ID; GitHub can still change between the check and submission. A failed or
 cancelled request may already have succeeded; refresh before retrying. Browsing
-issue comments, fetching missing patches, token storage and GitHub Enterprise
+fetching missing patches, token storage and GitHub Enterprise
 hosts are not supported.
 
 Container Tools asks for an absolute Docker or Podman executable path. After a
@@ -398,7 +400,9 @@ first slice is selected initially; choose Architectures to inspect another slice
 from the same saved snapshot. A category overview shows counts and lets you browse
 sections, libraries, and symbols separately; PE files also show imported and
 exported names or ordinals, and export RVAs and forwarders when available. Escape
-returns to the overview. Extended ELF section numbering is supported. Universal
+returns to the overview. Extended ELF section numbering is supported. For
+sectionless ELF executables, libraries can be recovered from the dynamic segment
+and mapped string table; section and symbol lists remain incomplete. Universal
 Mach-O archive slices and nested universal files are not supported; metadata in
 other slices is inspected when selected. Stripped binaries can lack symbols;
 malformed or bounded metadata may be incomplete. Each category is capped at
@@ -412,7 +416,7 @@ translation value; navigation checks that the selected file still matches the
 snapshot and asks you to resolve dirty open documents first. Objects and arrays are supported; arrays are compared by
 position, and non-string scalar values are rejected. The preview does not simulate
 RTL layout or shaping; code-point counts are not rendered width or grapheme counts.
-It flags missing and extra simple `{identifier}` placeholders and differing counts
+It flags missing and extra simple `{identifier}` and positional `{0}` placeholders and differing counts
 when both strings exist. This is not ICU message validation; escaped and complex
 formats and formatting semantics may require manual review.
 For a source key, **Edit translation** accepts a single-line value up to the input
@@ -472,7 +476,10 @@ earliest matching timestamps among scanned lines are retained; scan limits can
 still omit records from later files.
 
 Python Environments discovers candidate interpreters in the project, standard user
-environment directories, and PATH. Versions shown during discovery are unverified.
+environment directories, Poetry's common and configured cache locations, pyenv's
+versions directory, and PATH. Discovery does not execute Poetry or pyenv; it scans
+bounded directory entries and skips symlinked version directories. Versions shown
+during discovery are unverified.
 Discovery is bounded and can omit interpreters; the remembered path remains visible
 even when it is not found. **Choose interpreter path** accepts an absolute path
 without executing it, so interpreters outside discovery roots can be selected.

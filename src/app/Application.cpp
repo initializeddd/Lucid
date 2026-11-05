@@ -3370,8 +3370,9 @@ void Application::refreshModuleSuggestions() {
                     if (!comment.side.empty()) location += " · " + comment.side;
                     add("Comment: " + clean(comment.author) + " · " + clean(location), clean(comment.body), -104, ui::SuggestionKind::ReadOnlyText);
                 }
-                for (const auto& check : m_pullRequestData.checks) { if (shown++ >= 900) break; add("Check: " + clean(check.name), clean(check.status + " · " + check.conclusion), -104, ui::SuggestionKind::ReadOnlyText); }
-                if (shown >= 900 || m_pullRequestData.files.size() > 300 || m_pullRequestData.comments.size() > 300 || m_pullRequestData.checks.size() > 300) add("Display limited", "Some entries are not shown", -104, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& comment : m_pullRequestData.conversation) { if (shown++ >= 900) break; add("Conversation: " + clean(comment.author) + " · " + clean(comment.createdAt), clean(comment.body), -104, ui::SuggestionKind::ReadOnlyText); }
+                for (const auto& check : m_pullRequestData.checks) { if (shown++ >= 1200) break; add("Check: " + clean(check.name), clean(check.status + " · " + check.conclusion), -104, ui::SuggestionKind::ReadOnlyText); }
+                if (shown >= 1200 || m_pullRequestData.files.size() > 300 || m_pullRequestData.comments.size() > 300 || m_pullRequestData.conversation.size() > 300 || m_pullRequestData.checks.size() > 300) add("Display limited", "Some entries are not shown", -104, ui::SuggestionKind::ReadOnlyText);
             }
         } else if (m.enabled && m_usbBoardShowing) {
             add("< Back to module commands", "Clear board results", -224);

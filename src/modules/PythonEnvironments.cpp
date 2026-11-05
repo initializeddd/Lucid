@@ -76,7 +76,21 @@ PythonEnvironmentSearch defaultPythonEnvironmentSearch(const fs::path& projectRo
     if (home && *home) {
         search.environmentRoots.emplace_back(fs::path(home) / ".virtualenvs");
         search.environmentRoots.emplace_back(fs::path(home) / ".conda" / "envs");
+        search.environmentRoots.emplace_back(fs::path(home) / ".cache" / "pypoetry" / "virtualenvs");
+#ifdef __APPLE__
+        search.environmentRoots.emplace_back(fs::path(home) / "Library" / "Caches" / "pypoetry" / "virtualenvs");
+#endif
     }
+    if (const char* poetryCache = std::getenv("POETRY_CACHE_DIR"); poetryCache && *poetryCache)
+        search.environmentRoots.emplace_back(fs::path(poetryCache) / "virtualenvs");
+#ifdef _WIN32
+    if (const char* local = std::getenv("LOCALAPPDATA"); local && *local)
+        search.environmentRoots.emplace_back(fs::path(local) / "pypoetry" / "Cache" / "virtualenvs");
+#endif
+    if (const char* pyenv = std::getenv("PYENV_ROOT"); pyenv && *pyenv)
+        search.installationRoots.emplace_back(fs::path(pyenv) / "versions");
+    else if (home && *home)
+        search.installationRoots.emplace_back(fs::path(home) / ".pyenv" / "versions");
     if (const char* path = std::getenv("PATH")) {
         std::string value(path); std::size_t start = 0;
         while (start <= value.size()) {
@@ -118,6 +132,16 @@ std::vector<PythonEnvironment> discoverPythonEnvironments(const PythonEnvironmen
     for (std::size_t i=0; i<search.environmentRoots.size() && i<maxRoots && result.size()<maxResults; ++i)
         entries(search.environmentRoots[i], [&](const fs::directory_entry& entry) {
             std::error_code ec; if (entry.is_directory(ec) && !entry.is_symlink(ec)) env(entry.path(), false);
+        });
+    for (std::size_t i=0; i<search.installationRoots.size() && i<maxRoots && result.size()<maxResults; ++i)
+        entries(search.installationRoots[i], [&](const fs::directory_entry& entry) {
+            std::error_code ec; if (!entry.is_directory(ec) || ec || entry.is_symlink(ec) || ec) return;
+#ifdef _WIN32
+            add(entry.path() / "python.exe", {}, false);
+#else
+            if (executable(entry.path() / "bin" / "python")) add(entry.path() / "bin" / "python", {}, false);
+            else add(entry.path() / "bin" / "python3", {}, false);
+#endif
         });
     for (std::size_t i=0; i<search.interpreterDirectories.size() && i<maxRoots && result.size()<maxResults; ++i)
         entries(search.interpreterDirectories[i], [&](const fs::directory_entry& entry) {

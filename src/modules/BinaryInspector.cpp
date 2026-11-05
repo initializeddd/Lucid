@@ -29,6 +29,47 @@ struct Reader {
     }
 };
 struct Section { std::uint64_t name = 0, type = 0, offset = 0, size = 0, link = 0, entry = 0; };
+// Sectionless executables still describe their dynamic dependencies through
+// PT_DYNAMIC and a string table mapped by PT_LOAD. No code is executed.
+void inspectSectionlessElf(const Reader& r, bool wide, std::size_t limit, BinaryInspection& out) {
+    out.incomplete = true; // Section names and symbols cannot be enumerated here.
+    std::uint64_t offset=0, size=0, count=0;
+    if (!r.number(wide ? 32 : 28, wide ? 8 : 4, offset) || !r.number(wide ? 54 : 42, 2, size) || !r.number(wide ? 56 : 44, 2, count)) { out.error="Truncated ELF program header"; return; }
+    if (!count && !offset) return;
+    if (count==0xffff) return; // Extended program-header numbering needs section zero.
+    if (!offset || !count || size<(wide ? 56u : 32u) || !r.range(offset,0) || count>(r.data.size()-static_cast<std::size_t>(offset))/size) {out.error="Invalid ELF program header table";return;}
+    struct Load {std::uint64_t address, offset, size;}; std::vector<Load> loads;
+    std::uint64_t dynamicOffset=0,dynamicSize=0; bool dynamicSeen=false;
+    for(std::uint64_t i=0;i<count;++i) {
+        const auto p=offset+i*size; std::uint64_t type=0, fileOffset=0, address=0, fileSize=0;
+        if(!r.number(p,4,type) || !r.number(p+(wide?8:4),wide?8:4,fileOffset) || !r.number(p+(wide?16:8),wide?8:4,address) || !r.number(p+(wide?32:16),wide?8:4,fileSize) || ((type==1 || type==2) && !r.range(fileOffset,fileSize))) {out.error="Invalid ELF program segment";return;}
+        if(type==1) loads.push_back({address,fileOffset,fileSize});
+        if(type==2) {if(dynamicSeen) {out.error="Ambiguous ELF dynamic segment";return;} dynamicSeen=true;dynamicOffset=fileOffset;dynamicSize=fileSize;}
+    }
+    if(!dynamicSeen) return;
+    const auto entrySize=wide?16u:8u; if(dynamicSize%entrySize) {out.error="Invalid ELF dynamic segment";return;}
+    std::uint64_t strAddress=0,strSize=0; bool addressSeen=false,sizeSeen=false,terminated=false; std::vector<std::uint64_t> needed;
+    const auto entries=dynamicSize/entrySize; const auto scan=std::min<std::uint64_t>(entries,1000000);
+    for(std::uint64_t i=0;i<scan;++i) {
+        std::uint64_t tag=0,value=0; const auto p=dynamicOffset+i*entrySize;
+        r.number(p,wide?8:4,tag); r.number(p+(wide?8:4),wide?8:4,value);
+        if(!tag) {terminated=true;break;}
+        if(tag==1) {if(needed.size()<limit) needed.push_back(value);}
+        if(tag==5) {if(addressSeen) {out.error="Ambiguous ELF string table";return;} addressSeen=true;strAddress=value;}
+        if(tag==10) {if(sizeSeen) {out.error="Ambiguous ELF string table";return;} sizeSeen=true;strSize=value;}
+    }
+    if(!terminated) {out.error="Unterminated ELF dynamic segment";return;}
+    if(needed.empty()) return;
+    if(!addressSeen || !sizeSeen || !strSize) {out.error="Missing ELF dynamic string table";return;}
+    std::uint64_t strOffset=0; bool mapped=false;
+    for(const auto& load:loads) if(strAddress>=load.address && strAddress-load.address<=load.size && strSize<=load.size-(strAddress-load.address)) {
+        const auto candidate=load.offset+(strAddress-load.address);
+        if(mapped && candidate!=strOffset) {out.error="Ambiguous ELF dynamic string mapping";return;}
+        mapped=true;strOffset=candidate;
+    }
+    if(!mapped) {out.error="Invalid ELF dynamic string mapping";return;}
+    for(auto index:needed) {auto name=r.string(strOffset,strSize,index);if(name.empty()) {out.error="Invalid ELF dynamic library name";out.libraries.clear();return;}out.libraries.push_back(std::move(name));}
+}
 }
 namespace {
 BinaryInspection inspectOther(std::string_view bytes, std::size_t limit) {
@@ -236,7 +277,7 @@ BinaryInspection inspectBinary(std::string_view bytes, std::size_t itemLimit) {
         !r.number(wide ? 62 : 50, 2, names)) return fail("Truncated ELF header");
     result.format = wide ? "ELF64" : "ELF32";
     switch (machine) { case 3: result.architecture = "x86"; break; case 62: result.architecture = "x86-64"; break; case 40: result.architecture = "ARM"; break; case 183: result.architecture = "AArch64"; break; case 243: result.architecture = "RISC-V"; break; default: result.architecture = "Unknown (" + std::to_string(machine) + ")"; }
-    if (table == 0 && count == 0 && names == 0) return result;
+    if (table == 0 && count == 0 && names == 0) { inspectSectionlessElf(r,wide,itemLimit,result); return result; }
     const auto minimumSectionSize = wide ? 64u : 40u;
     if (!table || entsize < minimumSectionSize || !r.range(table, entsize)) return fail("Invalid ELF section table");
     // Extended numbering stores the real count and name-table index in section 0.

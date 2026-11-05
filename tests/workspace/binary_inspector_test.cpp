@@ -43,6 +43,27 @@ int main() {
     bp(52+20,2,4); bp(52+24,1,4); bp(92,1,4); bp(96,3,4); bp(108,132,4); bp(112,8,4); be.replace(132,8,std::string("\0.names\0",8));
     result=inspectBinary(be); if (!result.error.empty() || result.architecture!="ARM" || result.sections.size()!=1 || result.sections[0].name!=".names") return 15;
     bp(52+4,1,4); if (inspectBinary(be).error.empty()) return 16;
+    // A stripped ELF without section headers retains library names in PT_DYNAMIC.
+    std::string stripped(320,'\0');
+    auto sp=[&](std::size_t p,unsigned long long value,unsigned width){for(unsigned i=0;i<width;++i) stripped[p+i]=static_cast<char>(value>>(i*8));};
+    stripped.replace(0,4,"\177ELF",4); stripped[4]=2;stripped[5]=1;stripped[6]=1;sp(18,62,2);sp(32,64,8);sp(54,56,2);sp(56,2,2);
+    sp(64,1,4);sp(64+8,0,8);sp(64+16,0x400000,8);sp(64+32,stripped.size(),8);
+    sp(120,2,4);sp(128,176,8);sp(136,0x4000b0,8);sp(152,64,8);
+    sp(176,1,8);sp(184,1,8);sp(192,5,8);sp(200,0x400100,8);sp(208,10,8);sp(216,16,8);
+    stripped.replace(256,11,std::string("\0libx.so\0\0\0",11));
+    result=inspectBinary(stripped);if(!result.error.empty() || !result.incomplete || result.libraries!=std::vector<std::string>{"libx.so"}) return 22;
+    result=inspectBinary(stripped,0);if(!result.error.empty() || !result.incomplete || !result.libraries.empty()) return 23;
+    sp(200,0x500000,8);if(inspectBinary(stripped).error.empty())return 24;sp(200,0x400100,8);
+    sp(224,1,8);if(inspectBinary(stripped).error.empty())return 25;sp(224,0,8);
+    sp(184,16,8);if(inspectBinary(stripped).error.empty())return 26;
+    std::string strip32(256,'\0');
+    auto s32=[&](std::size_t p,unsigned long long value,unsigned width){for(unsigned i=0;i<width;++i) strip32[p+i]=static_cast<char>(value>>(8*(width-i-1)));};
+    strip32.replace(0,4,"\177ELF",4);strip32[4]=1;strip32[5]=2;strip32[6]=1;s32(18,40,2);s32(28,52,4);s32(42,32,2);s32(44,2,2);
+    s32(52,1,4);s32(56,0,4);s32(60,0x1000,4);s32(68,256,4);
+    s32(84,2,4);s32(88,116,4);s32(92,0x1074,4);s32(100,32,4);
+    s32(116,1,4);s32(120,1,4);s32(124,5,4);s32(128,0x10a0,4);s32(132,10,4);s32(136,16,4);
+    strip32.replace(160,9,std::string("\0libz.so\0",9));
+    result=inspectBinary(strip32);if(!result.error.empty() || !result.incomplete || result.architecture!="ARM" || result.libraries!=std::vector<std::string>{"libz.so"}) return 27;
     // Minimal PE with one section, an import descriptor and a COFF symbol.
     std::string pe(700, '\0');
     auto pp = [&](std::size_t p, unsigned long long n, unsigned w) { for (unsigned i = 0; i < w; ++i) pe[p+i] = static_cast<char>(n >> (i*8)); };

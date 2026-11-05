@@ -156,16 +156,17 @@ bool fetchGitHubPullRequest(std::string_view url, std::string_view token, const 
             }
             if (!items || items->type != editor::JsonType::Array || items->children.size() > 100) { error = "Invalid GitHub page list"; return false; }
             const auto count = items->children.size(); totalItems += count; PullRequestData parsed;
-            if (!parsePullRequestData(pr, kind == 0 ? body : "[]", kind == 1 ? body : "[]", kind == 2 ? body : emptyChecks, true, parsed, error)) return false;
+            if (kind == 3 ? !parsePullRequestConversation(body,parsed,error) : !parsePullRequestData(pr, kind == 0 ? body : "[]", kind == 1 ? body : "[]", kind == 2 ? body : emptyChecks, true, parsed, error)) return false;
             for (const auto& warning : parsed.warnings) if (warning != "Check runs are incomplete") addWarning(warning);
             if (kind == 0) result.files.insert(result.files.end(), parsed.files.begin(), parsed.files.end());
             else if (kind == 1) result.comments.insert(result.comments.end(), parsed.comments.begin(), parsed.comments.end());
-            else result.checks.insert(result.checks.end(), parsed.checks.begin(), parsed.checks.end());
+            else if(kind == 2) result.checks.insert(result.checks.end(), parsed.checks.begin(), parsed.checks.end());
+            else result.conversation.insert(result.conversation.end(), parsed.conversation.begin(), parsed.conversation.end());
             if (count < 100) { if (kind == 2 && countKnown && advertised > static_cast<double>(totalItems)) addWarning("Check runs are incomplete"); return true; }
         }
         addWarning("GitHub page limit reached; results may be incomplete"); return true;
     };
-    if (!pages(endpoints.files, 0) || !pages(endpoints.comments, 1) || (!checks.empty() && !pages(checks, 2))) return false;
+    if (!pages(endpoints.files, 0) || !pages(endpoints.comments, 1) || !pages(endpoints.conversation, 3) || (!checks.empty() && !pages(checks, 2))) return false;
     // File pages are keyed by PR number while check runs are keyed by the head
     // SHA captured above. A force-push during pagination can otherwise combine
     // different revisions and present them as a complete review.

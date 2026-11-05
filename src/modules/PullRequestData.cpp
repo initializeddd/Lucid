@@ -59,7 +59,21 @@ bool pullRequestEndpoints(std::string_view url, PullRequestEndpoints& output, st
     const auto parsed = std::from_chars(number.data(), number.data() + number.size(), id);
     if (number.empty() || parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size() || id == 0) { error = "Invalid pull request number"; return false; }
     const auto base = "https://api.github.com/repos/" + std::string(owner) + "/" + std::string(repo) + "/pulls/" + std::to_string(id);
-    output = {base, base + "/files?per_page=100", base + "/comments?per_page=100"}; return true;
+    output = {base, base + "/files?per_page=100", base + "/comments?per_page=100", "https://api.github.com/repos/" + std::string(owner) + "/" + std::string(repo) + "/issues/" + std::to_string(id) + "/comments?per_page=100"}; return true;
+}
+bool parsePullRequestConversation(std::string_view text, PullRequestData& output, std::string& error) {
+    error.clear(); JsonValue root;
+    if(text.size()>maxBytes) {error="GitHub response exceeds size limit";return false;}
+    if(!parse(text,root,error) || root.type!=JsonType::Array || root.children.size()>100) {if(error.empty())error="Invalid conversation comments";return false;}
+    PullRequestData parsed;
+    for(const auto& item:root.children) {
+        if(item.type!=JsonType::Object) {error="Invalid conversation comment";return false;}
+        PullRequestConversation c;
+        if(const auto* user=object(item,"user",parsed)) c.author=field(*user,"login",parsed);
+        c.body=field(item,"body",parsed); c.createdAt=field(item,"created_at",parsed);
+        parsed.conversation.push_back(std::move(c));
+    }
+    output=std::move(parsed); return true;
 }
 bool parsePullRequestData(std::string_view pull, std::string_view files, std::string_view comments, std::string_view checks, bool allPagesSupplied, PullRequestData& output, std::string& error) {
     output = {}; error.clear();

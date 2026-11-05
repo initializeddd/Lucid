@@ -5,6 +5,7 @@ using namespace lucid::modules;
 int main() {
     const std::string pr = R"({"number":42,"title":"Example","state":"open","body":null,"html_url":"https://github.com/a/b/pull/42","user":{"login":"alice"},"base":{"ref":"main"},"head":{"ref":"branch","sha":"0123456789012345678901234567890123456789"}})";
     const std::string comment = R"({"user":{"login":"bob"},"body":"review","path":"main.cpp","created_at":"2026-01-01"})";
+    const std::string discussion = R"({"user":{"login":"eve"},"body":"Please update","created_at":"2026-01-02"})";
     const std::string check = R"({"name":"build","status":"completed","conclusion":"success","html_url":null})";
     std::string files = "[";
     for (int i = 0; i < 100; ++i) { if (i) files += ','; files += "{\"filename\":\"f" + std::to_string(i) + "\",\"status\":\"modified\"}"; }
@@ -15,12 +16,13 @@ int main() {
         if (url.ends_with("/pulls/42")) return {200, pr, {}};
         if (url.ends_with("/files?per_page=100&page=1")) return {200, files, {}};
         if (url.ends_with("/files?per_page=100&page=2")) return {200, R"([{"filename":"last","status":"added"}])", {}};
-        if (url.ends_with("/comments?per_page=100&page=1")) return {200, "[" + comment + "]", {}};
+        if (url.ends_with("/issues/42/comments?per_page=100&page=1")) return {200, "[" + discussion + "]", {}};
+        if (url.ends_with("/pulls/42/comments?per_page=100&page=1")) return {200, "[" + comment + "]", {}};
         if (url.ends_with("/check-runs?per_page=100&page=1")) return {200, "{\"total_count\":1,\"check_runs\":[" + check + "]}", {}};
         return {0, {}, "unexpected endpoint"};
     };
     PullRequestData data; std::string error;
-    if (!fetchGitHubPullRequest("https://github.com/a/b/pull/42", "secret", mock, data, error) || calls != 6 || data.partial || data.files.size() != 101 || data.comments.size() != 1 || data.checks.size() != 1 || data.checks[0].conclusion != "success") return 1;
+    if (!fetchGitHubPullRequest("https://github.com/a/b/pull/42", "secret", mock, data, error) || calls != 7 || data.partial || data.files.size() != 101 || data.comments.size() != 1 || data.conversation.size() != 1 || data.conversation[0].author != "eve" || data.conversation[0].body != "Please update" || data.checks.size() != 1 || data.checks[0].conclusion != "success") return 1;
     GitHubTransport fail = [](std::string_view, std::string_view, const std::atomic_bool*) { return GitHubResponse{403, "sensitive", "secret"}; };
     if (fetchGitHubPullRequest("https://github.com/a/b/pull/42", "secret", fail, data, error) || data.files.size() != 101 || error.find("secret") != std::string::npos || error.find("sensitive") != std::string::npos) return 2;
     std::atomic_bool cancelled{true}; calls = 0;
@@ -36,7 +38,7 @@ int main() {
         if (url.find("/comments?") != std::string_view::npos) return {200, "[]", {}};
         return {200, R"({"total_count":1,"check_runs":[]})", {}};
     };
-    if (!fetchGitHubPullRequest("https://github.com/a/b/pull/42", "", limited, data, error) || !data.partial || data.files.size() != 2000 || calls != 24 || data.warnings.size() < 2) return 7;
+    if (!fetchGitHubPullRequest("https://github.com/a/b/pull/42", "", limited, data, error) || !data.partial || data.files.size() != 2000 || calls != 25 || data.warnings.size() < 2) return 7;
     cancelled.store(false); calls = 0;
     GitHubTransport midCancel = [&](std::string_view, std::string_view, const std::atomic_bool*) -> GitHubResponse { ++calls; cancelled.store(true); return {200, pr, {}}; };
     if (fetchGitHubPullRequest("https://github.com/a/b/pull/42", "", midCancel, data, error, &cancelled) || calls != 1 || data.files.size() != 2000) return 8;
@@ -79,5 +81,17 @@ int main() {
     cancelled.store(false);
     GitHubPostTransport uncertain = [](std::string_view, std::string_view, std::string_view, const std::atomic_bool*) -> GitHubResponse { return {0, {}, "timeout"}; };
     if (postGitHubReviewComment("https://github.com/a/b/pull/42", "secret", sha, "x", 4, "x", uncertain, error) || error.find("refresh before retrying") == std::string::npos) return 16;
+    std::string discussions="["; for(int i=0;i<100;++i) {if(i) discussions+=','; discussions+=discussion;} discussions+=']';
+    GitHubTransport discussionPages = [&](std::string_view url, std::string_view, const std::atomic_bool*) -> GitHubResponse {
+        if(url.ends_with("/pulls/42")) return {200,pr,{}};
+        if(url.ends_with("/issues/42/comments?per_page=100&page=1")) return {200,discussions,{}};
+        if(url.ends_with("/issues/42/comments?per_page=100&page=2")) return {200,"["+discussion+"]",{}};
+        if(url.find("/check-runs?")!=std::string_view::npos) return {200,R"({"total_count":0,"check_runs":[]})",{}};
+        return {200,"[]",{}};
+    };
+    if(!fetchGitHubPullRequest("https://github.com/a/b/pull/42","",discussionPages,data,error) || data.partial || data.conversation.size()!=101) return 17;
+    PullRequestData parsed;
+    if(!parsePullRequestConversation(R"([{"body":"text"}])",parsed,error) || !parsed.partial || parsed.conversation.size()!=1) return 18;
+    if(parsePullRequestConversation(R"([false])",parsed,error)) return 19;
     return 0;
 }

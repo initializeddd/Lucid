@@ -988,6 +988,8 @@ struct ApplicationInteractionTest {
             app.refreshSuggestions();
             if (std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), -102) == app.m_moduleChoices.end()) return 614;
             app.m_pullRequestData.number = "1"; app.m_pullRequestData.title = "Sample"; modules::PullRequestFile file; file.path = "src/a.cpp"; file.status = "modified"; file.hasPatch = true; file.patch = "@@ -1 +1 @@\n-old\n+new\n"; app.m_pullRequestData.files.push_back(std::move(file)); app.m_pullRequestFetched = true; app.refreshSuggestions();
+            app.m_pullRequestData.conversation.push_back({"reviewer", "Please explain", "2026-01-02"}); app.refreshSuggestions();
+            if (std::none_of(app.m_suggestions.begin(), app.m_suggestions.end(), [](const auto& item) { return item.path == "Conversation: reviewer · 2026-01-02" && item.detail == "Please explain" && item.kind == ui::SuggestionKind::ReadOnlyText; })) return 910;
             auto fileChoice = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), 0); if (fileChoice == app.m_moduleChoices.end()) return 615;
             app.m_selectedSuggestion = static_cast<int>(fileChoice - app.m_moduleChoices.begin()); app.applyModuleCommand();
             const auto patchDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);

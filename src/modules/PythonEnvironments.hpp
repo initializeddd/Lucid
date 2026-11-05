@@ -16,6 +16,9 @@ struct PythonEnvironmentSearch {
     std::vector<std::filesystem::path> environmentRoots;
     // Directories to search for standalone Python executables, in priority order.
     std::vector<std::filesystem::path> interpreterDirectories;
+    // Roots containing version directories, such as pyenv's versions directory.
+    // Their direct interpreter candidates are inspected without executing them.
+    std::vector<std::filesystem::path> installationRoots;
 };
 // Populate standard user environment roots and PATH without running any programs.
 [[nodiscard]] PythonEnvironmentSearch defaultPythonEnvironmentSearch(const std::filesystem::path& projectRoot);

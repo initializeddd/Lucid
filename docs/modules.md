@@ -82,7 +82,10 @@ one `{{placeholder:default text}}` marker. Lucid selects the default text after
 inserting it so typing replaces it. The newer `snippet-placeholders-v2` capability
 supports up to 32 fields and an optional final `{{cursor}}`. Tab moves to the next
 field, Shift+Tab moves back, and Escape ends navigation. Navigation ends if the
-document changes outside the active field. For documents over 16 MiB, the template
+document changes outside the active field. The optional `snippet-indent-v1` capability
+prefixes subsequent inserted lines, including lines from a wrapped selection, with
+the insertion line's leading whitespace while keeping field and cursor positions aligned.
+For documents over 16 MiB, the template
 is inserted but field navigation is unavailable. Linked fields are not supported.
 The Local Error Explainer sends the current diagnostic with up to five bounded nearby
 source lines, or a bounded debugger state (including available stack frames and variables), to Lucid's local model after the
@@ -113,6 +116,9 @@ finding reveals the file contents. Navigation checks that the file still matches
 the scanned bytes and requires dirty open documents to be resolved. Skipped files
 and scan limits make the result incomplete, and the supported patterns do not
 cover every credential.
+The all-findings view and staged scan also detect GitLab personal, project and
+group access tokens with the default `glpat-` prefix and 20-character suffix.
+GitLab instances can use custom prefixes, which this pattern does not detect.
 Private-key header detection includes PEM, OpenSSH and PGP private-key blocks;
 public-key blocks do not produce this finding.
 
@@ -338,8 +344,10 @@ object names are not used for column lookup. Large object lists or fields are ma
 commands accept a project-relative JSON file, for example
 `{":name":{"type":"text","value":"Alice"},":id":{"type":"integer","value":"42"}}`.
 Types are `null`, `integer` (decimal string), `real` (finite JSON number), `text`
-(string), and `blob` (hex string). All named parameters must be supplied exactly once;
-positional or unused parameters are rejected. Bindings are stored as plaintext in
+(string), and `blob` (hex string). Named parameters or explicitly numbered
+`?1` through `?64` parameters must be supplied exactly once. Numbered parameters
+must be contiguous, and cannot be mixed with named or anonymous parameters;
+unused bindings are rejected. Bindings are stored as plaintext in
 the chosen file, so do not commit secrets. Results can be exported to a new
 project-local CSV after confirmation; existing files are never overwritten. Partial
 exports are identified explicitly. CSV contains plaintext results and may contain
@@ -722,8 +730,9 @@ values and names are not exposed in the result.
 
 The bound change-copy command also accepts a project-local typed bindings JSON
 file in the same format as bound queries. It binds simple `:name`, `@name` and
-`$name` values without SQL interpolation; positional parameters and SQLite's
-extended `$name::suffix(...)` forms are unsupported.
+`$name` and contiguous numbered `?1` values without SQL interpolation. Mixing
+named and numbered parameters, anonymous parameters, and SQLite's extended
+`$name::suffix(...)` forms are unsupported.
 Values are hidden in the preview and may be sensitive plaintext in the bindings
 file. Before creating the copy, Lucid checks that the saved binding bytes still
 match the preview and rejects detected unsaved editor changes. External writers

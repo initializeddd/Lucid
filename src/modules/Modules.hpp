@@ -10,6 +10,9 @@ struct SnippetRange { std::size_t start = 0, end = 0; };
 struct ExpandedSnippet { std::string text; std::size_t cursorLine = 0, cursorColumn = 0, endLine = 0, endColumn = 0, finalOffset = 0, finalFieldIndex = 0; bool hasCursor = false, hasPlaceholder = false; std::vector<SnippetRange> fields; };
 // Expand literal placeholders without executing code or accessing files.
 [[nodiscard]] bool expandSnippet(std::string_view text, std::string_view selection, ExpandedSnippet& result, std::string& error, bool placeholders = false, bool multiple = false);
+// Prefix each subsequent line with the insertion line's indentation, updating
+// all byte ranges and cursor positions. Rejects oversized or invalid input.
+[[nodiscard]] bool indentSnippet(ExpandedSnippet& result, std::string_view indent, std::string& error);
 struct Module {
     std::string id, name, version, description, error;
     bool project = false, network = false, processes = false, settings = false, devices = false;

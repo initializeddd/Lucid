@@ -8,6 +8,7 @@
 #include <system_error>
 namespace lucid::modules {
 bool supportsCapability(std::string_view capability) noexcept {
+    if (capability == "snippet-indent-v1") return true;
     if (capability == "api-response-assertions-v1" || capability == "api-response-save-v1") return true;
 #if !defined(__APPLE__)
     if (capability == "web-component-preview-macos-v1") return false;
@@ -202,6 +203,28 @@ bool expandSnippet(std::string_view text, std::string_view selection, ExpandedSn
             auto end = editor::Document::fromUtf8(std::string_view(result.text).substr(0, endOffset));
             result.endLine = end.lineCount() - 1; result.endColumn = end.line(result.endLine).size();
         }
+    }
+    return true;
+}
+bool indentSnippet(ExpandedSnippet& result, std::string_view indent, std::string& error) {
+    error.clear();
+    constexpr std::size_t maxExpansion=1024U*1024U;
+    if (indent.size()>4096 || !std::all_of(indent.begin(),indent.end(),[](char c){return c==' ' || c=='\t';})) {error="Invalid snippet indentation";return false;}
+    const auto count=static_cast<std::size_t>(std::count(result.text.begin(),result.text.end(),'\n'));
+    if (result.text.size()>maxExpansion || (count && indent.size()>(maxExpansion-result.text.size())/count)) {error="Indented snippet exceeds 1 MiB";return false;}
+    if (indent.empty() || !count) return true;
+    const auto old=result.text;
+    const auto shifted=[&](std::size_t offset) { return offset + static_cast<std::size_t>(std::count(old.begin(),old.begin()+static_cast<std::ptrdiff_t>(offset),'\n'))*indent.size(); };
+    if((result.hasPlaceholder && result.fields.empty()) || result.finalOffset>old.size() || std::any_of(result.fields.begin(),result.fields.end(),[&](const auto& field){return field.start>field.end || field.end>old.size();})) {error="Invalid snippet field range";return false;}
+    for(auto& field:result.fields) {field.start=shifted(field.start);field.end=shifted(field.end);}
+    result.finalOffset=shifted(result.finalOffset);
+    result.text.clear(); result.text.reserve(old.size()+count*indent.size());
+    for(char c:old) {result.text.push_back(c);if(c=='\n') result.text.append(indent);}
+    if(result.hasCursor || result.hasPlaceholder) {
+        const auto start=result.hasPlaceholder ? result.fields.front().start : result.finalOffset;
+        const auto p=editor::Document::fromUtf8(std::string_view(result.text).substr(0,start));
+        result.cursorLine=p.lineCount()-1;result.cursorColumn=p.line(result.cursorLine).size();
+        if(result.hasPlaceholder) {const auto q=editor::Document::fromUtf8(std::string_view(result.text).substr(0,result.fields.front().end));result.endLine=q.lineCount()-1;result.endColumn=q.line(result.endLine).size();}
     }
     return true;
 }

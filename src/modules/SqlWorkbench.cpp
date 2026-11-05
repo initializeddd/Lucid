@@ -67,12 +67,36 @@ constexpr std::size_t kMaxCellBytes = 16U * 1024U;
 constexpr std::size_t kMaxResultBytes = 4U * 1024U * 1024U;
 constexpr std::size_t kMaxParameters = 64, kMaxParameterBytes = 256U * 1024U, kMaxTotalParameterBytes = 1024U * 1024U;
 
-bool validParameterName(std::string_view name) {
+}
+bool validSqlParameterName(std::string_view name) {
+    if (name.size() >= 2 && name[0] == '?') {
+        if (name[1] == '0' || name.size() > 3) return false;
+        unsigned n=0; auto parsed=std::from_chars(name.data()+1,name.data()+name.size(),n);
+        return parsed.ec==std::errc{} && parsed.ptr==name.data()+name.size() && n>=1 && n<=64;
+    }
     if (name.size() < 2 || name.size() > 129 || (name[0] != ':' && name[0] != '@' && name[0] != '$')) return false;
     const auto first = [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; };
     const auto rest = [&](unsigned char c) { return first(c) || (c >= '0' && c <= '9'); };
     return first(static_cast<unsigned char>(name[1])) && std::all_of(name.begin() + 2, name.end(), rest);
 }
+bool safeSqlParameterSyntax(std::string_view sql) {
+    bool numbered=false, named=false;
+    for(std::size_t i=0;i<sql.size();) {
+        char c=sql[i];
+        if(c=='-' && i+1<sql.size() && sql[i+1]=='-') {i+=2;while(i<sql.size() && sql[i]!='\n' && sql[i]!='\r') ++i;continue;}
+        if(c=='/' && i+1<sql.size() && sql[i+1]=='*') {auto end=sql.find("*/",i+2); if(end==sql.npos)return false;i=end+2;continue;}
+        if(c=='\'' || c=='"' || c=='`' || c=='[') {
+            const char close=c=='[' ? ']' : c; ++i; bool closed=false;
+            while(i<sql.size()) {if(sql[i]==close) {if(close!=']' && i+1<sql.size() && sql[i+1]==close) {i+=2;continue;} ++i;closed=true;break;}++i;}
+            if(!closed)return false;continue;
+        }
+        if(c=='?') {const auto start=i++;while(i<sql.size() && sql[i]>='0' && sql[i]<='9')++i; if(!validSqlParameterName(sql.substr(start,i-start)))return false; numbered=true;continue;}
+        if(c==':' || c=='@' || c=='$') {named=true;}
+        ++i;
+    }
+    return !(numbered && named);
+}
+namespace {
 
 int readOnlyAuthorizer(void* context, int action, const char* first, const char*, const char*, const char*) {
     switch (action) {
@@ -100,7 +124,7 @@ bool parseSqlParametersJson(std::string_view json, std::vector<SqlParameter>& pa
     std::vector<SqlParameter> result; std::map<std::string, bool> names; std::size_t totalBytes = 0;
     const auto fail = [&error](const char* message) { error = message; return false; };
     for (const auto& item : root->children) {
-        if (!validParameterName(item.key) || !names.emplace(item.key, true).second || item.type != editor::JsonType::Object)
+        if (!validSqlParameterName(item.key) || !names.emplace(item.key, true).second || item.type != editor::JsonType::Object)
             return fail("Invalid or duplicate SQL parameter name");
         const editor::JsonValue* type = nullptr; const editor::JsonValue* value = nullptr;
         for (const auto& field : item.children) {
@@ -158,11 +182,12 @@ static SqlQueryResult querySqliteSnapshotImpl(std::string_view database, std::st
         return fail("WAL-format databases are unsupported; export a standalone snapshot first");
     if (sql.empty() || sql.size() > kMaxSqlBytes || sql.find('\0') != std::string_view::npos)
         return fail("SQL must be nonempty, contain no NUL, and be at most 1 MiB");
+    if (!safeSqlParameterSyntax(sql)) return fail("Unsupported or mixed SQL parameter syntax");
     if (parameters.size() > kMaxParameters) return fail("Too many SQL parameters");
     std::map<std::string, const SqlParameter*> bindings;
     std::size_t totalParameterBytes = 0;
     for (const auto& parameter : parameters) {
-        if (!validParameterName(parameter.name) || !bindings.emplace(parameter.name, &parameter).second)
+        if (!validSqlParameterName(parameter.name) || !bindings.emplace(parameter.name, &parameter).second)
             return fail("SQL parameter names must be unique named identifiers");
         switch (parameter.type) {
             case SqlValueType::Null: case SqlValueType::Integer: break;
@@ -219,7 +244,7 @@ static SqlQueryResult querySqliteSnapshotImpl(std::string_view database, std::st
     const int variableCount = sqlite3_bind_parameter_count(statement.get());
     for (int i = 1; i <= variableCount; ++i) {
         const char* rawName = sqlite3_bind_parameter_name(statement.get(), i);
-        if (!rawName || !validParameterName(rawName)) return fail("Only named SQL parameters are supported");
+        if (!rawName || !validSqlParameterName(rawName)) return fail("Only named or contiguous numbered SQL parameters are supported");
         auto found = bindings.find(rawName);
         if (found == bindings.end()) return fail("Missing SQL parameter binding");
         const auto& parameter = *found->second;

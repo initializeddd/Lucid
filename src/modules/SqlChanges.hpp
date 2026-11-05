@@ -24,8 +24,8 @@ struct SqlChangePreview {
 // triggers or schema changes. Bounded SQLite VM execution; no external files.
 [[nodiscard]] SqlChangePreview previewSqliteChange(std::string_view database, std::string_view sql,
     const std::atomic_bool* cancel = nullptr);
-// Named :name, @name or $name SQLite bindings must all be supplied exactly once.
-// Positional, missing, duplicate and unused parameters are rejected. Values
+// Named :name, @name, $name or contiguous numbered ?1.. ?64 SQLite bindings
+// must all be supplied exactly once. Mixed, anonymous, missing, duplicate and unused parameters are rejected. Values
 // are never interpolated into SQL or included in errors; bounded to 64 bindings,
 // 256 KiB each and 1 MiB in total. The lexical policy currently rejects $name.
 [[nodiscard]] SqlChangePreview previewSqliteChangeBound(std::string_view database, std::string_view sql,

@@ -13,6 +13,7 @@ bool asciiWord(unsigned char c) {
 bool alphaNumeric(unsigned char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
 }
+bool gitlabTokenCharacter(unsigned char c) { return alphaNumeric(c) || c == '_' || c == '-'; }
 }
 SecretScanResult scanSecretText(std::string_view path, std::string_view contents, const std::atomic_bool* cancel, std::size_t limit) {
     SecretScanResult result;
@@ -33,6 +34,9 @@ SecretScanResult scanSecretText(std::string_view path, std::string_view contents
                      tail.size() >= 93 && std::all_of(tail.begin() + 11, tail.begin() + 33, [](unsigned char c) { return alphaNumeric(c); }) &&
                      tail[33] == '_' && std::all_of(tail.begin() + 34, tail.begin() + 93, [](unsigned char c) { return alphaNumeric(c); }) &&
                      (tail.size() == 93 || !asciiWord(static_cast<unsigned char>(tail[93])))) kind = "GitHub fine-grained token";
+            else if ((i == 0 || !gitlabTokenCharacter(static_cast<unsigned char>(contents[i - 1]))) && tail.starts_with("glpat-") &&
+                     tail.size() >= 26 && std::all_of(tail.begin() + 6, tail.begin() + 26, gitlabTokenCharacter) &&
+                     (tail.size() == 26 || !gitlabTokenCharacter(static_cast<unsigned char>(tail[26])))) kind = "GitLab access token";
             else if (tail.starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----") || tail.starts_with("-----BEGIN PRIVATE KEY-----") || tail.starts_with("-----BEGIN RSA PRIVATE KEY-----") ||
                      tail.starts_with("-----BEGIN EC PRIVATE KEY-----") || tail.starts_with("-----BEGIN DSA PRIVATE KEY-----") ||
                      tail.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") || tail.starts_with("-----BEGIN PGP PRIVATE KEY BLOCK-----")) kind = "Private key";

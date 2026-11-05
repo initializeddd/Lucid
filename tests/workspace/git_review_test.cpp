@@ -68,11 +68,11 @@ int main() {
     std::string stagedBlob; bool blobPresent = false;
     if (!gitReadReviewedBlob(root / "nested", preview, "a file.txt", stagedBlob, blobPresent, error) || !blobPresent || stagedBlob != "one\nchanged\n++added\n") { std::fprintf(stderr, "staged read: %s, present=%d, bytes=%zu\n", error.c_str(), blobPresent, stagedBlob.size()); return 58; }
     if (gitReadReviewedBlob(root / "nested", preview, "../outside.txt", stagedBlob, blobPresent, error)) return 59;
-    { std::ofstream file(root / "nested/a file.txt"); file << "ghp_" << std::string(36, 'A') << "\n"; }
+    { std::ofstream file(root / "nested/a file.txt"); file << "ghp_" << std::string(36, 'A') << "\n" << "glpat-" << std::string(20, 'B') << "\n"; }
     if (cmd("add 'nested/a file.txt'") || !gitCommitPreview(root / "nested", preview, error)) return 60;
     { std::ofstream file(root / "nested/a file.txt"); file << "safe working tree\n"; }
     const auto stagedScan = lucid::modules::scanStagedSecrets(root / "nested", preview);
-    if (stagedScan.incomplete || stagedScan.findings.size() != 1 || stagedScan.findings[0].kind != "GitHub token") return 61;
+    if (stagedScan.incomplete || stagedScan.findings.size() != 2 || stagedScan.findings[0].kind != "GitHub token" || stagedScan.findings[1].kind != "GitLab access token") return 61;
     if (cmd("add 'nested/a file.txt'")) return 62;
     if (!lucid::modules::scanStagedSecrets(root / "nested", preview).incomplete) return 63;
     GitCommitPreview cleanPreview;

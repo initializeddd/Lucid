@@ -43,6 +43,7 @@
   "requires": [
     "snippet-v1",
     "snippet-placeholder-v1",
-    "snippet-placeholders-v2"
+    "snippet-placeholders-v2",
+    "snippet-indent-v1"
   ]
 }

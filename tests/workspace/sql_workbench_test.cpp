@@ -74,6 +74,12 @@ int main() {
     if (querySqliteSnapshot(snapshot, "SELECT :id").error.empty() || querySqliteSnapshotBound(snapshot, "SELECT :id", {}).error.empty()) return 32;
     if (querySqliteSnapshotBound(snapshot, "SELECT 1", {id}).error.empty() || querySqliteSnapshotBound(snapshot, "SELECT :id", {id, id}).error.empty()) return 33;
     if (querySqliteSnapshotBound(snapshot, "SELECT ?", {}).error.empty() || querySqliteSnapshotBound(snapshot, "SELECT ?1", {id}).error.empty()) return 34;
+    std::vector<SqlParameter> numbered{{"?1",SqlValueType::Integer,1,0,{}},{"?2",SqlValueType::Text,0,0,"two"}};
+    auto numberedRows=querySqliteSnapshotBound(snapshot,"SELECT ?2, ?1, ?1, '?3 :ignored' /* ? */",numbered);
+    if(!numberedRows.error.empty() || numberedRows.rows.size()!=1 || numberedRows.rows[0][0].value!="two" || numberedRows.rows[0][1].value!="1" || numberedRows.rows[0][2].value!="1") return 85;
+    for(const auto* sql:{"SELECT ?", "SELECT ?2", "SELECT ?01", "SELECT ?1, :alias", "SELECT :alias, ?1", "SELECT ?65"}) if(querySqliteSnapshotBound(snapshot,sql,numbered).error.empty()) return 86;
+    std::vector<SqlParameter> jsonNumbered; std::string numberError;
+    if(!parseSqlParametersJson(R"({"?1":{"type":"integer","value":"1"},"?2":{"type":"text","value":"two"}})",jsonNumbered,numberError) || jsonNumbered.size()!=2) return 87;
     if (querySqliteSnapshotBound(snapshot, "SELECT :id", {{"id", SqlValueType::Integer, 1, 0, {}}}).error.empty()) return 35;
     if (querySqliteSnapshotBound(snapshot, "SELECT :v", {{":v", SqlValueType::Float, 0, std::numeric_limits<double>::infinity(), {}}}).error.empty()) return 36;
     if (querySqliteSnapshotBound(snapshot, "SELECT :v", {{":v", SqlValueType::Text, 0, 0, std::string(256U * 1024U + 1, 'x')}}).error.empty()) return 37;

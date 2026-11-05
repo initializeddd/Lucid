@@ -47,6 +47,11 @@ int main() {
     if (!expandSnippet("{{placeholder:α}} + {{placeholder:two\nlines}}{{cursor}}!", "", snippet, expansionError, true, true) ||
         snippet.text != "α + two\nlines!" || snippet.fields.size() != 2 || snippet.fields[0].start != 0 || snippet.fields[0].end != 2 ||
         snippet.fields[1].start != 5 || snippet.fields[1].end != 14 || snippet.finalOffset != 14 || snippet.finalFieldIndex != 2) return 58;
+    if (!expandSnippet("{{placeholder:α}}\n{{placeholder:two\nlines}}{{cursor}}!", "", snippet, expansionError, true, true) ||
+        !indentSnippet(snippet," \t",expansionError) || snippet.text!="α\n \ttwo\n \tlines!" ||
+        snippet.fields.size()!=2 || snippet.text.substr(snippet.fields[1].start,snippet.fields[1].end-snippet.fields[1].start)!="two\n \tlines" ||
+        snippet.finalOffset!=snippet.text.size()-1) return 130;
+    if (indentSnippet(snippet,"x",expansionError)) return 131;
     if (expandSnippet("{{placeholder:x}}{{placeholder:y}}", "", snippet, expansionError, true) ||
         expandSnippet("{{placeholder:x}}{{placeholder:unclosed", "", snippet, expansionError, true, true)) return 59;
     if (!expandSnippet("line\r\n{{placeholder:a\rb}}{{cursor}}", "", snippet, expansionError, true, true) ||

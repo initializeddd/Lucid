@@ -6282,6 +6282,12 @@ void Application::applyModuleCommand() {
             setCommandStatus(error.empty() ? "Snippet expands to empty text" : error, true); return;
         }
         const auto start = m_document.hasSelection() ? m_document.selectionStart() : editor::TextPosition{m_document.cursorLine(), m_document.cursorColumn()};
+        if (command.snippet && std::find(found->requirements.begin(),found->requirements.end(),"snippet-indent-v1")!=found->requirements.end()) {
+            std::string indentation;
+            const auto& line=m_document.line(start.line);
+            for(std::size_t i=0;i<start.column && i<line.size() && (line[i]==U' ' || line[i]==U'\t');++i) indentation.push_back(static_cast<char>(line[i]));
+            if(!modules::indentSnippet(expanded,indentation,error)) {setCommandStatus(error,true);return;}
+        }
         const auto before = multiple && !expanded.fields.empty() ? m_document.toUtf8() : std::string{};
         const auto insertionOffset = before.empty() ? 0 : snippetByteOffset(before, start);
         m_snippetSession.reset();

@@ -18,5 +18,11 @@ int main() {
     if (!scanSecretText("fixture", "x" + std::string("ASIA") + std::string(16, 'A')).findings.empty()) return 5;
     const auto extraKeys = scanSecretText("fixture", "-----BEGIN DSA PRIVATE KEY-----\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n-----BEGIN PGP PUBLIC KEY BLOCK-----\n");
     if (extraKeys.findings.size() != 2 || extraKeys.findings[0].kind != "Private key" || extraKeys.findings[1].kind != "Private key" || extraKeys.findings[1].line != 1) return 6;
+    const auto token = std::string("glpat-") + "abCD09_-" + std::string(12, 'Z');
+    const auto gitlab = scanSecretText("fixture", "\xce\xb2 \"" + token + "\"\n");
+    if (gitlab.incomplete || gitlab.findings.size() != 1 || gitlab.findings[0].kind != "GitLab access token" || gitlab.findings[0].line != 0 || gitlab.findings[0].column != 3 || gitlab.findings[0].path != "fixture" || gitlab.findings[0].contentSha256.size() != 64) return 7;
+    for (const auto& invalid : {"x" + token, "-" + token, token + "x", token + "-", token.substr(0, token.size()-1), std::string("glpat-") + std::string(19,'A') + "!"})
+        if (!scanSecretText("fixture", invalid).findings.empty()) return 8;
+    if (!scanSecretText("fixture", token, nullptr, 0).incomplete) return 9;
     return 0;
 }

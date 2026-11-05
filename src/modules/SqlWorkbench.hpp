@@ -53,8 +53,8 @@ struct SqlCsvExport {
 [[nodiscard]] bool saveSqlResultCsv(workspace::Project& project, std::string_view databasePath,
     std::string_view destination, const SqlCsvExport& csv, std::string& error,
     const std::string* expected = nullptr, const std::atomic_bool* cancel = nullptr);
-// Parameter names include a SQLite prefix (:, @ or $), followed by an ASCII
-// identifier. Text and blob values may contain NUL bytes. No SQL interpolation
+// Parameter names are :name, @name, $name or explicitly numbered ?1.. ?64.
+// Text and blob values may contain NUL bytes. No SQL interpolation
 // is performed; values are passed to SQLite through its binding API.
 struct SqlParameter {
     std::string name;
@@ -76,11 +76,14 @@ struct SqlParameter {
 // output is SQLite's EXPLAIN QUERY PLAN rather than the query's result rows.
 [[nodiscard]] SqlQueryResult querySqliteSnapshot(std::string_view database, std::string_view sql,
                                                bool explain = false, const std::atomic_bool* cancel = nullptr);
-// Every statement parameter must be named and supplied exactly once; unused,
-// positional, duplicate, and missing bindings are rejected. At most 64 values,
+// Every statement parameter must be supplied exactly once; anonymous, mixed named
+// and numbered, sparse numbered, duplicate and missing bindings are rejected. At most 64 values,
 // 256 KiB per text/blob and 1 MiB total payload are accepted.
 [[nodiscard]] SqlQueryResult querySqliteSnapshotBound(std::string_view database, std::string_view sql,
     const std::vector<SqlParameter>& parameters, bool explain = false, const std::atomic_bool* cancel = nullptr);
+// Internal safety helpers shared by query and change-preview paths.
+[[nodiscard]] bool validSqlParameterName(std::string_view name);
+[[nodiscard]] bool safeSqlParameterSyntax(std::string_view sql);
 struct SqlSchemaObject {
     std::string type, name, table, definition;
     bool definitionAvailable = false, truncated = false;

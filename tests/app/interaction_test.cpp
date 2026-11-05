@@ -347,6 +347,17 @@ struct ApplicationInteractionTest {
             app.handleEditorKey({input::Key::Tab, input::KeyAction::Press}, false); app.m_document.pasteUtf8("β");
             app.handleEditorKey({input::Key::Tab, input::KeyAction::Press}, false);
             if (app.m_snippetSession || app.m_document.toUtf8() != "prefix longer + β!" || app.m_document.cursorColumn() != 17) return 427;
+            const std::string indentManifest = R"({"name":"Indented","version":"1","requires":["snippet-v1","snippet-placeholders-v2","snippet-indent-v1"],"permissions":{"project":false,"network":false,"processes":false,"settings":false},"commands":[{"title":"Indented fields","insert":"{{placeholder:name}}\n  {{placeholder:body}}{{cursor}}","snippet":true}]})";
+            if(!modules::install(app.m_moduleRoot,"indented",indentManifest,error) || !modules::setEnabled(app.m_moduleRoot,"indented",true,error) || !modules::list(app.m_moduleRoot,app.m_modules,error)) return 1114;
+            const auto indentModule=std::find_if(app.m_modules.begin(),app.m_modules.end(),[](const auto& m){return m.id=="indented";});
+            if(indentModule==app.m_modules.end()) return 1115;
+            app.m_moduleSelected=static_cast<std::size_t>(indentModule-app.m_modules.begin());app.m_document=editor::Document::fromUtf8("  ");app.m_document.setCursor(0,2);app.m_modulePage=0;
+            app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();app.m_selectedSuggestion=0;app.applyModuleCommand();
+            if(app.m_document.toUtf8()!="  name\n    body" || app.m_document.selectionUtf8()!="name") return 1116;
+            app.m_document.pasteUtf8("long");app.handleEditorKey({input::Key::Tab,input::KeyAction::Press},false);
+            if(app.m_document.selectionUtf8()!="body") return 1117;
+            app.m_document.pasteUtf8("x");app.handleEditorKey({input::Key::Tab,input::KeyAction::Press},false);
+            if(app.m_document.toUtf8()!="  long\n    x" || app.m_document.cursorLine()!=1 || app.m_document.cursorColumn()!=5) return 1118;
             app.m_moduleRoot = previousRoot; app.m_modules = previousModules;
         }
         {

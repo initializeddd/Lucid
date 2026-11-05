@@ -13,12 +13,6 @@ namespace {
 constexpr std::size_t maxDb = 64U*1024U*1024U, maxSql = 1024U*1024U;
 using Db = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using Stmt = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
-bool validBindingName(std::string_view name) {
-    if (name.size()<2 || name.size()>129 || (name[0]!=':' && name[0]!='@' && name[0]!='$')) return false;
-    const auto first=[](unsigned char c) { return (c>='a' && c<='z') || (c>='A' && c<='Z') || c=='_'; };
-    const auto rest=[&](unsigned char c) { return first(c) || (c>='0' && c<='9'); };
-    return first(static_cast<unsigned char>(name[1])) && std::all_of(name.begin()+2,name.end(),rest);
-}
 int authorize(void*, int action, const char* first, const char*, const char* schema, const char* trigger) {
     if (trigger) return SQLITE_DENY;
     switch (action) {
@@ -54,10 +48,11 @@ SqlChangePreview previewSqliteChangeBound(std::string_view database, std::string
     if (database.size()<100 || database.size()>maxDb || database.substr(0,16)!=std::string_view("SQLite format 3\0",16)) return fail("Expected a SQLite snapshot of at most 64 MiB");
     if (static_cast<unsigned char>(database[18])!=1 || static_cast<unsigned char>(database[19])!=1) return fail("WAL databases require a standalone snapshot");
     if (sql.empty() || sql.size()>maxSql || sql.find('\0')!=std::string_view::npos || classifySql(sql).kind!=SqlStatementKind::DataChange) return fail("Expected one supported data-change statement");
+    if (!safeSqlParameterSyntax(sql)) return fail("Unsupported or mixed SQL parameter syntax");
     if (parameters.size()>64) return fail("Too many SQL parameters");
     std::map<std::string,const SqlParameter*> bindings; std::size_t total=0;
     for (const auto& parameter:parameters) {
-        if (!validBindingName(parameter.name) || !bindings.emplace(parameter.name,&parameter).second) return fail("Invalid or duplicate SQL parameter name");
+        if (!validSqlParameterName(parameter.name) || !bindings.emplace(parameter.name,&parameter).second) return fail("Invalid or duplicate SQL parameter name");
         switch(parameter.type) {
         case SqlValueType::Null: case SqlValueType::Integer: break;
         case SqlValueType::Float: if (!std::isfinite(parameter.real)) return fail("SQL floating-point parameter must be finite"); break;
@@ -87,7 +82,7 @@ SqlChangePreview previewSqliteChangeBound(std::string_view database, std::string
     const int bindingCount=sqlite3_bind_parameter_count(stmt.get());
     for (int i=1;i<=bindingCount;++i) {
         const char* name=sqlite3_bind_parameter_name(stmt.get(),i);
-        if (!name || !validBindingName(name)) return fail("Only named SQL parameters are supported");
+        if (!name || !validSqlParameterName(name)) return fail("Only named or contiguous numbered SQL parameters are supported");
         const auto found=bindings.find(name); if (found==bindings.end()) return fail("Missing SQL parameter binding");
         const auto& parameter=*found->second; int bound=SQLITE_MISUSE;
         switch(parameter.type) {

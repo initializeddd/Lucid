@@ -13,7 +13,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Public documentation site built with MkDocs Material, including a landing page, screenshots and a demo.
 - CodeQL, OpenSSF Scorecard and dependency-review workflows, plus `SUPPORT.md` and a public security policy.
-- Declarative manifests for 30 in-progress modules, with a permission preview and Lucid-provided actions for tasks such as coverage review, API requests, Git history, diagnostics and binary inspection. These new packages have not yet been published.
+- Declarative manifests for 30 in-progress modules, with a permission preview and Lucid-provided actions for tasks such as coverage review, API requests, Git history, diagnostics and binary inspection. The catalog contains these modules.
 - Reviewed local coverage and benchmark generators, linked snippet fields, and additional Markdown, CMake, SQL and accessibility workflows; see the [module guide](docs/modules.md) for supported formats and limits.
 
 ### Changed

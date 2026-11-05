@@ -4,13 +4,13 @@
 
 Keyboard-first. Path-native. Drawn entirely on the GPU.
 
-[Download the beta](https://github.com/initializeddd/Lucid/releases){ .md-button .md-button--primary }
+[Download Lucid](https://github.com/initializeddd/Lucid/releases){ .md-button .md-button--primary }
 [Get started](getting-started.md){ .md-button }
 [View on GitHub](https://github.com/initializeddd/Lucid){ .md-button }
 
-!!! warning "Beta software"
-    Lucid is in beta. File formats and behavior may change between releases. These guides describe
-    the current source tree, which can differ from the downloadable beta. See the
+!!! note "Feature maturity"
+    Features are at different stages of maturity, and file formats and behavior may change.
+    These guides describe the current source tree, which can differ from the release. See the
     [changelog](https://github.com/initializeddd/Lucid/blob/main/CHANGELOG.md) and
     [roadmap](roadmap.md).
 
@@ -63,7 +63,7 @@ These short, sampled animations show the lighthouse scene in the welcome screen 
 
 ## Install
 
-Download the latest beta from the
+Download the latest release from the
 [releases page](https://github.com/initializeddd/Lucid/releases).
 
 | Platform | Artifacts | Notes |

@@ -23,6 +23,14 @@ def module_version_exists(reference, expected):
         detail = (error.stderr or b"").decode("utf-8", "replace")
         if re.search(r"\b404\s+Not Found\b", detail, re.IGNORECASE):
             return False
+        # ORAS can collapse GHCR's HTTP 404 to "not found". Confirm that
+        # the whole package is absent through GitHub before allowing a push.
+        if detail.rstrip().endswith(": not found") and reference.startswith("ghcr.io/"):
+            package = reference.split("/", 2)[2].split(":", 1)[0]
+            check = subprocess.run(["gh", "api", f"/user/packages/container/{package}"],
+                                   cwd=ROOT, capture_output=True)
+            if check.returncode and b"HTTP 404" in check.stderr:
+                return False
         raise ValueError(f"Cannot establish whether module version exists: {reference}") from error
     manifest = strict_json(raw)
     layers = manifest.get("layers") if isinstance(manifest, dict) else None

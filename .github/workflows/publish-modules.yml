@@ -45,6 +45,8 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | oras login ghcr.io --username '${{ github.actor }}' --password-stdin
       - name: Publish modules and generate catalog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 tools/modules/publish.py --publish
       - name: Verify published packages
         run: python3 tools/modules/publish.py --verify

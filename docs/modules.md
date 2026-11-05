@@ -8,7 +8,7 @@ Some actions run selected programs or tests, which can themselves access the
 network. There is no arbitrary-code module runtime. The GitHub catalog lists
 modules published in Lucid's catalog package; it is not a global index of every
 GitHub package. The legacy catalog and starter package are publicly downloadable
-without a GitHub account; new packages must be made public before anonymous use.
+without a GitHub account; catalog packages are publicly downloadable.
 
 Open **Run > Modules** or press **Command+Shift+M** (Ctrl+Shift+M on
 Windows/Linux). Choose **Browse GitHub modules** to load the catalog, or

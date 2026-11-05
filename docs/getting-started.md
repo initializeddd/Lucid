@@ -6,7 +6,7 @@ Lucid is a project-based editor. Open a project folder first, then open files in
 
 Download [Lucid v0.3.0](https://github.com/initializeddd/Lucid/releases/tag/v0.3.0)
 for your platform, or browse all [releases](https://github.com/initializeddd/Lucid/releases). The
-beta release page includes `SHA256SUMS.txt` for checking the downloaded files.
+release page includes `SHA256SUMS.txt` for checking the downloaded files.
 
 To verify a download, calculate its SHA-256 digest and compare it with the line for that filename
 in `SHA256SUMS.txt`. On macOS use `shasum -a 256 <filename>`; on Linux use

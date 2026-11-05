@@ -64,7 +64,7 @@ These short, sampled animations show the lighthouse scene in the welcome screen 
 | Local AI and code cleanup | Preview; small selections, local inference and explicit acceptance |
 | Git review | File-level staging, local commits and reviewed upstream operations; the optional Pull-Request Companion supports a bounded GitHub review workflow |
 | Task workspaces and recovery | Local previews; recovery has [known limits](#recovery-snapshots) |
-| Modules | Declarative manifests invoke supported Lucid actions; the 30 new module packages are not yet published. See [module guide](docs/modules.md) for access and limitations |
+| Modules | Declarative manifests invoke supported Lucid actions; the catalog contains 31 published modules. See [module guide](docs/modules.md) for access and limitations |
 | Language intelligence | C/C++ through installed clangd, including reviewed rename; automatic server installation is not yet supported |
 | Debugger | LLDB-based C/C++ workflow; macOS tested, Linux and Windows require platform validation |
 | Multiplayer | Not yet available |
@@ -512,8 +512,7 @@ surface. Preview a local manifest or supported GitHub package before installing 
 modules show their requested project, network, process, settings and device access
 and start disabled. Supported commands include snippets and Lucid-provided tools;
 there is no arbitrary-code module runtime. Some actions run programs with your
-privileges, and network actions ask for confirmation. The 30 new module packages
-are not published yet; the existing public catalog does not contain them. See the
+privileges, and network actions ask for confirmation. The public catalog contains 31 modules. See the
 [module guide](docs/modules.md) for commands, permissions and limitations.
 
 ## AI settings

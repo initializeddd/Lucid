@@ -36,9 +36,19 @@ SqlClassification classifySql(std::string_view sql) {
             if (!closed) return {SqlStatementKind::Unknown, "Unterminated quoted value"};
             continue;
         }
-        // Dialect-specific dollar quotes, backslash escapes, and NULs are
-        // deliberately unsupported because they can hide statement boundaries.
-        if (c == '$' || c == '\\' || c == 0 || c >= 128) return {SqlStatementKind::Unknown, "Unsupported SQL syntax"};
+        // Accept only simple SQLite $name parameters. A second '$' still fails
+        // closed, so PostgreSQL-style dollar quotes cannot hide a semicolon.
+        if (c == '$') {
+            const auto first = [](unsigned char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'; };
+            const auto rest = [&](unsigned char ch) { return first(ch) || (ch >= '0' && ch <= '9'); };
+            const auto start = ++i;
+            if (i == sql.size() || !first(static_cast<unsigned char>(sql[i]))) return {SqlStatementKind::Unknown, "Unsupported SQL syntax"};
+            while (i < sql.size() && rest(static_cast<unsigned char>(sql[i]))) ++i;
+            if (i - start > 128) return {SqlStatementKind::Unknown, "Unsupported SQL syntax"};
+            continue;
+        }
+        // Backslash escapes and NULs can hide statement boundaries.
+        if (c == '\\' || c == 0 || c >= 128) return {SqlStatementKind::Unknown, "Unsupported SQL syntax"};
         ++i;
     }
     if (!seen) return {SqlStatementKind::Empty, "No statement"};

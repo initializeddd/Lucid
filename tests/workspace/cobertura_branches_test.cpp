@@ -15,6 +15,12 @@ int main(){namespace fs=std::filesystem; const auto root=fs::temp_directory_path
  r=parse("<line number='1' hits='1' branch='true'/><line number='1' hits='1' branch='true' condition-coverage='50% (1/2)'/>");if(!r.incomplete || r.lines[0].branchesCovered || r.lines[0].branchesUncovered || r.lines[0].branchesUnknown!=2) return 6;
  r=parse("<line number='1' hits='1' branch='false' condition-coverage='50% (1/2)'/>");if(!r.incomplete || r.lines[0].branchesCovered) return 7;
  r=parse("<line number='1' hits='1' branch='true' condition-coverage='33% (1/3)'/>");if(r.incomplete || r.lines[0].branchesCovered!=1 || r.lines[0].branchesUncovered!=2)return 9;
+ const auto method=parseCobertura(project,"<coverage><class filename='a.cpp'><methods><method name='a'><lines><line number='1' hits='0' branch='true' condition-coverage='50% (1/2)'/><line number='2' hits='1'/></lines></method><method name='b'><lines><line number='2' hits='0'/></lines></method></methods></class></coverage>");
+ if(method.incomplete || method.lines.size()!=2 || method.lines[0].covered || method.lines[0].branchesCovered!=1 || method.lines[0].branchesUncovered!=1 || !method.lines[1].covered)return 10;
+ const auto mixed=parseCobertura(project,"<coverage><class filename='a.cpp'><methods><method><lines><line number='1' hits='1' branch='true' condition-coverage='50% (1/2)'/><line number='1' hits='1' branch='true' condition-coverage='100% (2/2)'/><line number='2' hits='1'/></lines></method></methods><lines><line number='1' hits='0' branch='false'/></lines></class></coverage>");
+ if(mixed.incomplete || mixed.lines.size()!=2 || mixed.lines[0].covered || mixed.lines[0].branchesCovered || !mixed.lines[1].covered)return 11;
+ const auto bounded=parseCobertura(project,"<coverage><class filename='a.cpp'><methods><method><lines><line number='1' hits='1'/><line number='2' hits='0'/></lines></method></methods></class></coverage>",nullptr,1);
+ if(!bounded.incomplete || bounded.lines.size()!=1)return 12;
  std::atomic_bool cancel{true};r=parseCobertura(project,"<coverage/>",&cancel);if(!r.incomplete)return 8;
  fs::remove_all(root);return 0;
 }

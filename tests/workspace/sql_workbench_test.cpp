@@ -19,6 +19,9 @@ int main() {
     if (classifySql("select 'unterminated").kind != SqlStatementKind::Unknown) return 8;
     if (classifySql("select 1 /* nested /* x */ ; */").kind != SqlStatementKind::Unknown) return 9;
     if (classifySql("select $$; DROP x$$").kind != SqlStatementKind::Unknown) return 10;
+    if (classifySql("UPDATE t SET v=$value WHERE id=$id").kind != SqlStatementKind::DataChange ||
+        classifySql("UPDATE t SET v=$tag$; DELETE FROM t; $tag$").kind != SqlStatementKind::Unknown ||
+        classifySql("UPDATE t SET v=$9").kind != SqlStatementKind::Unknown) return 54;
     if (classifySql(" -- just comment").kind != SqlStatementKind::Empty) return 11;
     if (classifySql(std::string(1024U*1024U+1,'x')).kind != SqlStatementKind::Unknown) return 12;
     if (classifySql("SELECT1").kind != SqlStatementKind::Unknown) return 13;

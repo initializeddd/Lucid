@@ -3,9 +3,57 @@
 #include <charconv>
 #include <cmath>
 #include <optional>
+#include <algorithm>
 namespace lucid::modules {
 namespace {
 constexpr std::size_t maxSpec=256U*1024U, maxAssertions=64, maxExpected=4096, maxPointer=1024, maxBody=4U*1024U*1024U, maxJsonBody=1024U*1024U;
+bool headerNameValid(std::string_view s) {
+    if(s.empty() || s.size()>256) return false;
+    for(unsigned char c:s) if(!((c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') || std::string_view("!#$%&'*+-.^_`|~").find(c)!=std::string_view::npos)) return false;
+    return true;
+}
+bool headerValueValid(std::string_view s) {
+    return s.size()<=maxExpected && std::none_of(s.begin(),s.end(),[](unsigned char c){return (c<32 && c!='\t') || c==127;});
+}
+char asciiLower(char c) { return c>='A' && c<='Z' ? static_cast<char>(c-'A'+'a') : c; }
+bool equalHeaderName(std::string_view a,std::string_view b) {
+    return a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin(),[](char x,char y){return asciiLower(x)==asciiLower(y);});
+}
+bool headerMatches(const ApiResponse& response,std::string_view name,std::string_view expected) {
+    // libcurl can report interim response blocks. Only the last complete status
+    // block is eligible; duplicate headers are ambiguous and never pass.
+    std::string_view headers=response.headers, block; std::size_t pos=0; bool foundBlock=false;
+    while(pos<headers.size()) {
+        auto end=headers.find('\n',pos); if(end==headers.npos) return false;
+        auto line=headers.substr(pos,end-pos); if(!line.empty() && line.back()=='\r') line.remove_suffix(1);
+        if(!line.starts_with("HTTP/")) return false;
+        auto space=line.find(' '); if(space==line.npos || space+4>line.size()) return false;
+        long status=0; auto parsed=std::from_chars(line.data()+space+1,line.data()+space+4,status);
+        if(parsed.ec!=std::errc{} || parsed.ptr!=line.data()+space+4 || (space+4<line.size() && line[space+4]!=' ')) return false;
+        pos=end+1; const auto start=pos; bool complete=false;
+        while(pos<headers.size()) {
+            end=headers.find('\n',pos); if(end==headers.npos) return false;
+            line=headers.substr(pos,end-pos); if(!line.empty() && line.back()=='\r') line.remove_suffix(1);
+            if(line.empty()) { block=headers.substr(start,pos-start); pos=end+1; complete=true; break; }
+            if(line.find(':')==line.npos || line.front()==' ' || line.front()=='\t') return false;
+            pos=end+1;
+        }
+        if(!complete) return false;
+        foundBlock=status==response.status;
+    }
+    if(!foundBlock) return false;
+    bool found=false,matched=false; pos=0;
+    while(pos<block.size()) {
+        auto end=block.find('\n',pos); if(end==block.npos) return false;
+        auto line=block.substr(pos,end-pos); if(!line.empty() && line.back()=='\r') line.remove_suffix(1);
+        auto colon=line.find(':'); auto key=line.substr(0,colon); if(!headerNameValid(key)) return false;
+        auto value=line.substr(colon+1); while(!value.empty() && (value.front()==' ' || value.front()=='\t')) value.remove_prefix(1);
+        while(!value.empty() && (value.back()==' ' || value.back()=='\t')) value.remove_suffix(1);
+        if(equalHeaderName(key,name)) { if(found) return false; found=true; matched=value==expected; }
+        pos=end+1;
+    }
+    return found && matched;
+}
 bool pointerValid(std::string_view p) {
     if (p.size()>maxPointer || (!p.empty() && p[0]!='/')) return false;
     for(std::size_t i=0;i<p.size();++i) if(p[i]=='~' && (++i==p.size() || (p[i]!='0' && p[i]!='1'))) return false;
@@ -42,14 +90,16 @@ bool parseApiAssertions(std::string_view json,std::vector<ApiAssertion>& asserti
     std::vector<ApiAssertion> parsed;
     for(const auto& entry:root->children[0].children) {
         if(entry.type!=editor::JsonType::Object) return fail("Invalid assertion");
-        const editor::JsonValue *type=nullptr,*value=nullptr,*pointer=nullptr;
+        const editor::JsonValue *type=nullptr,*value=nullptr,*pointer=nullptr,*name=nullptr;
         for(const auto& field:entry.children) {
             if(field.key=="type" && !type) type=&field;
             else if(field.key=="value" && !value) value=&field;
             else if(field.key=="pointer" && !pointer) pointer=&field;
+            else if(field.key=="name" && !name) name=&field;
             else return fail("Unknown or duplicate assertion field");
         }
         if(!type || type->type!=editor::JsonType::String || !value) return fail("Assertion type and value are required");
+        if(name && type->stringValue!="header_equals") return fail("Unexpected assertion field");
         ApiAssertion a{};
         if(type->stringValue=="status") {
             if(pointer || value->type!=editor::JsonType::Number || !std::isfinite(value->numberValue) || value->numberValue<100 || value->numberValue>599 || std::floor(value->numberValue)!=value->numberValue) return fail("Invalid status assertion");
@@ -67,6 +117,9 @@ bool parseApiAssertions(std::string_view json,std::vector<ApiAssertion>& asserti
             a.kind=isBool ? ApiAssertionKind::JsonBoolEquals : ApiAssertionKind::JsonNull;
             a.pointer=pointer->stringValue;
             if(isBool) a.expected=value->boolValue ? "true" : "false";
+        } else if(type->stringValue=="header_equals") {
+            if(pointer || !name || name->type!=editor::JsonType::String || !headerNameValid(name->stringValue) || value->type!=editor::JsonType::String || !headerValueValid(value->stringValue)) return fail("Invalid header assertion");
+            a.kind=ApiAssertionKind::HeaderEquals; a.pointer=name->stringValue; a.expected=value->stringValue;
         } else return fail("Unsupported assertion type");
         parsed.push_back(std::move(a));
     }
@@ -85,6 +138,7 @@ ApiAssertionReport evaluateApiAssertions(const ApiResponse& response,const std::
         case ApiAssertionKind::JsonStringEquals: if(a.expected.size()>maxExpected || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
         case ApiAssertionKind::JsonBoolEquals: if((a.expected!="true" && a.expected!="false") || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
         case ApiAssertionKind::JsonNull: if(!a.expected.empty() || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
+        case ApiAssertionKind::HeaderEquals: if(!headerNameValid(a.pointer) || !headerValueValid(a.expected)) return fail("Invalid assertion set"); break;
         default: return fail("Invalid assertion set");
         }
     }
@@ -96,6 +150,7 @@ ApiAssertionReport evaluateApiAssertions(const ApiResponse& response,const std::
         switch(a.kind) {
         case ApiAssertionKind::Status: result.passed=response.status==a.status; result.detail=result.passed?"Status matched":"Status did not match"; break;
         case ApiAssertionKind::BodyContains: result.passed=response.body.find(a.expected)!=std::string::npos; result.detail=result.passed?"Body contained expected text":"Body did not contain expected text"; break;
+        case ApiAssertionKind::HeaderEquals: result.passed=headerMatches(response,a.pointer,a.expected); result.detail=result.passed?"Header matched":"Header did not match or was unavailable"; break;
         case ApiAssertionKind::JsonStringEquals: {
             const auto* value=root ? follow(*root,a.pointer) : nullptr;
             result.passed=value && value->type==editor::JsonType::String && value->stringValue==a.expected;

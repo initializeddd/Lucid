@@ -5,7 +5,7 @@
 #include <string_view>
 #include <vector>
 namespace lucid::modules {
-enum class ApiAssertionKind { Status, BodyContains, JsonStringEquals, JsonBoolEquals, JsonNull };
+enum class ApiAssertionKind { Status, BodyContains, JsonStringEquals, JsonBoolEquals, JsonNull, HeaderEquals };
 struct ApiAssertion { ApiAssertionKind kind; long status=0; std::string pointer, expected; };
 struct ApiAssertionResult { ApiAssertionKind kind; bool passed=false; std::string detail; };
 struct ApiAssertionReport { std::vector<ApiAssertionResult> results; std::string error; };
@@ -14,6 +14,8 @@ struct ApiAssertionReport { std::vector<ApiAssertionResult> results; std::string
 // "pointer":"/data/id","value":"123"}]}. JSON boolean and null assertions
 // use json_bool_equals and json_null respectively. All fields are required and
 // unknown or duplicate fields are rejected. Values can contain secrets.
+// header_equals takes a case-insensitive HTTP header "name" and a string
+// "value"; duplicate or incomplete response headers do not match.
 [[nodiscard]] bool parseApiAssertions(std::string_view json, std::vector<ApiAssertion>& assertions, std::string& error);
 // Local-only; never sends or stores data. Fixed result messages do not reveal
 // expected values, response contents, JSON paths or transport error text. Failed

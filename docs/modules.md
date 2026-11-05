@@ -350,7 +350,9 @@ display limit as incomplete. Gutter markers and cursor status show imported cove
 for an unedited buffer that matches the source captured at import; markers disappear
 when that buffer changes. The report can still predate the captured source.
 Cobertura support covers class-level line hits, supported line-level branch
-fractions and project-contained source paths; method coverage is not imported.
+fractions and project-contained source paths. Method-level lines fill gaps where
+there is no class-level record for that file and line; class-level records take
+precedence when both are present. Method-level totals are not displayed.
 Branch counts use `condition-coverage` fractions, accepting ordinary percentage
 rounding. Conflicting duplicate counts are shown as unknown and mark the report
 incomplete; invalid or missing branch data also marks it incomplete. When no
@@ -550,7 +552,7 @@ same peripheral, with complete explicit field overrides. Simple peripheral array
 and numeric or comma-separated indexes are expanded. Field arrays expand up to
 64 elements with a nonzero bit increment, one `%s` name placeholder and numeric
 or comma-separated literal indexes; bit ranges and expanded metadata are bounded.
-Array `dimIndex` also accepts one inclusive decimal or same-case ASCII-letter range with exactly `dim` entries; zero-padded decimal endpoints must have equal width. Comma-separated indexes are treated as literals, so mixed ranges and lists are not expanded. Combining register arrays with cluster arrays is unsupported. Omitted data is marked incomplete with a reason. Device and peripheral size,
+Array `dimIndex` also accepts one inclusive decimal or same-case ASCII-letter range with exactly `dim` entries; zero-padded decimal endpoints must have equal width. Comma-separated indexes are treated as literals, so mixed ranges and lists are not expanded. Register arrays inside cluster arrays are expanded independently, including within peripheral arrays, subject to the same output, metadata and address limits. Omitted data is marked incomplete with a reason. Device and peripheral size,
 access and reset defaults are inherited when declared before registers, and
 register access is inherited by fields. Other linker-map formats
 and active target management are not supported.
@@ -672,10 +674,16 @@ contents. Assertion files may themselves contain sensitive plaintext. JSON check
 parse at most 1 MiB of the response, support string and boolean equality and null checks, and fail on
 ambiguous duplicate keys along a pointer; unsuccessful or incomplete responses
 cannot be checked. These checks do not establish that a service is secure.
+An assertion such as `{"type":"header_equals","name":"Content-Type","value":"application/json"}`
+checks a single header in the final complete HTTP response block. Header names
+are case-insensitive and surrounding HTTP whitespace is ignored in the received
+value. Duplicate headers, malformed blocks and incomplete headers do not match;
+values and names are not exposed in the result.
 
 The bound change-copy command also accepts a project-local typed bindings JSON
-file in the same format as bound queries. It binds `:name` and `@name` values
-without SQL interpolation; positional parameters and `$name` are unsupported.
+file in the same format as bound queries. It binds simple `:name`, `@name` and
+`$name` values without SQL interpolation; positional parameters and SQLite's
+extended `$name::suffix(...)` forms are unsupported.
 Values are hidden in the preview and may be sensitive plaintext in the bindings
 file. Before creating the copy, Lucid checks that the saved binding bytes still
 match the preview and rejects detected unsaved editor changes. External writers

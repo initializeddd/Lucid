@@ -14,7 +14,7 @@ constexpr std::size_t maxDb = 64U*1024U*1024U, maxSql = 1024U*1024U;
 using Db = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using Stmt = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 bool validBindingName(std::string_view name) {
-    if (name.size()<2 || name.size()>129 || (name[0]!=':' && name[0]!='@')) return false;
+    if (name.size()<2 || name.size()>129 || (name[0]!=':' && name[0]!='@' && name[0]!='$')) return false;
     const auto first=[](unsigned char c) { return (c>='a' && c<='z') || (c>='A' && c<='Z') || c=='_'; };
     const auto rest=[&](unsigned char c) { return first(c) || (c>='0' && c<='9'); };
     return first(static_cast<unsigned char>(name[1])) && std::all_of(name.begin()+2,name.end(),rest);

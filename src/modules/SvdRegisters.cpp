@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <charconv>
 #include <limits>
+#include <unordered_set>
 namespace lucid::modules {
 namespace {
 std::string_view trim(std::string_view s) { while(!s.empty() && (s.front()==' '||s.front()=='\n'||s.front()=='\r'||s.front()=='\t')) s.remove_prefix(1); while(!s.empty() && (s.back()==' '||s.back()=='\n'||s.back()=='\r'||s.back()=='\t')) s.remove_suffix(1); return s; }
@@ -201,23 +202,22 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                 if(!reg.skip && !peripheralSkip && !peripheral.empty() && base && !reg.name.empty() && reg.offset && clusterBase<=std::numeric_limits<std::uint64_t>::max()-*base && *reg.offset<=std::numeric_limits<std::uint64_t>::max()-*base-clusterBase && (!reg.size || (*reg.size>0 && *reg.size<=64))) {
                     const auto first=*base+clusterBase+*reg.offset;
                     std::size_t descriptionCost=reg.description.size(), enumCost=0; for(const auto& f:reg.fields) {descriptionCost+=f.description.size();enumCost+=f.values.size();}
-                    if (inCluster) reg.name=clusterName+"."+reg.name;
                     if (reg.dim || reg.increment || !reg.dimIndex.empty()) {
                         if (!reg.dim || !reg.increment || !*reg.dim || !*reg.increment || *reg.dim>10000 || reg.name.find("%s")==std::string::npos || reg.name.find("%s")!=reg.name.rfind("%s")) return fail("Invalid register array definition");
                         if (*reg.dim-1 > (std::numeric_limits<std::uint64_t>::max()-first)/ *reg.increment) return fail("Register array address overflow");
-                        std::vector<std::string> indexes;
+                        std::vector<std::string> indexes; std::unordered_set<std::string> seenIndexes;
                         if(!expandDimIndex(reg.dimIndex,*reg.dim)) return fail("Invalid register dimIndex range");
                     if (reg.dimIndex.empty()) { for (std::uint64_t i=0;i<*reg.dim;++i) indexes.push_back(std::to_string(i)); }
                         else {
-                            std::string_view list=reg.dimIndex; while (true) { auto comma=list.find(','); auto part=trim(list.substr(0,comma)); if (part.empty() || part.size()>64 || !std::all_of(part.begin(),part.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';})) return fail("Unsupported register dimIndex"); indexes.emplace_back(part); if (comma==std::string_view::npos) break; list.remove_prefix(comma+1); if (indexes.size()>*reg.dim) return fail("Register dimIndex count mismatch"); }
+                            std::string_view list=reg.dimIndex; while (true) { auto comma=list.find(','); auto part=trim(list.substr(0,comma)); if (part.empty() || part.size()>64 || !std::all_of(part.begin(),part.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';}) || !seenIndexes.emplace(part).second) return fail("Unsupported register dimIndex"); indexes.emplace_back(part); if (comma==std::string_view::npos) break; list.remove_prefix(comma+1); if (indexes.size()>*reg.dim) return fail("Register dimIndex count mismatch"); }
                             if (indexes.size()!=*reg.dim) return fail("Register dimIndex count mismatch");
                         }
-                        for (std::size_t i=0;i<indexes.size();++i) { if (out.registers.size()>=maxRegisters) {warn("Register limit reached"); break;} if (reg.fields.size()>100000-emittedFields) {warn("Expanded field limit reached"); break;} if(descriptionCost>16U*1024U*1024U-descriptionBytes){warn("Expanded description limit reached");break;} if(enumCost>100000-emittedEnums){warn("Expanded enumerated value limit reached");break;}emittedEnums+=enumCost;descriptionBytes+=descriptionCost; emittedFields+=reg.fields.size(); auto name=reg.name; name.replace(name.find("%s"),2,indexes[i]); out.registers.push_back({peripheral,std::move(name),reg.access,first+i* *reg.increment,static_cast<unsigned>(reg.size.value_or(0)),reg.reset,reg.fields,reg.description}); }
+                        for (std::size_t i=0;i<indexes.size();++i) { if (out.registers.size()>=maxRegisters) {warn("Register limit reached"); break;} if (reg.fields.size()>100000-emittedFields) {warn("Expanded field limit reached"); break;} if(descriptionCost>16U*1024U*1024U-descriptionBytes){warn("Expanded description limit reached");break;} if(enumCost>100000-emittedEnums){warn("Expanded enumerated value limit reached");break;}emittedEnums+=enumCost;descriptionBytes+=descriptionCost; emittedFields+=reg.fields.size(); auto registerName=reg.name; registerName.replace(registerName.find("%s"),2,indexes[i]); if(inCluster) registerName=clusterName+"."+registerName; out.registers.push_back({peripheral,std::move(registerName),reg.access,first+i* *reg.increment,static_cast<unsigned>(reg.size.value_or(0)),reg.reset,reg.fields,reg.description}); }
                     } else if(out.registers.size()>=maxRegisters) warn("Register limit reached");
                     else if(reg.fields.size()>100000-emittedFields) warn("Expanded field limit reached");
                     else if(descriptionCost>16U*1024U*1024U-descriptionBytes) warn("Expanded description limit reached");
                     else if(enumCost>100000-emittedEnums) warn("Expanded enumerated value limit reached");
-                    else { emittedEnums+=enumCost;descriptionBytes+=descriptionCost; emittedFields+=reg.fields.size(); out.registers.push_back({peripheral,reg.name,reg.access,first,static_cast<unsigned>(reg.size.value_or(0)),reg.reset,std::move(reg.fields),reg.description}); }
+                    else { emittedEnums+=enumCost;descriptionBytes+=descriptionCost; emittedFields+=reg.fields.size(); out.registers.push_back({peripheral,inCluster ? clusterName+"."+reg.name : reg.name,reg.access,first,static_cast<unsigned>(reg.size.value_or(0)),reg.reset,std::move(reg.fields),reg.description}); }
                 } else warn("Some registers have missing or invalid metadata"); inReg=false;
             }
         } else { if(name=="field") inField=false; if(name=="register") inReg=false; if(name=="enumeratedValue") inEnum=false; }
@@ -256,10 +256,10 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
         if (name=="cluster" && !node.skip) {
             if (clusterDim || clusterIncrement || !clusterIndexes.empty()) {
                 if (!clusterDim || !clusterIncrement || !*clusterDim || !*clusterIncrement || *clusterDim>10000 || clusterName.find("%s")==std::string::npos || clusterName.find("%s")!=clusterName.rfind("%s")) return fail("Invalid cluster array definition");
-                std::vector<std::string> indexes;
+                std::vector<std::string> indexes; std::unordered_set<std::string> seenIndexes;
                 if(!expandDimIndex(clusterIndexes,*clusterDim)) return fail("Invalid cluster dimIndex range");
                     if (clusterIndexes.empty()) {for (std::uint64_t i=0;i<*clusterDim;++i) indexes.push_back(std::to_string(i));}
-                else {std::string_view list=clusterIndexes; while(true) {auto comma=list.find(','); auto item=trim(list.substr(0,comma)); if(item.empty() || item.size()>64 || !std::all_of(item.begin(),item.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';})) return fail("Unsupported cluster dimIndex"); indexes.emplace_back(item); if(comma==std::string_view::npos) break; list.remove_prefix(comma+1); if(indexes.size()>*clusterDim) return fail("Cluster dimIndex count mismatch");} if(indexes.size()!=*clusterDim) return fail("Cluster dimIndex count mismatch");}
+                else {std::string_view list=clusterIndexes; while(true) {auto comma=list.find(','); auto item=trim(list.substr(0,comma)); if(item.empty() || item.size()>64 || !std::all_of(item.begin(),item.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';}) || !seenIndexes.emplace(item).second) return fail("Unsupported cluster dimIndex"); indexes.emplace_back(item); if(comma==std::string_view::npos) break; list.remove_prefix(comma+1); if(indexes.size()>*clusterDim) return fail("Cluster dimIndex count mismatch");} if(indexes.size()!=*clusterDim) return fail("Cluster dimIndex count mismatch");}
                 std::vector<SvdRegister> templates(out.registers.begin()+static_cast<std::ptrdiff_t>(clusterStart),out.registers.end());
                 const auto marker=clusterName.find("%s");
                 for (const auto& item:templates) if (*clusterDim-1 > (std::numeric_limits<std::uint64_t>::max()-item.address)/ *clusterIncrement) return fail("Cluster array address overflow");

@@ -66,8 +66,8 @@ std::string trim(std::string s) {
 }
 }
 CoverageReport parseCobertura(const workspace::Project& project, std::string_view report, const std::atomic_bool* cancel, std::size_t limit) {
-    struct Entry { bool covered=false, branchSeen=false, branchConflict=false; BranchCounts branch{}; std::size_t unknown=0; };
-    CoverageReport out; std::map<std::pair<std::string,std::size_t>, Entry> lines;
+    struct Entry { bool covered=false, branchSeen=false, branchConflict=false, branchIssue=false; BranchCounts branch{}; std::size_t unknown=0; };
+    CoverageReport out; std::map<std::pair<std::string,std::size_t>, Entry> lines, methodLines;
     if (report.size() > workspace::Project::maxFileSize) { out.incomplete = true; return out; }
     if (std::any_of(report.begin(), report.end(), [](unsigned char c) { return c < 0x20 && c != 9 && c != 10 && c != 13; })) { out.incomplete = true; return out; }
     limit = std::min<std::size_t>(limit, 100000);
@@ -139,7 +139,9 @@ CoverageReport parseCobertura(const workspace::Project& project, std::string_vie
             const auto it=attrs.find("filename"); currentFile = it == attrs.end() || it->second.empty() || it->second.size()>4096 ? std::string{} : resolveFile(it->second);
             if (it==attrs.end() || it->second.empty() || it->second.size()>4096) { ++out.skippedFiles; out.incomplete=true; } classValid=!currentFile.empty();
         }
-        if (name=="line" && classValid && stack.size()>=2 && stack.back()=="lines" && stack[stack.size()-2]=="class") {
+        const bool classLine = stack.size()>=2 && stack.back()=="lines" && stack[stack.size()-2]=="class";
+        const bool methodLine = stack.size()>=4 && stack.back()=="lines" && stack[stack.size()-2]=="method" && stack[stack.size()-3]=="methods" && stack[stack.size()-4]=="class";
+        if (name=="line" && classValid && (classLine || methodLine)) {
             const auto n=attrs.find("number"), h=attrs.find("hits"); std::size_t number=0; unsigned long long hits=0;
             if (n==attrs.end() || h==attrs.end()) out.incomplete=true;
             else { const auto a=std::from_chars(n->second.data(),n->second.data()+n->second.size(),number), b=std::from_chars(h->second.data(),h->second.data()+h->second.size(),hits);
@@ -150,14 +152,14 @@ CoverageReport parseCobertura(const workspace::Project& project, std::string_vie
                     if(condition!=attrs.end()) { hasBranch=true; if((branch!=attrs.end() && branch->second=="false") || !parseBranchCounts(condition->second,parsed)) branchValid=false; }
                     else if(branch!=attrs.end() && branch->second=="true") {hasBranch=true;branchValid=false;}
                     else if(branch!=attrs.end() && branch->second=="false") hasBranch=true;
-                    if(!branchValid) out.incomplete=true;
-                    auto key=std::make_pair(currentFile,number-1); auto found=lines.find(key);
-                    if(found==lines.end()) { if(lines.size()>=limit) {out.incomplete=true;break;} found=lines.emplace(std::move(key),Entry{}).first; }
-                    auto& entry=found->second; entry.covered|=hits!=0;
+                    auto& target=methodLine ? methodLines : lines;
+                    auto key=std::make_pair(currentFile,number-1); auto found=target.find(key);
+                    if(found==target.end()) { if(target.size()>=limit) {out.incomplete=true;break;} found=target.emplace(std::move(key),Entry{}).first; }
+                    auto& entry=found->second; entry.covered|=hits!=0; if(!branchValid) entry.branchIssue=true;
                     if(hasBranch && branchValid) {
                         const auto total=parsed.covered+parsed.uncovered;
                         if(entry.branchConflict) entry.unknown=std::max(entry.unknown,total);
-                        else if(entry.branchSeen && (entry.branch.covered!=parsed.covered || entry.branch.uncovered!=parsed.uncovered)) {entry.branchConflict=true;entry.unknown=std::max(total,entry.branch.covered+entry.branch.uncovered);entry.branch={};out.incomplete=true;}
+                        else if(entry.branchSeen && (entry.branch.covered!=parsed.covered || entry.branch.uncovered!=parsed.uncovered)) {entry.branchConflict=true;entry.branchIssue=true;entry.unknown=std::max(total,entry.branch.covered+entry.branch.uncovered);entry.branch={};}
                         else {entry.branchSeen=true;entry.branch=parsed;}
                     } else if(hasBranch && !branchValid) {entry.unknown=std::max(entry.unknown,entry.branch.covered+entry.branch.uncovered);entry.branch={};entry.branchConflict=true;}
                 }
@@ -166,7 +168,15 @@ CoverageReport parseCobertura(const workspace::Project& project, std::string_vie
         if (!self) stack.push_back(std::move(name)); else if (stack.empty()) endedRoot=true;
     }
     if (!sawRoot || !endedRoot || !stack.empty()) out.incomplete=true;
-    for (const auto& [key, entry] : lines) out.lines.push_back({key.first,key.second,entry.covered,entry.branch.covered,entry.branch.uncovered,entry.unknown});
+    // Class-level line records are authoritative; methods often repeat the same
+    // lines with per-method counts. Use method records only when the class has
+    // no record for that source line.
+    for (auto& [key, entry] : methodLines) {
+        if (lines.find(key)!=lines.end()) continue;
+        if (lines.size()>=limit) {out.incomplete=true;break;}
+        lines.emplace(std::move(key),std::move(entry));
+    }
+    for (const auto& [key, entry] : lines) { if(entry.branchIssue) out.incomplete=true; out.lines.push_back({key.first,key.second,entry.covered,entry.branch.covered,entry.branch.uncovered,entry.unknown}); }
     return out;
 }
 }

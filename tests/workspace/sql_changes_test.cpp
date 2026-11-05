@@ -23,6 +23,15 @@ int main() {
  if(!bound.error.empty() || bound.affected!=1 || bound.sql.find(payload)!=std::string::npos) return 21;
  auto boundRows=querySqliteSnapshot(bound.changed,"SELECT v FROM t WHERE id=1");
  if(!boundRows.error.empty() || boundRows.rows.size()!=1 || boundRows.rows[0][0].value!=payload) return 22;
+ std::vector<SqlParameter> dollar={{"$value",SqlValueType::Text,0,0,payload},{"$id",SqlValueType::Integer,1,0,{}}};
+ auto dollarBound=previewSqliteChangeBound(original,"UPDATE t SET v=$value WHERE id=$id OR id=$id",dollar);
+ if(!dollarBound.error.empty() || dollarBound.affected!=1 || dollarBound.sql.find(payload)!=std::string::npos) return 26;
+ auto dollarRows=querySqliteSnapshot(dollarBound.changed,"SELECT v FROM t WHERE id=1");
+ if(!dollarRows.error.empty() || dollarRows.rows.size()!=1 || dollarRows.rows[0][0].value!=payload) return 27;
+ if(previewSqliteChangeBound(original,"UPDATE t SET v=$value WHERE id=$id",{dollar[0]}).error.empty() ||
+    previewSqliteChangeBound(original,"UPDATE t SET v=$value",{dollar[0],dollar[1]}).error.empty() ||
+    previewSqliteChangeBound(original,"UPDATE t SET v=$value::name",{{"$value::name",SqlValueType::Text,0,0,payload}}).error.empty() ||
+    previewSqliteChangeBound(original,"UPDATE t SET v=$value(suffix)",{{"$value(suffix)",SqlValueType::Text,0,0,payload}}).error.empty()) return 28;
  for(auto input:{std::vector<SqlParameter>{parameters[0]},std::vector<SqlParameter>{parameters[0],parameters[1],parameters[0]},std::vector<SqlParameter>{parameters[0],parameters[1],{":unused",SqlValueType::Null,0,0,{}}}}) { auto rejected=previewSqliteChangeBound(original,"UPDATE t SET v=:value WHERE id=@id",input); if(rejected.error.empty() || rejected.error.find(payload)!=std::string::npos || !rejected.changed.empty()) return 23; }
  if(previewSqliteChangeBound(original,"UPDATE t SET v=?",{}).error.empty() || previewSqliteChangeBound(original,"UPDATE t SET v=$value",parameters).error.empty() || previewSqliteChangeBound(original,"UPDATE t SET v=:value",{{":value",SqlValueType::Text,0,0,std::string(256U*1024U+1,'x')}}).error.empty()) return 24;
  auto nullBound=previewSqliteChangeBound(original,"UPDATE audit SET v=:x",{{":x",SqlValueType::Null,0,0,{}}}); if(!nullBound.error.empty() || querySqliteSnapshot(nullBound.changed,"SELECT v FROM audit").rows[0][0].type!=SqlValueType::Null) return 25;

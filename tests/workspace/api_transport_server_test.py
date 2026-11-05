@@ -32,7 +32,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
-        elif self.path == "/truncated":
+        elif self.path.partition("?")[0] == "/truncated":
             self.send_response(200)
             self.send_header("Content-Length", "100")
             self.end_headers()

@@ -39,6 +39,7 @@ private:
     void reap() noexcept;
 
     int m_fd = -1;
+    int m_startupStatusFd = -1;
     int m_pid = -1;
     bool m_alive = false;
     bool m_commandsDone = false;

@@ -158,20 +158,27 @@ bool PtyProcess::start(std::string workingDirectory,
     size.ws_row = 24;
     size.ws_col = 100;
 
+    int startupStatus[2] = {-1, -1};
+    if (::pipe(startupStatus) != 0) { error = std::string("Could not create startup status pipe: ") + std::strerror(errno); return false; }
+    if (::fcntl(startupStatus[1], F_SETFD, FD_CLOEXEC) != 0 || ::fcntl(startupStatus[0], F_SETFL, O_NONBLOCK) != 0 || ::fcntl(startupStatus[0], F_SETFD, FD_CLOEXEC) != 0) { error = std::string("Could not configure startup status pipe: ") + std::strerror(errno); ::close(startupStatus[0]); ::close(startupStatus[1]); return false; }
     int master = -1;
     const pid_t pid = forkpty(&master, nullptr, nullptr, &size);
     if (pid < 0) {
         error = std::string("Could not create terminal: ") + std::strerror(errno);
+        ::close(startupStatus[0]); ::close(startupStatus[1]);
         return false;
     }
 
     if (pid == 0) {
+        ::close(startupStatus[0]);
         struct termios attributes {};
         if (tcgetattr(STDIN_FILENO, &attributes) == 0) {
             attributes.c_lflag &= static_cast<tcflag_t>(~ECHO);
             (void)tcsetattr(STDIN_FILENO, TCSANOW, &attributes);
         }
         if (!workingDirectory.empty() && chdir(workingDirectory.c_str()) != 0) {
+            const char failed = 'C';
+            ssize_t written; do { written = ::write(startupStatus[1], &failed, 1); } while (written < 0 && errno == EINTR);
             constexpr char message[] = "Lucid: cannot enter the project directory; commands were not run.\n";
             (void)::write(STDERR_FILENO, message, sizeof(message) - 1);
             _exit(126);
@@ -182,6 +189,8 @@ bool PtyProcess::start(std::string workingDirectory,
         _exit(127);
     }
 
+    ::close(startupStatus[1]);
+    m_startupStatusFd = startupStatus[0];
     const int flags = fcntl(master, F_GETFL, 0);
     if (flags >= 0) {
         (void)fcntl(master, F_SETFL, flags | O_NONBLOCK);
@@ -253,6 +262,7 @@ void PtyProcess::appendEcho(std::string_view text) {
 
 void PtyProcess::close() noexcept {
 #if !defined(_WIN32)
+    if (m_startupStatusFd >= 0) { ::close(m_startupStatusFd); m_startupStatusFd = -1; }
     const pid_t foreground = m_fd >= 0 ? ::tcgetpgrp(m_fd) : -1;
     if (foreground > 1 && foreground != ::getpgrp()) {
         (void)kill(-foreground, SIGHUP);
@@ -362,12 +372,26 @@ void PtyProcess::pumpOutput() {
         m_rawOutput.clear();
         m_output.clear();
         m_waitingForEcho = false;
+        if (m_startupStatusFd >= 0) { ::close(m_startupStatusFd); m_startupStatusFd = -1; }
         sendNextCommand();
     }
 
     m_output = sanitizeOutput(m_rawOutput);
     trimToSize(m_output, kMaxOutput);
 
+    if (closed && m_pid > 0) {
+        int status = 0;
+        const auto waited = ::waitpid(static_cast<pid_t>(m_pid), &status, WNOHANG);
+        if (waited == 0 || (waited < 0 && errno == EINTR)) return;
+        if (waited > 0) m_pid = -1;
+        if (m_startupStatusFd >= 0) {
+            char reason = 0; ssize_t n;
+            do { n = ::read(m_startupStatusFd, &reason, 1); } while (n < 0 && errno == EINTR);
+            ::close(m_startupStatusFd); m_startupStatusFd = -1;
+            if (n == 1 && reason == 'C' && m_rawOutput.find("cannot enter the project directory") == std::string::npos)
+                m_rawOutput += "Lucid: cannot enter the project directory; commands were not run.\n";
+        }
+    }
     if (closed) {
         if (!m_commandsDone && (m_nextCommand > m_exitCodes.size() || m_waitingForEcho)) {
             m_exitCodes.push_back(-1);

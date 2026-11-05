@@ -90,16 +90,23 @@ int main() {
     std::size_t count = 0, pos = 0;
     while ((pos = quotedOutput.find(expected, pos)) != std::string::npos) { ++count; pos += expected.size(); }
     if (!quotedDone || count != 4 || quotedCodes != std::vector<int>{0, 0, 0, 0}) return 11;
-    if (!process.start("/lucid-test-directory-that-does-not-exist", {"printf 'should-not-run\\n'"}, error)) return 12;
-    for (int attempt = 0; attempt < 600 && !process.commandsDone(); ++attempt) {
-        process.update(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // Repeated startup failures exercise final-output races on the PTY.
+    for (int repeat = 0; repeat < 8; ++repeat) {
+        if (!process.start("/lucid-test-directory-that-does-not-exist", {"printf 'should-not-run\\n'"}, error)) return 12;
+        for (int attempt = 0; attempt < 600 && !process.commandsDone(); ++attempt) {
+            process.update(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const std::string failedOutput(process.output());
+        const auto failedCodes = process.exitCodes();
+        const bool failedDone = process.commandsDone(); process.close();
+        if (!failedDone || failedOutput.find("cannot enter the project directory") == std::string::npos ||
+            failedOutput.find("\nshould-not-run\n") != std::string::npos ||
+            failedOutput.find("exited before reporting") == std::string::npos || failedCodes != std::vector<int>{-1}) return 13;
     }
-    const std::string failedOutput(process.output());
-    const auto failedCodes = process.exitCodes();
-    const bool failedDone = process.commandsDone(); process.close();
-    if (!failedDone || failedOutput.find("cannot enter the project directory") == std::string::npos ||
-        failedOutput.find("\nshould-not-run\n") != std::string::npos ||
-        failedOutput.find("exited before reporting") == std::string::npos || failedCodes != std::vector<int>{-1}) return 13;
+    if (!process.start(".", {"exit 126"}, error)) return 29;
+    for (int attempt = 0; attempt < 600 && !process.commandsDone(); ++attempt) { process.update(); std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
+    const auto exitOutput = std::string(process.output()); const auto exitCodes126 = process.exitCodes(); const bool exitDone = process.commandsDone(); process.close();
+    if (!exitDone || exitCodes126 != std::vector<int>{-1} || exitOutput.find("cannot enter the project directory") != std::string::npos) return 30;
     if (!process.start(".", {"printf 'READY\\n'; wc -c"}, error)) return 14;
     for (int attempt = 0; attempt < 600 && process.output().find("READY\n") == std::string_view::npos; ++attempt) {
         process.update(); std::this_thread::sleep_for(std::chrono::milliseconds(5));

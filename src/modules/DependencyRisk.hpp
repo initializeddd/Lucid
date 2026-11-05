@@ -18,7 +18,8 @@ struct DependencyRiskReport {
     std::vector<DependencyRiskPackage> packages;
     std::vector<std::string> limitations;
 };
-// Lockfile must be npm package-lock v2/v3 with a packages map. Builds one OSV
+// Supports npm package-lock v1 and v2/v3 with a packages map. Directness is
+// unknown for v1. Builds one OSV
 // query per returned package in exactly that order; no network request is made.
 [[nodiscard]] bool parseNpmDependencyRisk(std::string_view lockfile, DependencyRiskReport& report, std::string& error);
 // Enumerates exact module/version checksum entries in go.sum. This is not the

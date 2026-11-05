@@ -358,6 +358,19 @@ struct ApplicationInteractionTest {
             if(app.m_document.selectionUtf8()!="body") return 1117;
             app.m_document.pasteUtf8("x");app.handleEditorKey({input::Key::Tab,input::KeyAction::Press},false);
             if(app.m_document.toUtf8()!="  long\n    x" || app.m_document.cursorLine()!=1 || app.m_document.cursorColumn()!=5) return 1118;
+            const std::string linkedManifest=R"({"name":"Linked","version":"1","requires":["snippet-v1","snippet-placeholders-v2","snippet-linked-v1"],"permissions":{"project":false,"network":false,"processes":false,"settings":false},"commands":[{"title":"Linked","insert":"{{linked:item:α}} + {{linked:item}} + {{placeholder:other}}{{cursor}}","snippet":true}]})";
+            if(!modules::install(app.m_moduleRoot,"linked",linkedManifest,error) || !modules::setEnabled(app.m_moduleRoot,"linked",true,error) || !modules::list(app.m_moduleRoot,app.m_modules,error)) return 1122;
+            const auto linkedModule=std::find_if(app.m_modules.begin(),app.m_modules.end(),[](const auto& m){return m.id=="linked";}); if(linkedModule==app.m_modules.end()) return 1123;
+            app.m_moduleSelected=static_cast<std::size_t>(linkedModule-app.m_modules.begin());app.m_document=editor::Document::fromUtf8("");app.m_modulePage=0;
+            app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();app.m_selectedSuggestion=0;app.applyModuleCommand();
+            if(!app.m_snippetSession || app.m_document.selectionUtf8()!="α") return 1124;
+            app.handleChar(U'β'); if(app.m_document.toUtf8()!="β + β + other") return 1125;
+            app.handleChar(U'x'); if(app.m_document.toUtf8()!="βx + βx + other") return 1126;
+            app.undoDocument(); if(app.m_document.toUtf8()!="β + β + other" || app.m_snippetSession) return 1127;
+            app.redoDocument(); if(app.m_document.toUtf8()!="βx + βx + other") return 1128;
+            app.m_document=editor::Document::fromUtf8("");app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();app.m_selectedSuggestion=0;app.applyModuleCommand();
+            app.handleChar(U'z');app.handleEditorKey({input::Key::Tab,input::KeyAction::Press},false);
+            if(!app.m_snippetSession || app.m_document.selectionUtf8()!="other" || app.m_document.toUtf8()!="z + z + other") return 1129;
             app.m_moduleRoot = previousRoot; app.m_modules = previousModules;
         }
         {
@@ -2173,8 +2186,8 @@ struct ApplicationInteractionTest {
         }
         {
             const auto oldRoot = app.m_moduleRoot; auto oldModules = app.m_modules; const auto oldSelected = app.m_moduleSelected;
-            { std::ofstream out(temp / "nested" / "source.json"); out << R"({"greeting":"Hello {name}","missing":"Please save"})"; }
-            { std::ofstream out(temp / "nested" / "translation.json"); out << R"({"greeting":"مرحبا {user}"})"; }
+            { std::ofstream out(temp / "nested" / "source.json"); out << R"({"greeting":"Hello {name}","missing":"Please save","blank":"Hello"})"; }
+            { std::ofstream out(temp / "nested" / "translation.json"); out << R"({"greeting":"مرحبا {user}","blank":"  "})"; }
             app.m_moduleRoot = temp / "localization-modules"; std::string error;
             const std::string manifest = R"({"name":"Localization","version":"1","requires":["localization-workspace-v1","localization-edit-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Compare","action":"compare-localization"}]})";
             if (!modules::install(app.m_moduleRoot, "localization", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "localization", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 437;
@@ -2183,9 +2196,15 @@ struct ApplicationInteractionTest {
             app.m_searchBar.setQuery("source.json"); app.applyModuleCommand(); app.m_searchBar.setQuery("translation.json"); app.applyModuleCommand();
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
             while (app.m_localizationFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
-            if (app.m_localizationFuture.valid() || app.m_localizationEntries.size() != 2 || app.m_localizationEntries[0].key != "/missing" || app.m_localizationEntries[0].inTranslation || !app.m_localizationEntries[1].translationHasRtl) return 439;
-            app.m_selectedSuggestion = 2; app.applyModuleCommand();
-            if (!app.m_localizationSelected || *app.m_localizationSelected != 1) return 440;
+            if (app.m_localizationFuture.valid() || app.m_localizationEntries.size() != 3) return 439;
+            const auto indexOfLocalization = [&](std::string_view key) {auto it=std::find_if(app.m_localizationEntries.begin(),app.m_localizationEntries.end(),[&](const auto& entry){return entry.key==key;});return static_cast<int>(it-app.m_localizationEntries.begin());};
+            const int missingIndex=indexOfLocalization("/missing"), blankIndex=indexOfLocalization("/blank"), greetingIndex=indexOfLocalization("/greeting");
+            if (missingIndex>=3 || blankIndex>=3 || greetingIndex>=3 || !app.m_localizationEntries[blankIndex].translationBlank || !app.m_localizationEntries[greetingIndex].translationHasRtl || app.m_localizationEntries[missingIndex].inTranslation) return 439;
+            auto chooseLoc = [&](int code) {app.refreshSuggestions(); auto it=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),code); if(it==app.m_moduleChoices.end())return false;app.m_selectedSuggestion=static_cast<int>(it-app.m_moduleChoices.begin());app.applyModuleCommand();return true;};
+            if (!chooseLoc(-720) || !app.m_localizationNeedsTranslation || std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),greetingIndex)!=app.m_moduleChoices.end() || !chooseLoc(blankIndex)) return 1120;
+            if (std::none_of(app.m_suggestions.begin(),app.m_suggestions.end(),[](const auto& item){return item.path=="Blank translation";})) return 1121;
+            if (!chooseLoc(-25) || !chooseLoc(-720) || !chooseLoc(greetingIndex)) return 1122;
+            if (!app.m_localizationSelected || *app.m_localizationSelected != static_cast<std::size_t>(greetingIndex)) return 440;
             bool sawTranslation = false, sawMissing = false, sawExtra = false;
             for (std::size_t page = 0; page < 8; ++page) {
                 app.m_modulePage = page; app.refreshSuggestions();
@@ -2197,7 +2216,7 @@ struct ApplicationInteractionTest {
             if (openTranslation == app.m_moduleChoices.end()) return 570;
             app.m_selectedSuggestion = static_cast<int>(openTranslation - app.m_moduleChoices.begin()); app.applyModuleCommand();
             if (!app.m_localizationShowing || !app.m_commandStatusIsError || app.m_filePath == "translation.json") return 571;
-            { std::ofstream out(temp / "nested" / "translation.json", std::ios::trunc); out << R"({"greeting":"مرحبا {user}"})"; }
+            { std::ofstream out(temp / "nested" / "translation.json", std::ios::trunc); out << R"({"greeting":"مرحبا {user}","blank":"  "})"; }
             openTranslation = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), -173); if (openTranslation == app.m_moduleChoices.end()) return 573;
             app.m_selectedSuggestion = static_cast<int>(openTranslation - app.m_moduleChoices.begin()); app.applyModuleCommand();
             if (app.m_filePath != "translation.json" || app.m_document.cursorLine() != 0 || app.m_document.cursorColumn() != 12 || app.m_searchBar.isOpen()) return 572;
@@ -2206,14 +2225,14 @@ struct ApplicationInteractionTest {
             const auto editDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
             while (app.m_localizationFuture.valid() && std::chrono::steady_clock::now()<editDeadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             auto selectLocalization = [&](int code) { app.refreshSuggestions(); auto it=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),code); if (it==app.m_moduleChoices.end()) return false; app.m_selectedSuggestion=static_cast<int>(it-app.m_moduleChoices.begin()); app.applyModuleCommand(); return true; };
-            if (!selectLocalization(0) || !selectLocalization(-270) || app.m_searchBar.kind()!=ui::PromptKind::ModuleLocalizationEdit) return 980;
+            if (!selectLocalization(missingIndex) || !selectLocalization(-270) || app.m_searchBar.kind()!=ui::PromptKind::ModuleLocalizationEdit) return 980;
             app.m_searchBar.setQuery("Bitte speichern"); app.applyModuleCommand();
             if (!app.m_localizationEditPreview || !app.m_localizationEditPlan.inserted || app.m_filePath=="translation.json") return 981;
             { std::ofstream out(temp / "nested" / "translation.json", std::ios::trunc); out << R"({"greeting":"changed"})"; }
             if (!selectLocalization(-271) || !app.m_commandStatusIsError || app.m_filePath=="translation.json") return 982;
-            { std::ofstream out(temp / "nested" / "translation.json", std::ios::trunc); out << R"({"greeting":"مرحبا {user}"})"; }
+            { std::ofstream out(temp / "nested" / "translation.json", std::ios::trunc); out << R"({"greeting":"مرحبا {user}","blank":"  "})"; }
             if (!selectLocalization(-271) || app.m_filePath!="translation.json" || !app.m_document.dirty() || app.m_document.toUtf8().find("Bitte speichern")==std::string::npos || app.m_searchBar.isOpen()) return 983;
-            app.m_document.undo(); if (app.m_document.dirty() || app.m_document.toUtf8()!=R"({"greeting":"مرحبا {user}"})") return 984;
+            app.m_document.undo(); if (app.m_document.dirty() || app.m_document.toUtf8()!=R"({"greeting":"مرحبا {user}","blank":"  "})") return 984;
             app.openFile("example.txt", false);
             app.m_localizationShowing = false; app.m_localizationSelected.reset(); app.m_searchBar.close(); app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected;
             std::filesystem::remove(temp / "nested" / "source.json"); std::filesystem::remove(temp / "nested" / "translation.json");

@@ -11,7 +11,10 @@ int main() {
     ok = ok && applyOsvBatchResponse(R"({"results":[{"vulns":[{"id":"OSV-1"}]},{},{},{}]})", report, error) && report.packages[0].vulnerabilities[0] == "OSV-1";
     ok = ok && !applyOsvBatchResponse(R"({"results":[{}]})", report, error) && report.packages[0].vulnerabilities[0] == "OSV-1";
     ok = ok && !applyOsvBatchResponse(R"({"results":[{"next_page_token":"x"},{},{},{}]})", report, error);
-    ok = ok && !parseNpmDependencyRisk(R"({"lockfileVersion":1,"packages":{}})", report, error) && report.packages.empty();
+    ok = ok && !parseNpmDependencyRisk(R"({"lockfileVersion":1,"dependencies":[]})", report, error) && report.packages.empty();
+    const auto legacy = R"({"lockfileVersion":1,"dependencies":{"a":{"version":"1.0.0","resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz","dependencies":{"@scope/b":{"version":"2.1.0","resolved":"https://registry.npmjs.org/@scope/b/-/b-2.1.0.tgz"}}},"alias":{"version":"1.0.0","resolved":"https://example.com/alias.tgz"}}})";
+    ok = ok && parseNpmDependencyRisk(legacy, report, error) && report.packages.size()==2 && report.packages[0].name=="a" && !report.packages[0].direct && report.packages[1].name=="@scope/b" && report.packages[1].path=="node_modules/a/node_modules/@scope/b" && report.limitations.size()==4;
+    ok = ok && !parseNpmDependencyRisk(R"({"lockfileVersion":1,"dependencies":{"a":{"version":"1.0.0","dependencies":[]}}})", report, error) && report.packages.empty();
     ok = ok && !parseNpmDependencyRisk(R"({"lockfileVersion":3,"lockfileVersion":3,"packages":{"":{}}})", report, error);
     ok = ok && parseNpmDependencyRisk(R"({"lockfileVersion":2,"packages":{"":{},"node_modules/a":{"version":"^1"}}})", report, error) && report.packages.empty();
     ok = ok && parseNpmDependencyRisk(R"({"lockfileVersion":3,"packages":{"":{},"node_modules/a":{"version":"1.0.0","resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz","integrity":"sha256-malformed"}}})", report, error) && report.packages.size() == 1 && report.packages[0].declaredChecksum.empty();

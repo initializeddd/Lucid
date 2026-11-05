@@ -478,7 +478,7 @@ private:
     std::uint64_t m_localizationEditContextRevision = 0;
     bool m_localizationEditContextHasDocument = false, m_localizationEditPreview = false;
     std::optional<std::size_t> m_localizationSelected;
-    bool m_localizationSelectingTranslation = false, m_localizationShowing = false;
+    bool m_localizationSelectingTranslation = false, m_localizationShowing = false, m_localizationNeedsTranslation = false;
     struct DesignTokenResult { modules::DesignTokenReport report; modules::CssTokenUsageReport usages; std::vector<modules::DesignAliasResult> aliases; std::string snapshot, error; };
     std::future<DesignTokenResult> m_designTokenFuture;
     std::shared_ptr<std::atomic_bool> m_designTokenCancel;
@@ -874,8 +874,9 @@ private:
     std::uint64_t m_accessibilityPromptGeneration = 0;
     std::string m_accessibilityModule;
     bool m_accessibilityShowing = false;
-    struct SnippetSession { std::string file, root, snapshot; std::vector<modules::SnippetRange> fields; std::size_t active = 0, finalOffset = 0, finalFieldIndex = 0; };
+    struct SnippetSession { std::string file, root, snapshot; std::vector<modules::SnippetRange> fields; std::size_t active = 0, finalOffset = 0, finalFieldIndex = 0; std::uint64_t revision = 0; };
     std::optional<SnippetSession> m_snippetSession;
+    void synchronizeSnippet(std::uint64_t previousRevision);
     struct ModuleHistoryResult { std::vector<workspace::GitFileHistoryEntry> entries; std::vector<workspace::GitRangeHistoryEntry> ranges; workspace::GitReview diff; std::string error; bool isDiff = false, stoppedAtBoundary = false; };
     std::future<ModuleHistoryResult> m_moduleHistoryFuture;
     std::vector<workspace::GitFileHistoryEntry> m_moduleHistoryEntries;

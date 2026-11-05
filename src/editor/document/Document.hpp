@@ -55,6 +55,9 @@ public:
     // Replace the document as one undoable edit, preserving the current cursor
     // as closely as possible. Reject text that cannot round-trip unchanged.
     [[nodiscard]] bool replaceAllUtf8(std::string_view text);
+    // Amend the immediately preceding edit, retaining its undo snapshot. The
+    // caller must pass the revision observed after that edit.
+    [[nodiscard]] bool amendLastEditUtf8(std::string_view text, std::uint64_t expectedRevision);
     void insertJsonBlock(char32_t open, char32_t close, std::size_t spaces = 4);
     [[nodiscard]] bool insertJsonQuote();
     [[nodiscard]] bool movePast(char32_t codepoint);

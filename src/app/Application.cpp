@@ -1290,6 +1290,9 @@ void Application::handleEditorKey(const input::KeyEvent& event, bool commandDown
         return;
     }
 
+    if (m_snippetSession && m_snippetSession->revision!=m_document.revision()) synchronizeSnippet(m_snippetSession->revision);
+    const auto snippetRevision=m_document.revision();
+    const auto snippetGuard=std::shared_ptr<void>(nullptr,[this,snippetRevision](void*) { synchronizeSnippet(snippetRevision); });
     m_followCursor = true;
     if (m_snippetSession && event.action == input::KeyAction::Press && !commandDown && !event.alt) {
         if (event.key == input::Key::Escape) { m_snippetSession.reset(); m_document.clearSelection(); setStatus("Snippet navigation ended", false); return; }
@@ -1416,6 +1419,8 @@ void Application::handleEditorKey(const input::KeyEvent& event, bool commandDown
 }
 
 void Application::handleChar(char32_t codepoint) {
+    const auto snippetRevision=m_document.revision();
+    const auto snippetGuard=std::shared_ptr<void>(nullptr,[this,snippetRevision](void*) { synchronizeSnippet(snippetRevision); });
     if (m_diagramPreviewVisible) { if (codepoint==U'+' || codepoint==U'=') m_diagramZoom=std::min(8.0,m_diagramZoom*1.2); else if (codepoint==U'-') m_diagramZoom=std::max(1.0,m_diagramZoom/1.2); else if (codepoint==U'0') { m_diagramZoom=1.0; m_diagramPanX=0; m_diagramPanY=0; } return; }
     if (m_visualVisible) return;
     if (m_gitBranchFuture.valid()) return;
@@ -1490,6 +1495,7 @@ void Application::handleChar(char32_t codepoint) {
 
 void Application::undoDocument() {
     if (m_hasDocument && !m_searchBar.isOpen()) {
+        m_snippetSession.reset();
         m_document.undo();
         m_followCursor = true;
     }
@@ -1497,12 +1503,15 @@ void Application::undoDocument() {
 
 void Application::redoDocument() {
     if (m_hasDocument && !m_searchBar.isOpen()) {
+        m_snippetSession.reset();
         m_document.redo();
         m_followCursor = true;
     }
 }
 
 void Application::cutSelection() {
+    const auto snippetRevision=m_document.revision();
+    const auto snippetGuard=std::shared_ptr<void>(nullptr,[this,snippetRevision](void*) { synchronizeSnippet(snippetRevision); });
     if (m_searchBar.isOpen()) {
         if (acceptsPromptText(m_searchBar.kind()) && m_searchBar.hasSelection()) {
             m_window.setClipboardText(std::string(m_searchBar.query().substr(m_searchBar.selectionStart(), m_searchBar.selectionEnd() - m_searchBar.selectionStart())));
@@ -1543,6 +1552,8 @@ void Application::copySelection() {
 }
 
 void Application::pasteClipboard() {
+    const auto snippetRevision=m_document.revision();
+    const auto snippetGuard=std::shared_ptr<void>(nullptr,[this,snippetRevision](void*) { synchronizeSnippet(snippetRevision); });
     if (m_searchBar.isOpen()) {
         const auto kind = m_searchBar.kind();
         if (kind == ui::PromptKind::AiKeyInput) {
@@ -3086,12 +3097,14 @@ void Application::refreshModuleSuggestions() {
                 add("Apply reviewed translation", "Updates the open document only; Undo restores it. Enter confirms.", -271);
                 add(m_localizationEditPlan.inserted ? "New translation" : "Updated translation", m_localizationEditPlan.value, -26, ui::SuggestionKind::ReadOnlyText);
                 const auto& preview = m_localizationEditPlan.preview;
+                if (preview.translationBlank) add("Blank translation", "Source has text; this translation is empty or whitespace", -26, ui::SuggestionKind::ReadOnlyText);
                 for (const auto& name : preview.missingPlaceholders) add("Missing placeholder: {" + name + "}", "Present in source, absent in translation", -26, ui::SuggestionKind::ReadOnlyText);
                 for (const auto& name : preview.extraPlaceholders) add("Extra placeholder: {" + name + "}", "Absent from source", -26, ui::SuggestionKind::ReadOnlyText);
                 for (const auto& count : preview.differingPlaceholderCounts) add("Placeholder count: {" + count.name + "}", "Source " + std::to_string(count.source) + " · translation " + std::to_string(count.translation), -26, ui::SuggestionKind::ReadOnlyText);
                 add("< Cancel edit", "No text changed", -272);
             } else if (m_localizationSelected && *m_localizationSelected < m_localizationEntries.size()) {
                 const auto& entry = m_localizationEntries[*m_localizationSelected];
+                if (entry.translationBlank) add("Blank translation", "Source has text; this translation is empty or whitespace", -26, ui::SuggestionKind::ReadOnlyText);
                 if (entry.inSource && std::find(m.requirements.begin(), m.requirements.end(), "localization-edit-v1") != m.requirements.end()) add("Edit translation…", "Review before changing the open document", -270);
                 if (entry.inSource) add("Open source value", "Navigate to the compared JSON value", -172);
                 if (entry.inTranslation) add("Open translation value", "Navigate to the compared JSON value", -173);
@@ -3114,15 +3127,19 @@ void Application::refreshModuleSuggestions() {
                     if (entry.missingPlaceholders.size() + entry.extraPlaceholders.size() + entry.differingPlaceholderCounts.size() > 100) add("Placeholder list limited to 100", "", -26, ui::SuggestionKind::ReadOnlyText);
                 }
                 preview("Source", entry.inSource, entry.sourceText); preview("Translation", entry.inTranslation, entry.translationText);
-            } else for (std::size_t i = 0; i < m_localizationEntries.size(); ++i) {
+            } else {
+            add(m_localizationNeedsTranslation ? "Show all entries" : "Needs translation", m_localizationNeedsTranslation ? "Clear missing and blank filter" : "Show missing and blank translations", -720);
+            for (std::size_t i = 0; i < m_localizationEntries.size(); ++i) {
                 const auto& entry = m_localizationEntries[i];
-                std::string detail = !entry.inTranslation ? "Missing translation" : !entry.inSource ? "Translation only" : "Source " + std::to_string(entry.sourceLength) + " · translation " + std::to_string(entry.translationLength) + " code points";
+                if (m_localizationNeedsTranslation && (!entry.inSource || (entry.inTranslation && !entry.translationBlank))) continue;
+                std::string detail = !entry.inTranslation ? "Missing translation" : !entry.inSource ? "Translation only" : entry.translationBlank ? "Blank translation" : "Source " + std::to_string(entry.sourceLength) + " · translation " + std::to_string(entry.translationLength) + " code points";
                 if (!entry.missingPlaceholders.empty() || !entry.extraPlaceholders.empty()) detail += " · " + std::to_string(entry.missingPlaceholders.size()) + " missing / " + std::to_string(entry.extraPlaceholders.size()) + " extra placeholders";
                 if (!entry.differingPlaceholderCounts.empty()) detail += " · " + std::to_string(entry.differingPlaceholderCounts.size()) + " placeholder count differences";
                 if (entry.translationLong) detail += " · long text";
                 if (entry.translationHasRtl) detail += " · RTL-script characters";
                 const bool keySafe = std::none_of(entry.key.begin(), entry.key.end(), [](unsigned char c) { return c < 32 || c == 127; });
                 add(keySafe ? entry.key : "(key contains control characters)", detail, static_cast<int>(i));
+            }
             }
         } else if (m.enabled && m_binaryShowing) {
             add(m_binaryCategory ? "< Back to categories" : "< Back to module commands", "", -23);
@@ -4002,6 +4019,40 @@ void Application::refreshModuleSuggestions() {
     if (m_modulePage + 1 < pages) append({"Next page >", "", -2, ui::SuggestionKind::Task});
     if (m_selectedSuggestion >= static_cast<int>(m_moduleChoices.size())) m_selectedSuggestion = -1;
 }
+void Application::synchronizeSnippet(std::uint64_t previousRevision) {
+    if (!m_snippetSession || !m_hasDocument || m_document.revision()==previousRevision) return;
+    auto& s=*m_snippetSession;
+    if(m_filePath!=s.file || (m_hasProject ? m_project.root().generic_string() : std::string{})!=s.root) {m_snippetSession.reset();return;}
+    if (s.active>=s.fields.size() || !s.fields[s.active].link) return;
+    const auto range=s.fields[s.active]; const auto& old=s.snapshot; const auto current=m_document.toUtf8();
+    if (range.end>old.size() || current.size()>16U*1024U*1024U) {m_snippetSession.reset();return;}
+    const auto tail=old.size()-range.end;
+    if (current.size()<range.start+tail || !std::string_view(current).starts_with(std::string_view(old).substr(0,range.start)) || !std::string_view(current).ends_with(std::string_view(old).substr(range.end))) {
+        m_snippetSession.reset(); setStatus("Snippet navigation ended after an edit outside its field",false); return;
+    }
+    const auto newEnd=current.size()-tail;
+    const auto start=snippetByteOffset(current,m_document.hasSelection()?m_document.selectionStart():editor::TextPosition{m_document.cursorLine(),m_document.cursorColumn()});
+    const auto end=snippetByteOffset(current,m_document.hasSelection()?m_document.selectionEnd():editor::TextPosition{m_document.cursorLine(),m_document.cursorColumn()});
+    if(start<range.start || end>newEnd) {m_snippetSession.reset();return;}
+    const auto activeValue=std::string_view(current).substr(range.start,newEnd-range.start);
+    std::string mirrored; mirrored.reserve(current.size()); std::size_t pos=0,newFinal=s.finalOffset; auto ranges=s.fields;
+    for(std::size_t i=0;i<s.fields.size();++i) {
+        const auto f=s.fields[i]; if(f.start<pos || f.end<f.start || f.end>old.size()) {m_snippetSession.reset();return;}
+        mirrored.append(old,pos,f.start-pos); ranges[i].start=mirrored.size();
+        const auto value=f.link==range.link ? activeValue : std::string_view(old).substr(f.start,f.end-f.start);
+        if(value.size()>16U*1024U*1024U-mirrored.size()) {m_snippetSession.reset();setStatus("Linked snippet exceeds the editor limit",true);return;}
+        mirrored.append(value); ranges[i].end=mirrored.size();
+        if(i<s.finalFieldIndex) newFinal=newFinal-(f.end-f.start)+value.size();
+        pos=f.end;
+    }
+    mirrored.append(old,pos,old.size()-pos);
+    if(mirrored.size()>16U*1024U*1024U) {m_snippetSession.reset();return;}
+    const auto selectionStart=ranges[s.active].start+(start-range.start), selectionEnd=ranges[s.active].start+(end-range.start);
+    if(mirrored!=current && !m_document.amendLastEditUtf8(mirrored,m_document.revision())) {m_snippetSession.reset();setStatus("Linked snippet navigation ended",true);return;}
+    const auto p=snippetPosition(mirrored,selectionStart), q=snippetPosition(mirrored,selectionEnd);
+    m_document.setCursor(p.line,p.column); if(selectionStart!=selectionEnd) m_document.extendSelectionTo(q.line,q.column);
+    s.fields=std::move(ranges); s.finalOffset=newFinal; s.snapshot=std::move(mirrored); s.revision=m_document.revision();
+}
 bool Application::navigateSnippet(bool backwards) {
     if (!m_snippetSession) return false;
     auto& session = *m_snippetSession;
@@ -4022,16 +4073,21 @@ bool Application::navigateSnippet(bool backwards) {
         if (session.finalFieldIndex > active) session.finalOffset = session.finalOffset - oldEnd + newEnd;
     }
     session.snapshot = current;
+    session.revision = m_document.revision();
     const editor::TextPosition cursor{m_document.cursorLine(), m_document.cursorColumn()};
     const auto start = snippetByteOffset(current, m_document.hasSelection() ? m_document.selectionStart() : cursor);
     const auto end = snippetByteOffset(current, m_document.hasSelection() ? m_document.selectionEnd() : cursor);
     if (start < session.fields[active].start || end > session.fields[active].end) { m_snippetSession.reset(); setStatus("Snippet navigation ended", false); return false; }
-    if (!backwards && active + 1 == session.fields.size()) {
+    auto firstOccurrence=[&](std::size_t i) { if(!session.fields[i].link) return true; for(std::size_t j=0;j<i;++j) if(session.fields[j].link==session.fields[i].link) return false; return true; };
+    auto next=active;
+    if(backwards) { while(next>0) {--next;if(firstOccurrence(next)) break;} }
+    else {do {++next;} while(next<session.fields.size() && !firstOccurrence(next));}
+    if (!backwards && next == session.fields.size()) {
         const auto position = snippetPosition(current, session.finalOffset); m_snippetSession.reset();
         m_document.setCursor(position.line, position.column); setStatus("Snippet complete", false); return true;
     }
-    session.active = backwards ? (active ? active - 1 : 0) : active + 1;
-    const auto next = session.fields[session.active]; const auto first = snippetPosition(current, next.start), last = snippetPosition(current, next.end);
+    session.active = next;
+    const auto nextRange = session.fields[session.active]; const auto first = snippetPosition(current, nextRange.start), last = snippetPosition(current, nextRange.end);
     m_document.setCursor(first.line, first.column); m_document.extendSelectionTo(last.line, last.column);
     setStatus("Snippet field " + std::to_string(session.active + 1) + "/" + std::to_string(session.fields.size()) + " · Tab next · Shift+Tab previous · Escape ends", false); return true;
 }
@@ -4606,7 +4662,7 @@ void Application::applyModuleCommand() {
         const auto found = std::find_if(fresh.begin(), fresh.end(), [&reviewed](const auto& module) { return module.id == reviewed.id; });
         if (found == fresh.end() || !found->enabled || found->requirements != reviewed.requirements || std::none_of(found->commands.begin(), found->commands.end(), [](const auto& command) { return command.action == "compare-localization"; })) { setCommandStatus("Module changed or was disabled; reopen Modules", true); return; }
         if (m_localizationFuture.valid()) { setCommandStatus("A comparison is still finishing", false); return; }
-        auto project = m_project; const auto source = m_localizationSource; m_localizationTranslation = path; m_localizationSourceSnapshot.clear(); m_localizationTranslationSnapshot.clear(); m_localizationEditPreview = false; m_localizationEditPlan = {}; m_localizationEntries.clear(); m_localizationSelected.reset(); m_localizationShowing = true;
+        auto project = m_project; const auto source = m_localizationSource; m_localizationTranslation = path; m_localizationSourceSnapshot.clear(); m_localizationTranslationSnapshot.clear(); m_localizationEditPreview = false; m_localizationEditPlan = {}; m_localizationEntries.clear(); m_localizationSelected.reset(); m_localizationNeedsTranslation = false; m_localizationShowing = true;
         m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; m_localizationCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
         m_localizationFuture = std::async(std::launch::async, [project, source, path, cancel = m_localizationCancel] {
             LocalizationResult result; std::string a, b;
@@ -5378,6 +5434,7 @@ void Application::applyModuleCommand() {
         if (!m_document.replaceAllUtf8(updated)) { setCommandStatus("Translation cannot be edited losslessly", true); return; }
         m_localizationShowing = false; m_localizationSelected.reset(); m_localizationEditPreview = false; m_localizationEditPlan = {}; m_searchBar.close(); setStatus("Translation updated in the document; Undo restores it", false); return;
     }
+    if (choice == -720 && m_localizationShowing && !m_localizationSelected && !m_localizationEditPreview) { m_localizationNeedsTranslation = !m_localizationNeedsTranslation; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
     if (choice == -25 && m_localizationShowing) { if (m_localizationEditPreview) { m_localizationEditPreview = false; m_localizationEditPlan = {}; } else if (m_localizationSelected) m_localizationSelected.reset(); else { if (m_localizationCancel) m_localizationCancel->store(true); m_localizationShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if ((choice == -172 || choice == -173) && m_localizationShowing && m_localizationSelected && *m_localizationSelected < m_localizationEntries.size()) {
         const bool source = choice == -172; const auto& entry = m_localizationEntries[*m_localizationSelected];
@@ -6274,7 +6331,7 @@ void Application::applyModuleCommand() {
         const auto& command = found->commands[static_cast<std::size_t>(choice)];
         const bool multiple = std::find(found->requirements.begin(), found->requirements.end(), "snippet-placeholders-v2") != found->requirements.end();
         const bool placeholders = multiple || std::find(found->requirements.begin(), found->requirements.end(), "snippet-placeholder-v1") != found->requirements.end();
-        if (command.snippet && !modules::expandSnippet(command.insert, m_document.selectionUtf8(), expanded, error, placeholders, multiple)) {
+        if (command.snippet && !modules::expandSnippet(command.insert, m_document.selectionUtf8(), expanded, error, placeholders, multiple, std::find(found->requirements.begin(), found->requirements.end(), "snippet-linked-v1") != found->requirements.end())) {
             setCommandStatus(error, true); return;
         }
         if (!command.snippet) expanded.text = command.insert;
@@ -6301,7 +6358,7 @@ void Application::applyModuleCommand() {
             auto snapshot = m_document.toUtf8();
             if (snapshot.size() <= 16U * 1024U * 1024U) {
                 for (auto& field : expanded.fields) { field.start += insertionOffset; field.end += insertionOffset; }
-                m_snippetSession = SnippetSession{m_filePath, m_hasProject ? m_project.root().generic_string() : std::string{}, std::move(snapshot), std::move(expanded.fields), 0, insertionOffset + expanded.finalOffset, expanded.finalFieldIndex};
+                m_snippetSession = SnippetSession{m_filePath, m_hasProject ? m_project.root().generic_string() : std::string{}, std::move(snapshot), std::move(expanded.fields), 0, insertionOffset + expanded.finalOffset, expanded.finalFieldIndex, m_document.revision()};
             }
         }
         m_searchBar.close(); m_followCursor = true;

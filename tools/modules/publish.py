@@ -77,6 +77,8 @@ def collect(owner):
         requirements = manifest.get("requires", [])
         if not isinstance(requirements, list) or len(requirements) > 32 or any(not isinstance(item, str) or not 1 <= len(item.encode()) <= 80 for item in requirements) or len(set(requirements)) != len(requirements):
             raise ValueError(f"Invalid capability requirements: {path}")
+        if "snippet-linked-v1" in requirements and "snippet-placeholders-v2" not in requirements:
+            raise ValueError(f"Linked fields require multiple snippet placeholders: {path}")
         permissions, commands = manifest.get("permissions"), manifest.get("commands")
         if not isinstance(permissions, dict) or set(permissions) not in ({"project", "network", "processes", "settings"}, {"project", "network", "processes", "settings", "devices"}) or ("devices" in permissions and not isinstance(permissions["devices"], bool)) or not isinstance(permissions["project"], bool) or not isinstance(permissions["processes"], bool) or not isinstance(permissions["settings"], bool) or not isinstance(permissions["network"], bool):
             raise ValueError(f"Unsupported permissions: {path}")
@@ -107,6 +109,26 @@ def collect(owner):
                     if end < 0:
                         raise ValueError(f"Unclosed snippet placeholder: {path}")
                     remaining = remaining[end + 2:]
+            if command.get("snippet") and "snippet-linked-v1" in requirements:
+                remaining = command["insert"]
+                linked = set()
+                count = remaining.count("{{placeholder:")
+                while "{{linked:" in remaining:
+                    start = remaining.index("{{linked:") + 9
+                    end = remaining.find("}}", start)
+                    if end < 0:
+                        raise ValueError(f"Unclosed linked field: {path}")
+                    body = remaining[start:end]
+                    field_name, separator, _ = body.partition(":")
+                    if not field_name or len(field_name) > 64 or any(not ("A" <= c <= "Z" or "a" <= c <= "z" or "0" <= c <= "9" or c == "_") for c in field_name):
+                        raise ValueError(f"Invalid linked field name: {path}")
+                    if (separator and field_name in linked) or (not separator and field_name not in linked):
+                        raise ValueError(f"Invalid linked field order: {path}")
+                    linked.add(field_name)
+                    count += 1
+                    remaining = remaining[end + 2:]
+                if count > 32:
+                    raise ValueError(f"Too many snippet fields: {path}")
         if permissions.get("devices", False) and not any(command.get("action") in ("serial-monitor", "board-profile", "flash-firmware", "identify-usb-boards") for command in commands):
             raise ValueError(f"Unsupported device permission: {path}")
         if "cmake-build-target-v1" in requirements and (not permissions["project"] or not permissions["processes"] or "cmake-codemodel-v1" not in requirements or not any(command.get("action") == "browse-cmake" for command in commands)):

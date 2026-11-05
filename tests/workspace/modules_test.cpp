@@ -54,6 +54,8 @@ int main() {
     if (indentSnippet(snippet,"x",expansionError)) return 131;
     if (expandSnippet("{{placeholder:x}}{{placeholder:y}}", "", snippet, expansionError, true) ||
         expandSnippet("{{placeholder:x}}{{placeholder:unclosed", "", snippet, expansionError, true, true)) return 59;
+    if (!expandSnippet("{{linked:item:α}} + {{linked:item}} + {{placeholder:other}}{{cursor}}", "", snippet, expansionError, true, true, true) || snippet.text!="α + α + other" || snippet.fields.size()!=3 || !snippet.fields[0].link || snippet.fields[0].link!=snippet.fields[1].link || snippet.fields[2].link) return 1120;
+    if (expandSnippet("{{linked:item}}", "", snippet, expansionError, true, true, true) || expandSnippet("{{linked:item:a}}{{linked:item:b}}", "", snippet, expansionError, true, true, true)) return 1121;
     if (!expandSnippet("line\r\n{{placeholder:a\rb}}{{cursor}}", "", snippet, expansionError, true, true) ||
         snippet.text != "line\na\nb" || snippet.fields[0].start != 5 || snippet.fields[0].end != 8 || snippet.finalOffset != 8) return 60;
     const auto invalidSnippet = R"({"name":"Bad","version":"1","permissions":{"project":false,"network":false,"processes":false,"settings":false},"commands":[{"title":"x","insert":"{{cursor}}{{cursor}}","snippet":true}]})";

@@ -86,7 +86,13 @@ document changes outside the active field. The optional `snippet-indent-v1` capa
 prefixes subsequent inserted lines, including lines from a wrapped selection, with
 the insertion line's leading whitespace while keeping field and cursor positions aligned.
 For documents over 16 MiB, the template
-is inserted but field navigation is unavailable. Linked fields are not supported.
+is inserted but field navigation is unavailable. With the `snippet-linked-v1`
+capability and `snippet-placeholders-v2`, define a linked field with
+`{{linked:name:default}}` and refer to it later with `{{linked:name}}`. Edits
+mirror to all occurrences as one undoable edit. Tab visits each linked name
+once; undo, redo or editing outside the active field ends navigation. References
+must follow a single definition, and a snippet may contain at most 32 field
+occurrences.
 The Local Error Explainer sends the current diagnostic with up to five bounded nearby
 source lines, or a bounded debugger state (including available stack frames and variables), to Lucid's local model after the
 user confirms. It does not send that context to OpenRouter, even when other AI actions
@@ -446,6 +452,10 @@ RTL layout or shaping; code-point counts are not rendered width or grapheme coun
 It flags missing and extra simple `{identifier}` and positional `{0}` placeholders and differing counts
 when both strings exist. This is not ICU message validation; escaped and complex
 formats and formatting semantics may require manual review.
+For source text that is not blank, the workspace also identifies an existing empty
+or ASCII-whitespace-only translation as needing translation. Whitespace-only source
+entries are not flagged. **Needs translation** filters to missing or blank entries;
+this is a heuristic and does not treat non-ASCII space characters as blank.
 For a source key, **Edit translation** accepts a single-line value up to the input
 limit and shows a review with simple placeholder differences before confirmation.
 An existing string can be replaced, or a missing leaf added to an existing object;
@@ -638,7 +648,9 @@ are marked incomplete. Save open edits first. The runner inherits Lucid's workin
 directory; other source files, lockfile and executable may change after review.
 
 Dependency Risk Review parses the open, possibly unsaved npm `package-lock.json`
-(v2/v3), Go `go.sum`, or Cargo `Cargo.lock` (v3/v4) locally. After the user confirms, it sends eligible package
+(v1/v2/v3), Go `go.sum`, or Cargo `Cargo.lock` (v3/v4) locally. npm v1 nested
+entries are checked but direct dependencies cannot be inferred from that lockfile
+alone. After the user confirms, it sends eligible package
 names, ecosystems and exact versions to `api.osv.dev` and shows returned advisory IDs. Selecting an ID
 offers a separate confirmation to fetch its summary, aliases, references and reported
 npm, Go or crates.io fixed versions; verify the affected range before upgrading. Escape

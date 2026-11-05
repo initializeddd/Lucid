@@ -216,8 +216,41 @@ bool parseNpmDependencyRisk(std::string_view lockfile, DependencyRiskReport& rep
     report = {}; error.clear(); JsonValue json;
     if (!parse(lockfile, json, error)) return false;
     const auto* version = field(json, "lockfileVersion", JsonType::Number);
+    if (version && version->numberValue == 1) {
+        const auto* dependencies = json.find("dependencies");
+        if (dependencies && dependencies->type != JsonType::Object) { error = "Invalid lockfile dependency map."; return false; }
+        DependencyRiskReport result; std::size_t visited = 0, skipped = 0;
+        const auto visit = [&](auto&& self, const JsonValue& map, const std::string& prefix) -> bool {
+            for (const auto& item : map.children) {
+                if (++visited > maxPackages) { error = "Too many lockfile packages."; return false; }
+                if (item.type != JsonType::Object) { error = "Invalid package entry."; return false; }
+                const auto path = prefix + "node_modules/" + item.key;
+                if (path.size() > 16384) { error = "Dependency path exceeds size limit."; return false; }
+                const auto name = nameFromPath(path);
+                const auto* explicitName = field(item, "name", JsonType::String);
+                const auto* ver = field(item, "version", JsonType::String);
+                if (name != item.key || (explicitName && explicitName->stringValue != name) || !ver || !exactVersion(ver->stringValue) || !verifiedRegistryPackage(name, ver->stringValue, item)) ++skipped;
+                else {
+                    result.packages.push_back({path, name, ver->stringValue, "npm", false, flag(item, "dev"), flag(item, "optional"), {}});
+                    result.packages.back().declaredSource = field(item, "resolved", JsonType::String)->stringValue;
+                    if (const auto* integrity = field(item, "integrity", JsonType::String); integrity && supportedSri(integrity->stringValue)) result.packages.back().declaredChecksum = integrity->stringValue;
+                }
+                if (const auto* children = item.find("dependencies")) {
+                    if (children->type != JsonType::Object) { error = "Invalid nested dependency map."; return false; }
+                    if (!self(self, *children, path + "/")) return false;
+                }
+            }
+            return true;
+        };
+        if (dependencies && !visit(visit, *dependencies, {})) return false;
+        result.limitations.push_back("npm package-lock v1 does not establish direct dependencies from the lockfile alone; directness is not inferred.");
+        result.limitations.push_back("Only canonical npm registry tarball URLs matching the install name and exact version are covered; aliases and other sources are skipped.");
+        result.limitations.push_back("OSV data may be incomplete; results do not establish exploitability or runtime reachability.");
+        if (skipped) result.limitations.push_back(std::to_string(skipped) + " package entries were skipped (aliases, ambiguous sources, unsupported paths, or missing/non-exact versions).");
+        report = std::move(result); return true;
+    }
     const auto* packages = field(json, "packages", JsonType::Object);
-    if (!version || (version->numberValue != 2 && version->numberValue != 3) || !packages) { error = "Only npm package-lock v2/v3 with a packages map is supported."; return false; }
+    if (!version || (version->numberValue != 2 && version->numberValue != 3) || !packages) { error = "Only npm package-lock v1, or v2/v3 with a packages map, is supported."; return false; }
     if (packages->children.size() > maxPackages + 1) { error = "Too many lockfile packages."; return false; }
     const auto* root = field(*packages, "", JsonType::Object);
     if (!root) { error = "Lockfile root package is missing."; return false; }

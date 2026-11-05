@@ -38,12 +38,18 @@
       "title": "Insert function template",
       "insert": "{{placeholder:void}} {{placeholder:name}}({{placeholder:arguments}}) {\n    {{cursor}}\n}",
       "snippet": true
+    },
+    {
+      "title": "Insert named guard",
+      "insert": "#ifndef {{linked:guard:HEADER_GUARD}}\n#define {{linked:guard}}\n\n{{cursor}}\n#endif // {{linked:guard}}",
+      "snippet": true
     }
   ],
   "requires": [
     "snippet-v1",
     "snippet-placeholder-v1",
     "snippet-placeholders-v2",
-    "snippet-indent-v1"
+    "snippet-indent-v1",
+    "snippet-linked-v1"
   ]
 }

@@ -108,6 +108,12 @@ void merge(const Lengths& left, const Lengths& right, std::vector<LocalizationEn
     for (const auto& [key, info] : right) { auto& entry = merged[key]; entry.key = key; entry.inTranslation = true; entry.translationText = info.text; entry.translationOffset = info.offset; entry.translationLength = info.length; entry.translationHasRtl = info.hasRtl; entry.translationLong = info.length > 120; }
     for (auto& [key, entry] : merged) {
         if (entry.inSource && entry.inTranslation) {
+            const auto blank = [](std::string_view text) {
+                return std::all_of(text.begin(), text.end(), [](unsigned char c) {
+                    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
+                });
+            };
+            entry.translationBlank = !blank(entry.sourceText) && blank(entry.translationText);
             const auto source = placeholders(entry.sourceText), translation = placeholders(entry.translationText);
             for (const auto& [name, count] : source) {
                 const auto it = translation.find(name);

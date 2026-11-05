@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <set>
 #include <system_error>
 namespace lucid::modules {
 bool supportsCapability(std::string_view capability) noexcept {
+    if (capability == "snippet-linked-v1") return true;
     if (capability == "snippet-indent-v1") return true;
     if (capability == "api-response-assertions-v1" || capability == "api-response-save-v1") return true;
 #if !defined(__APPLE__)
@@ -64,6 +66,7 @@ Module parseManifest(std::string id, std::string_view text) {
             m.requirements.push_back(capability.stringValue);
         }
     }
+    if (std::find(m.requirements.begin(),m.requirements.end(),"snippet-linked-v1")!=m.requirements.end() && std::find(m.requirements.begin(),m.requirements.end(),"snippet-placeholders-v2")==m.requirements.end()) {m.error="Linked fields require multiple placeholders";return m;}
     const auto* p = json->find("permissions"); const auto* c = json->find("commands");
     if (!p || p->type != JsonType::Object || (p->children.size() != 4 && p->children.size() != 5) || !boolField(*p, "project", m.project) ||
         !boolField(*p, "network", m.network) || !boolField(*p, "processes", m.processes) || !boolField(*p, "settings", m.settings) ||
@@ -92,7 +95,7 @@ Module parseManifest(std::string id, std::string_view text) {
         if (command.snippet) {
             ExpandedSnippet expanded;
             const bool multiple = std::find(m.requirements.begin(), m.requirements.end(), "snippet-placeholders-v2") != m.requirements.end();
-            if (!expandSnippet(command.insert, "", expanded, textError, multiple || std::find(m.requirements.begin(), m.requirements.end(), "snippet-placeholder-v1") != m.requirements.end(), multiple)) { m.error = textError; return m; }
+            if (!expandSnippet(command.insert, "", expanded, textError, multiple || std::find(m.requirements.begin(), m.requirements.end(), "snippet-placeholder-v1") != m.requirements.end(), multiple, std::find(m.requirements.begin(), m.requirements.end(), "snippet-linked-v1") != m.requirements.end())) { m.error = textError; return m; }
         }
         m.commands.push_back(std::move(command));
     }
@@ -158,7 +161,7 @@ Module readModule(const std::filesystem::path& dir, std::string id) {
     return m;
 }
 }
-bool expandSnippet(std::string_view text, std::string_view selection, ExpandedSnippet& result, std::string& error, bool placeholders, bool multiple) {
+bool expandSnippet(std::string_view text, std::string_view selection, ExpandedSnippet& result, std::string& error, bool placeholders, bool multiple, bool linked) {
     result = {}; error.clear();
     // Document paste normalizes CR and CRLF to LF. Normalize before calculating
     // byte ranges so placeholder offsets match the resulting editor buffer.
@@ -171,6 +174,7 @@ bool expandSnippet(std::string_view text, std::string_view selection, ExpandedSn
     constexpr std::string_view selectionMarker = "{{selection}}", cursorMarker = "{{cursor}}";
     constexpr std::size_t maxExpansion = 1024U * 1024U;
     std::size_t cursorOffset = 0, endOffset = 0;
+    std::map<std::string, std::pair<std::size_t, std::string>> links;
     const auto append = [&](std::string_view part) {
         if (part.size() > maxExpansion - result.text.size()) return false;
         result.text.append(part); return true;
@@ -182,6 +186,18 @@ bool expandSnippet(std::string_view text, std::string_view selection, ExpandedSn
         } else if (text.substr(i).starts_with(cursorMarker)) {
             if (result.hasCursor || (!multiple && result.hasPlaceholder)) { error = "A snippet may contain only one cursor or placeholder"; return false; }
             result.hasCursor = true; result.finalOffset = result.text.size(); result.finalFieldIndex = result.fields.size(); if (!result.hasPlaceholder) cursorOffset = result.text.size(); i += cursorMarker.size();
+        } else if (linked && text.substr(i).starts_with("{{linked:")) {
+            if (!multiple || result.fields.size() >= 32) { error = "Linked fields require multiple placeholders and at most 32 occurrences"; return false; }
+            const auto end = text.find("}}", i + 9);
+            if (end == std::string_view::npos) { error = "Unclosed linked field"; return false; }
+            const auto body = text.substr(i + 9, end - i - 9); const auto colon=body.find(':'); const auto name=body.substr(0,colon);
+            if(name.empty() || name.size()>64 || !std::all_of(name.begin(),name.end(),[](unsigned char c){return (c>='a'&&c<='z') || (c>='A'&&c<='Z') || (c>='0'&&c<='9') || c=='_';})) {error="Invalid linked field name";return false;}
+            auto it=links.find(std::string(name));
+            if(colon!=body.npos) { if(it!=links.end()) {error="Linked field defined more than once";return false;} it=links.emplace(std::string(name),std::make_pair(links.size()+1,std::string(body.substr(colon+1)))).first; }
+            else if(it==links.end()) {error="Linked field reference precedes its definition";return false;}
+            const auto start=result.text.size(); if(!result.hasPlaceholder) cursorOffset=start; result.hasPlaceholder=true;
+            if(!append(it->second.second)) {error="Expanded snippet exceeds 1 MiB";return false;}
+            if(result.fields.empty()) endOffset=result.text.size(); result.fields.push_back({start,result.text.size(),it->second.first}); i=end+2;
         } else if (placeholders && text.substr(i).starts_with("{{placeholder:")) {
             if ((!multiple && (result.hasCursor || result.hasPlaceholder)) || result.fields.size() >= 32) { error = "Too many snippet placeholders or cursor markers"; return false; }
             const auto end = text.find("}}", i + 14);

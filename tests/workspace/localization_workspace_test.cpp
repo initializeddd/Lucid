@@ -49,6 +49,9 @@ int main() {
         && entries[0].differingPlaceholderCounts.size() == 2
         && entries[0].differingPlaceholderCounts[0].name == "name" && entries[0].differingPlaceholderCounts[0].source == 2 && entries[0].differingPlaceholderCounts[0].translation == 1
         && entries[0].differingPlaceholderCounts[1].name == "other" && entries[0].differingPlaceholderCounts[1].source == 1 && entries[0].differingPlaceholderCounts[1].translation == 2;
+    ok = ok && compareLocalizationText(R"({"blank":"Has text","empty":"Has text","intentional":"  ","missing":"Has text","translated":"Has text"})", R"({"blank":" \t\n","empty":"","intentional":"","translated":"Hallo"})", entries, error)
+        && entries.size() == 5 && entries[0].translationBlank && entries[1].translationBlank
+        && !entries[2].translationBlank && !entries[3].translationBlank && !entries[4].translationBlank;
     ok = ok && compareLocalizationText(R"({"greet":"{0} {1} {1} {{2}}"})", R"({"greet":"{0} {1} {3} {{2}}"})", entries, error)
         && entries.size() == 1 && entries[0].extraPlaceholders == std::vector<std::string>{"3"}
         && entries[0].differingPlaceholderCounts.size() == 1 && entries[0].differingPlaceholderCounts[0].name == "1"

@@ -432,6 +432,15 @@ bool Document::replaceAllUtf8(std::string_view text) {
     return true;
 }
 
+bool Document::amendLastEditUtf8(std::string_view text, std::uint64_t expectedRevision) {
+    if (m_revision != expectedRevision || m_undo.empty() || !m_redo.empty()) return false;
+    auto replacement = Document::fromUtf8(text);
+    if (replacement.toUtf8() != text) return false;
+    if (toUtf8() == text) return true;
+    m_lines = std::move(replacement.m_lines); m_selectionActive = false;
+    clampCursor(); resetPreferredColumn(); markEdited(); return true;
+}
+
 void Document::pasteUtf8(std::string_view text) {
     std::u32string pasted = decodeUtf8(text);
     if (pasted.empty()) {

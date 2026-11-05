@@ -15,6 +15,8 @@ struct LocalizationEntry {
     std::size_t sourceLength = 0, translationLength = 0; // Unicode code points, not rendered width.
     bool sourceHasRtl = false, translationHasRtl = false; // Heuristic script ranges, not direction or language detection.
     bool sourceLong = false, translationLong = false; // More than 120 Unicode code points.
+    // Translation is empty or ASCII whitespace only while source contains text.
+    bool translationBlank = false;
     // Simple {identifier} and {0} placeholders only; not ICU message validation.
     std::vector<std::string> missingPlaceholders, extraPlaceholders;
     std::vector<PlaceholderCount> differingPlaceholderCounts;

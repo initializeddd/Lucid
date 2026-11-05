@@ -13,15 +13,9 @@
 Keyboard-first. Path-native. Drawn entirely on the GPU.
 
 [![CI](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/initializeddd/Lucid/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/badge/docs-initializeddd.github.io%2FLucid-787EFF)](https://initializeddd.github.io/Lucid/)
-[![CodeQL](https://github.com/initializeddd/Lucid/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/initializeddd/Lucid/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/initializeddd/Lucid/badge)](https://securityscorecards.dev/viewer/?uri=github.com/initializeddd/Lucid)
 [![Status](https://img.shields.io/badge/status-beta-787EFF)](#downloads)
 [![License](https://img.shields.io/github/license/initializeddd/Lucid?color=787EFF)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/initializeddd/Lucid?color=787EFF&include_prereleases)](https://github.com/initializeddd/Lucid/releases)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-787EFF)](#platform-support)
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-787EFF)](https://en.cppreference.com/w/cpp/20)
-[![Discussions](https://img.shields.io/badge/discussions-open-787EFF)](https://github.com/initializeddd/Lucid/discussions)
 
 [Download](#downloads) · [Docs](https://initializeddd.github.io/Lucid/) · [Getting started](docs/getting-started.md) · [Build from source](#build-from-source) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md) · [Discussions](https://github.com/initializeddd/Lucid/discussions)
 
@@ -36,19 +30,21 @@ out of your way. New projects default to `~/Documents/Lucid`, keeping them separ
 The window, text, chrome and overlays are all rendered by a small Vulkan renderer. On macOS it runs
 on MoltenVK; on Windows and Linux it uses the native Vulkan loader.
 
-> **Beta software.** Version `v0.2.1-beta.2` includes features at different stages of maturity.
-> File formats and behavior may change. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
+> **Beta software.** Features are at different stages of maturity, and file formats and behavior
+> may change. This README describes the current source tree; the downloadable
+> `v0.2.1-beta.2` release may differ. See the [changelog](CHANGELOG.md) and [roadmap](docs/roadmap.md).
 
-## Screenshots
+## Lucid in action
 
-![The Lucid editor showing a C++ file](docs/assets/screenshots/editor.png)
+**Welcome screen**
 
-![The Lucid start surface](docs/assets/screenshots/start.png)
+![Lucid's welcome screen with the animated ocean lighthouse background](docs/assets/screenshots/lighthouse-welcome.gif)
 
-![Opening a C++ file and scrolling through the code](docs/assets/screenshots/demo.gif)
+**Editing a file**
 
-A short [MP4 version](docs/assets/screenshots/demo.mp4) is available for reduced-motion or
-lower-bandwidth viewing.
+![A C++ file open in Lucid over the softly blurred lighthouse background](docs/assets/screenshots/lighthouse-editor.gif)
+
+These short, sampled animations show the lighthouse scene in the welcome screen and editor.
 
 ## At a glance
 
@@ -58,7 +54,7 @@ lower-bandwidth viewing.
 - **Project search** — use Ctrl+Shift+F (Command+Shift+F on macOS) to search project files and review replacements before applying them.
 - **Comment-driven builds** — define and run project commands alongside the code that describes them.
 - **Optional local AI** — review a suggestion before applying it; the model is downloaded and verified on first use.
-- **Work in context** — task workspaces, Git review, recovery snapshots, and declarative text modules bring project work into temporary surfaces.
+- **Work in context** — task workspaces, Git review, recovery snapshots, and opt-in modules bring project work into temporary surfaces.
 
 ### Feature maturity
 
@@ -66,10 +62,10 @@ lower-bandwidth viewing.
 | --- | --- |
 | Editing, open-file switcher, settings | Available; keyboard-first workflows are still evolving |
 | Local AI and code cleanup | Preview; small selections, local inference and explicit acceptance |
-| Git review | File-level staging, local commits, recent history and upstream fetch/pull/push; no pull-request integration |
+| Git review | File-level staging, local commits and reviewed upstream operations; the optional Pull-Request Companion supports a bounded GitHub review workflow |
 | Task workspaces and recovery | Local previews; recovery has [known limits](#recovery-snapshots) |
-| Modules | Declarative text commands only; no arbitrary-code runtime |
-| Language intelligence | C/C++ through installed clangd; rename and automatic server installation are not yet supported |
+| Modules | Declarative manifests invoke supported Lucid actions; the 30 new module packages are not yet published. See [module guide](docs/modules.md) for access and limitations |
+| Language intelligence | C/C++ through installed clangd, including reviewed rename; automatic server installation is not yet supported |
 | Debugger | LLDB-based C/C++ workflow; macOS tested, Linux and Windows require platform validation |
 | Multiplayer | Not yet available |
 | Screen readers | Initial macOS bridge; broader accessibility work remains |
@@ -111,7 +107,7 @@ without changing the default application.
 
 Press Ctrl+Shift+F (Command+Shift+F on macOS), enter a literal, case-sensitive search and press Enter. Select a result to open its file, or select **Replace all matches** to enter replacement text and review the affected files before applying it. Ctrl+Shift+H also starts the workflow on Linux and Windows.
 
-Search uses the project index, skips unreadable, binary and unsupported text files, and reports how many were skipped. It currently uses fixed project exclusions rather than `.gitignore`. Replacement is disabled when the result or memory limit is reached. Files are checked for external changes before and during replacement. Replacements across files are not one undoable transaction: if a later write fails, earlier files may already have changed; use version control to review or revert them.
+Search uses the project index and skips binary and unsupported text files. Select **Skipped files** in the results to review paths and reasons; the list is bounded and reports if further details were omitted. It currently uses fixed project exclusions rather than `.gitignore`. Replacement is disabled if a selected file could not be read or if the result or memory limit is reached; fix the file or exclude its path and search again. Files are checked for external changes before and during replacement. Replacements across files are not one undoable transaction: if a later write fails, earlier files may already have changed; use version control to review or revert them.
 
 ## Requirements
 
@@ -350,6 +346,7 @@ in place of `Alt`:
 | Delete previous / next word | `Ctrl+Backspace` / `Ctrl+Delete` (macOS: Option+Backspace / Option+Delete) |
 | Insert line below / above | `Ctrl+Enter` / `Ctrl+Shift+Enter` |
 | Toggle line comment | `Ctrl+/` |
+| Toggle block comment on the selection or current line | `Alt+Shift+A` (macOS: `Option+Shift+A`) |
 | Indent / outdent selection | `Tab` / `Shift+Tab` |
 | Move current line | `Alt+Up` / `Alt+Down` |
 | Beginning / end of document | `Ctrl+Home` / `Ctrl+End` (macOS: Command+Up / Command+Down); add Shift to select |
@@ -363,14 +360,34 @@ in place of `Alt`:
 | Join lines | `Ctrl+J` |
 | Delete file / project | `Ctrl+Shift+Backspace` / `Ctrl+Shift+Alt+Backspace` |
 
+Block commenting supports common C-style and HTML/XML delimiters. Lucid refuses
+ambiguous selections containing additional comment delimiters; it does not yet
+analyze whether a selection is already inside a string or comment.
+
 Use `Ctrl+E` (Command+E on macOS) to open a temporary list of open files. Opening another
 file saves the current file as before; returning to an unchanged file restores its cursor, scroll
-position and undo history. If the file changed on disk while inactive, Lucid reloads it.
+position and undo history. If a clean file changed on disk while inactive, Lucid reloads it.
+For a dirty inactive file, Lucid retains the unsaved buffer and blocks saving if the disk
+version changed. It can reopen the buffer even if the file is missing or has become binary;
+use Recovery to preserve a copy before resolving the conflict.
+Recovery will not replace another open buffer with unsaved edits. Its **Restore as a
+new file** action can also preserve a snapshot when the original path is now a folder.
+If the disk file is missing, unreadable, or binary, recovery opens the saved text
+without opening the disk file in an external application; saving still checks the
+original baseline.
 Closing the current file returns to the most recently active open file.
 
 Find searches case-sensitive text in the open file; Enter and Shift+Enter move through matches.
-In project search, Ctrl+Shift+W (Command+Shift+W on macOS) toggles whole-word matching;
-replacement applies only the matches shown in the search results.
+In project search, Ctrl+Shift+W (Command+Shift+W on macOS) toggles whole-word matching.
+Ctrl+Shift+C (Command+Shift+C on macOS) toggles ASCII case-insensitive matching.
+Ctrl+Shift+I (Command+Shift+I on macOS) includes or excludes generated directories such as
+`build` and `node_modules`; version-control and Lucid internal directories remain excluded.
+Ctrl+Shift+G (Command+Shift+G on macOS) edits a case-sensitive path filter, which also
+limits replacements. Separate alternatives with commas; plain text matches anywhere in
+the path, `*` matches any number of path characters, `?` matches one byte, and `!`
+excludes a pattern. For example, `*.cpp, *.hpp, !vendor/` searches those extensions
+outside paths containing `vendor/`. Leave the filter empty to search all indexed files.
+Replacement applies only the matches shown in the search results.
 In replacement review, open a file and press Enter on a match to include or exclude it.
 Ctrl+Up/Down (Command+Up/Down on macOS) recalls project searches from the current session.
 Ctrl+Shift+O (Command+Shift+O on macOS) returns to the last project-search results.
@@ -385,15 +402,32 @@ steps may be discarded sooner for large files. Local recovery history is separat
 For C and C++ projects Lucid starts `clangd` from your PATH, if available, to provide diagnostics
 and supported completion suggestions. Install LLVM/clangd separately and provide a
 `compile_commands.json` for the most accurate project results. Use Ctrl+Shift+Space
-(Command+Shift+Space on macOS) to open completion, F12 to find a definition, Shift+F12 to
+(Command+Shift+Space on macOS) to open completion, F12 to find a definition, Ctrl+F12
+(Command+F12 on macOS) to find a declaration when supported, Shift+F12 to
 find references, and Alt+Shift+F (Option+Shift+F on macOS) to format the current buffer
 or the selected range when text is selected.
+Alt+Shift+S (Option+Shift+S on macOS) requests function signatures and identifies the
+active parameter when the server supplies that information.
+Alt+Shift+O (Option+Shift+O on macOS) searches project symbols through clangd's index.
+F4 searches symbols in the current file, including nested symbols. Its name filter
+ignores ASCII case; results are limited to 500 locations.
+F2 requests a symbol rename and opens a review of the affected files. Select a file to inspect
+its individual changes; unusually long change previews are shortened. The language server may
+not find every project reference, so inspect the resulting changes. Applying a rename writes the reviewed files after conflict
+checks and recovery backups; a failure can leave earlier files changed.
+Cross-file results depend on clangd's project index and compilation database.
 F8 and Shift+F8 move to the next or previous diagnostic in the current file;
 Ctrl+F8 (Command+F8 on macOS) opens the diagnostic list.
+Ctrl+Shift+I (Command+Shift+I on macOS) opens language-server status, where clangd
+can be started or restarted and its advertised capabilities can be inspected.
+For a CMake project with no existing `build/` directory, that view can generate a
+compilation database by configuring a new `build/`; this runs the project's CMake
+scripts and displays their output in the compile window. Windows users currently
+need to configure CMake separately. Existing build directories are not modified.
 Navigation currently opens locations inside the project only. Formatting can be undone and
 does not save the file automatically. When clangd is unavailable, completion falls back to
-function names found in the current file and a bounded scan of project files. Workspace rename,
-automatic language-server installation and languages beyond C/C++ are not yet supported.
+function names found in the current file and a bounded scan of project files. Automatic
+language-server installation and languages beyond C/C++ are not yet supported.
 
 Local AI runs inside Lucid without a separate model server. On its first request Lucid downloads
 approximately 491 MB from Hugging Face and verifies the pinned model's SHA-256 before loading it.
@@ -473,11 +507,14 @@ filesystem or concurrent-write failure; keep independent backups.
 
 ## Modules
 
-Lucid's module manager supports declarative text commands in a temporary,
-keyboard-accessible surface. Preview a local manifest or GitHub package before
-installing it; modules list requested access and start disabled. Access to files,
-network, processes, or settings cannot be enabled yet. See the
-[module guide](docs/modules.md) for the format and setup.
+Lucid's module manager uses declarative manifests in a temporary, keyboard-accessible
+surface. Preview a local manifest or supported GitHub package before installing it;
+modules show their requested project, network, process, settings and device access
+and start disabled. Supported commands include snippets and Lucid-provided tools;
+there is no arbitrary-code module runtime. Some actions run programs with your
+privileges, and network actions ask for confirmation. The 30 new module packages
+are not published yet; the existing public catalog does not contain them. See the
+[module guide](docs/modules.md) for commands, permissions and limitations.
 
 ## AI settings
 
@@ -528,8 +565,11 @@ updates; push targets the reviewed commit and never force-pushes. Remote
 operations run without interactive credential prompts; SSH uses batch mode,
 so credentials must already be available. An SSH command configured in the
 environment or Git configuration is not used for these operations. Staging
-individual hunks, branch management and pull-request metadata are not yet
-implemented. The Windows implementation requires validation on Windows.
+individual hunks, branch creation/deletion and pull-request metadata are not yet
+implemented. **Local branches** lets you review and switch an existing branch when
+the entire repository and open buffers are clean. Git may run checkout hooks.
+Open files are refreshed; files missing from the new branch remain open as
+recoverable text. The Windows implementation requires validation on Windows.
 
 ## Task workspaces
 
@@ -562,7 +602,8 @@ Lucid uses `xcrun lldb-dap` from the Xcode toolchain. On Linux, install LLVM's
 LLVM with `lldb-dap.exe` on `PATH` or in `Program Files/LLVM/bin`. Lucid does
 not install the adapter automatically. Linux and Windows need native validation.
 
-While stopped, the debugger menu offers continue, step over, step into, step out,
+While a program is running, choose **Pause** in the debugger menu to request a
+stop. While stopped, the debugger menu offers continue, step over, step into, step out,
 a call stack, thread selection, expandable variables, and output. A `B` marks a breakpoint, `>`
 marks the stopped line, and an asterisk marks a variable that changed after a
 step. Selecting a stack frame changes the displayed variables. The current
@@ -628,7 +669,7 @@ Lucid/
 ├── src/ai/          Local model download and inference
 ├── src/app/         Application lifecycle and editor actions
 ├── src/editor/      Document model, completion, syntax and diagnostics
-├── src/modules/     Declarative module preview
+├── src/modules/     Module manifests and supported host actions
 ├── src/platform/    Windows, input, native menus and processes
 ├── src/renderer/    Vulkan renderer
 ├── src/ui/          Layout, themes and temporary surfaces
@@ -680,6 +721,5 @@ early ideas. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull reque
 
 Lucid is released under the [MIT License](LICENSE).
 
-The bundled JetBrains Mono font is licensed under the
-[SIL Open Font License 1.1](assets/fonts/JetBrainsMono-OFL.txt). Third-party notices for the
-local AI stack are in [assets/licenses](assets/licenses/).
+See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled and fetched components, the font,
+and the separately downloaded local AI model.

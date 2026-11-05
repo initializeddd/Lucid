@@ -100,6 +100,7 @@ bool Client::supports(std::string_view method) const noexcept {
     if (method == "textDocument/formatting") return m_formatting;
     if (method == "textDocument/rangeFormatting") return m_rangeFormatting;
     if (method == "textDocument/rename") return m_rename;
+    if (method == "textDocument/codeAction") return m_codeAction;
     return true;
 }
 bool Client::cancel(std::uint64_t id, std::string& error) {
@@ -135,12 +136,22 @@ bool Client::poll(std::vector<std::string>& messages, std::string& error) {
             m_references = supported("referencesProvider"); m_formatting = supported("documentFormattingProvider");
             m_rangeFormatting = supported("documentRangeFormattingProvider");
             m_rename = supported("renameProvider");
+            m_codeAction = supported("codeActionProvider");
             if (!send("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", error)) return false;
             m_ready = true;
         } else if (method && id) {
-            // Acknowledge unsupported server-to-client requests without hanging clangd.
             const std::string identifier = id->type == JsonType::String ? debug::jsonString(id->stringValue) : id->type == JsonType::Number ? std::to_string(static_cast<long long>(id->numberValue)) : "null";
-            if (!send("{\"jsonrpc\":\"2.0\",\"id\":" + identifier + ",\"error\":{\"code\":-32601,\"message\":\"Method not supported\"}}", error)) return false;
+            if (method->type == JsonType::String && method->stringValue == "workspace/configuration") {
+                const auto* params = json->find("params");
+                const auto* items = params && params->type == JsonType::Object ? params->find("items") : nullptr;
+                if (!items || items->type != JsonType::Array || items->children.size() > 1024) {
+                    if (!send("{\"jsonrpc\":\"2.0\",\"id\":" + identifier + ",\"error\":{\"code\":-32602,\"message\":\"Invalid configuration request\"}}", error)) return false;
+                } else {
+                    std::string values;
+                    for (std::size_t i = 0; i < items->children.size(); ++i) { if (i) values += ','; values += "null"; }
+                    if (!send("{\"jsonrpc\":\"2.0\",\"id\":" + identifier + ",\"result\":[" + values + "]}", error)) return false;
+                }
+            } else if (!send("{\"jsonrpc\":\"2.0\",\"id\":" + identifier + ",\"error\":{\"code\":-32601,\"message\":\"Method not supported\"}}", error)) return false;
         } else messages.push_back(std::move(body));
     }
     if (!m_ready && std::chrono::steady_clock::now() >= m_initializationDeadline) {
@@ -149,5 +160,5 @@ bool Client::poll(std::vector<std::string>& messages, std::string& error) {
     }
     return true;
 }
-void Client::close() { m_process.close(); m_decoder.reset(); m_document.clear(); m_ready = false; m_completion = m_signature = m_workspaceSymbols = m_documentSymbols = m_definition = m_declaration = m_references = m_formatting = m_rangeFormatting = m_rename = false; m_version = 0; m_nextId = 2; m_initializationDeadline = {}; }
+void Client::close() { m_process.close(); m_decoder.reset(); m_document.clear(); m_ready = false; m_completion = m_signature = m_workspaceSymbols = m_documentSymbols = m_definition = m_declaration = m_references = m_formatting = m_rangeFormatting = m_rename = m_codeAction = false; m_version = 0; m_nextId = 2; m_initializationDeadline = {}; }
 }

@@ -7,18 +7,27 @@ namespace lucid::workspace::recovery {
 bool recordHistory(const std::filesystem::path& root, const Snapshot& snapshot, std::string& error) {
     const auto key = picosha2::hash256_hex_string(snapshot.project + '\0' + snapshot.file);
     const auto folder = root / "History" / key;
-    if (!write(folder / (workspace::newTaskId() + ".json"), snapshot, error)) return false;
-    std::error_code ec; std::vector<std::filesystem::directory_entry> entries;
+    const auto saved = folder / (workspace::newTaskId() + ".json");
+    if (!write(saved, snapshot, error)) return false;
+    struct Entry { std::filesystem::path path; std::filesystem::file_time_type time; };
+    std::error_code ec; std::vector<Entry> entries; std::size_t inspected=0;
     for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
-        if (it->is_regular_file(ec) && !it->is_symlink(ec) && it->path().extension() == ".json") entries.push_back(*it);
+        if (++inspected>256) return true; // Defer pruning unusually large directories.
+        if (it->path() == saved || it->is_symlink(ec) || !it->is_regular_file(ec) || it->path().extension() != ".json") continue;
+        // Never delete an unreadable or unrelated file simply because it is in
+        // the history directory. Preserve uncertain entries for manual recovery.
+        Snapshot candidate; std::string readError;
+        if (!read(it->path(), candidate, readError) || candidate.project != snapshot.project || candidate.file != snapshot.file) continue;
+        const auto time=it->last_write_time(ec); if (ec) break;
+        entries.push_back({it->path(),time});
     }
     if (ec) return true; // The new backup is already safe; pruning can wait.
     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
-        std::error_code ea, eb; const auto ta = a.last_write_time(ea), tb = b.last_write_time(eb);
-        if (ea || eb || ta == tb) return a.path() > b.path();
-        return ta > tb;
+        return a.time == b.time ? a.path > b.path : a.time > b.time;
     });
-    for (std::size_t i = 3; i < entries.size(); ++i) { std::filesystem::remove(entries[i].path(), ec); ec.clear(); }
+    // The newly written snapshot always occupies one of the three slots,
+    // even when a filesystem clock moves backwards.
+    for (std::size_t i = 2; i < entries.size(); ++i) { std::filesystem::remove(entries[i].path, ec); ec.clear(); }
     error.clear(); return true;
 }
 bool listHistory(const std::filesystem::path& root, std::string_view project,

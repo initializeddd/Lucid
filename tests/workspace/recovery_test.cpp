@@ -43,5 +43,17 @@ int main() {
     if (!newest) return 8;
     std::vector<std::filesystem::path> other;
     if (!listHistory(dir, "/another-project", other, error) || !other.empty()) return 7;
+    // Clock skew must not cause the snapshot just written to be pruned, and
+    // unknown or unrelated files in the history folder must be preserved.
+    const auto folder=history.front().parent_path();
+    for (const auto& old:history) std::filesystem::last_write_time(old,std::filesystem::file_time_type::clock::now()+std::chrono::hours(24));
+    const auto corrupt=folder/"unrecognized.json"; {std::ofstream out(corrupt);out<<"{broken";}
+    auto unrelated=original; unrelated.file="other.cpp";
+    const auto foreign=folder/"foreign.json"; if(!write(foreign,unrelated,error)) return 14;
+    original.contents=original.baseline="clock-skew-new";
+    if(!recordHistory(dir,original,error) || !std::filesystem::exists(corrupt) || !std::filesystem::exists(foreign)) return 15;
+    history.clear(); if(!listHistory(dir,original.project,history,error)) return 16;
+    bool skewNew=false; for(const auto& item:history) if(read(item,restored,error) && restored.file==original.file && restored.contents=="clock-skew-new") skewNew=true;
+    if(!skewNew) return 17;
     std::filesystem::remove_all(dir); return 0;
 }

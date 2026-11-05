@@ -22,7 +22,8 @@ int main() {
             ("lucid-lsp-capabilities-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(fakeDir);
         const std::string response = R"({"jsonrpc":"2.0","id":1,"result":{"capabilities":{"completionProvider":{},"signatureHelpProvider":false,"workspaceSymbolProvider":true,"documentSymbolProvider":{},"definitionProvider":true,"declarationProvider":true,"referencesProvider":false,"documentFormattingProvider":{},"documentRangeFormattingProvider":false}}})";
-        { std::ofstream script(fakeDir / "clangd"); script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nexec /bin/cat > '" << (fakeDir / "received").string() << "'\n"; }
+        const std::string config = R"({"jsonrpc":"2.0","id":"config-1","method":"workspace/configuration","params":{"items":[{"section":"clangd"},{"section":"other"}]}})";
+        { std::ofstream script(fakeDir / "clangd"); script << "#!/bin/sh\nprintf 'Content-Length: " << response.size() << "\\r\\n\\r\\n%s' '" << response << "'\nprintf 'Content-Length: " << config.size() << "\\r\\n\\r\\n%s' '" << config << "'\nexec /bin/cat > '" << (fakeDir / "received").string() << "'\n"; }
         std::filesystem::permissions(fakeDir / "clangd", std::filesystem::perms::owner_all);
         const char* old = std::getenv("PATH"); const bool hadPath = old != nullptr; const std::string oldPath = old ? old : "";
         if (setenv("PATH", fakeDir.c_str(), 1) != 0) return 30;
@@ -46,7 +47,7 @@ int main() {
         while (std::chrono::steady_clock::now() < limit) {
             messages.clear(); if (!capabilities.poll(messages, error)) return 37;
             std::ifstream recorded(fakeDir / "received"); const std::string data((std::istreambuf_iterator<char>(recorded)), {});
-            if (data.find("\"method\":\"$/cancelRequest\"") != std::string::npos && data.find("\"params\":{\"id\":" + std::to_string(requestId) + "}") != std::string::npos) { receivedCancel = true; break; }
+            if (data.find("\"method\":\"$/cancelRequest\"") != std::string::npos && data.find("\"params\":{\"id\":" + std::to_string(requestId) + "}") != std::string::npos && data.find("\"id\":\"config-1\",\"result\":[null,null]") != std::string::npos) { receivedCancel = true; break; }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (!receivedCancel) return 36;

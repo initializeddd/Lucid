@@ -46,7 +46,7 @@ private:
     std::uint64_t m_nextId = 2;
     int m_version = 0;
     bool m_ready = false;
-    bool m_completion = false, m_signature = false, m_workspaceSymbols = false, m_documentSymbols = false, m_definition = false, m_declaration = false, m_references = false, m_formatting = false, m_rangeFormatting = false, m_rename = false;
+    bool m_completion = false, m_signature = false, m_workspaceSymbols = false, m_documentSymbols = false, m_definition = false, m_declaration = false, m_references = false, m_formatting = false, m_rangeFormatting = false, m_rename = false, m_codeAction = false;
     std::chrono::milliseconds m_initializationTimeout;
     std::chrono::steady_clock::time_point m_initializationDeadline{};
 };

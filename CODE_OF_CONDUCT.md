@@ -20,9 +20,12 @@ discussions and other channels is expected to keep the conversation respectful a
 ## Enforcement
 
 Maintainers may edit, hide or remove contributions that violate this policy and may temporarily or
-permanently restrict participation. Reports can be sent privately to the maintainers through the
-repository's **Report a vulnerability** channel or by contacting a maintainer directly; reports are
-handled confidentially.
+permanently restrict participation. To report abuse, use
+[GitHub's reporting tools](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam),
+including the **Block or report** option on a user's profile. Reports sent to GitHub Support go to
+GitHub; they are not necessarily delivered to Lucid's maintainers. GitHub may offer a separate
+option to report repository content to its maintainers. For security vulnerabilities, use
+[SECURITY.md](SECURITY.md).
 
 This policy is intentionally short and applies to project spaces and to public interactions made on
 the project's behalf.

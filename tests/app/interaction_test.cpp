@@ -2087,6 +2087,20 @@ struct ApplicationInteractionTest {
             app.applyProjectSearch();
             while (app.m_projectSearchFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollProjectSearch(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             if (app.m_projectSearchFuture.valid() || std::none_of(app.m_projectSearchResults.files.begin(), app.m_projectSearchResults.files.end(), [](const auto& file) { return file.path == "component.css"; })) return 445;
+            const std::string usageCss = ":root {\r\n  --primary: #fff;\r\n  color: var(\f    --primary\r\n  );\r\n}\r\n";
+            { std::ofstream out(temp / "nested" / "uses.css", std::ios::binary); out << usageCss; }
+            app.m_designTokenShowing=false; app.m_designTokenSelected.reset(); app.m_modulePage=0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand(); app.m_searchBar.setQuery("uses.css"); app.applyModuleCommand();
+            const auto usageDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15); while(app.m_designTokenFuture.valid() && std::chrono::steady_clock::now()<usageDeadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+            if(app.m_designTokenFuture.valid() || app.m_designTokenReport.tokens.size()!=1 || app.m_designTokenUsages.usages.size()!=1) return 1101;
+            auto tokenRow=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0); if(tokenRow==app.m_moduleChoices.end()) return 1102; app.m_selectedSuggestion=static_cast<int>(tokenRow-app.m_moduleChoices.begin()); app.applyModuleCommand();
+            auto viewReferences=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-313); if(viewReferences==app.m_moduleChoices.end()) return 1103; app.m_selectedSuggestion=static_cast<int>(viewReferences-app.m_moduleChoices.begin()); app.applyModuleCommand();
+            auto reference=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0); if(reference==app.m_moduleChoices.end()) return 1104;
+            { std::ofstream out(temp / "nested" / "uses.css", std::ios::trunc); out << "changed"; }
+            app.m_selectedSuggestion=static_cast<int>(reference-app.m_moduleChoices.begin()); app.applyModuleCommand(); if(!app.m_commandStatusIsError || !app.m_designTokenUsageShowing || app.m_filePath=="uses.css") return 1105;
+            { std::ofstream out(temp / "nested" / "uses.css", std::ios::binary | std::ios::trunc); out << usageCss; }
+            reference=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0); if(reference==app.m_moduleChoices.end()) return 1106; app.m_selectedSuggestion=static_cast<int>(reference-app.m_moduleChoices.begin()); app.applyModuleCommand();
+            if(app.m_filePath!="uses.css" || app.m_document.cursorLine()!=2 || app.m_document.cursorColumn()!=18 || app.m_searchBar.isOpen()) return 1107;
+            app.openFile("example.txt",false); std::filesystem::remove(temp / "nested" / "uses.css");
             const std::string aliasJson=R"({"base":{"$value":"#123"},"alias":{"$value":"{base}"},"cycle":{"$value":"{cycle}"},"missing":{"$value":"{absent}"}})";
             {std::ofstream out(temp/"nested"/"tokens.json");out<<aliasJson;}
             app.m_designTokenShowing=false;app.m_modulePage=0;app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();app.m_selectedSuggestion=0;app.applyModuleCommand();app.m_searchBar.setQuery("tokens.json");app.applyModuleCommand();

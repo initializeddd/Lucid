@@ -166,7 +166,7 @@ checks, not the full editor UI or a security sandbox. Project code must be
 trusted and can access the network. Windows preview remains disabled until it
 has been verified on Windows; uncertain shutdown may leave a temporary profile.
 
-Markdown Studio can navigate ATX (`#`) and root-level Setext headings in the current
+Markdown Studio can navigate ATX (`#`) and Setext headings in the current
 editor buffer, including unsaved text, while ignoring fenced code blocks. Its text preview shows
 headings, paragraphs, lists, quotes and code without executing raw HTML or loading
 remote images. Inline styling and table layout are simplified, and tables remain
@@ -174,8 +174,9 @@ text. The local link checker checks project-contained file and directory targets
 without making network requests. Filter missing or unchecked links and select a
 result to navigate to its label when a reliable source location is available;
 changed buffers must be checked again. External links, fragments and unsupported encoded
-paths are labelled **Not checked**, rather than treated as valid or broken. Setext
-headings inside lists or blockquotes are not yet supported.
+paths are labelled **Not checked**, rather than treated as valid or broken. Headings
+with text inside lists or blockquotes are included in the outline; empty nested
+headings are not currently listed.
 
 The separate **Check an external link** command requires network permission. It
 lists HTTP(S) links without displaying their destinations; select one, inspect it
@@ -442,11 +443,14 @@ constants, built-ins and arbitrary uniforms are unsupported.
 Design-Token Explorer reads a selected project-local CSS or JSON file up to 4 MiB.
 It lists simple one-line CSS custom properties and primitive JSON or DTCG-style
 values, with warnings for syntax it cannot interpret. Select a token to open its
-definition or search its exact name; navigation requires the file to match the
+definition, view static `var()` references in that CSS file, or search its exact name
+across the project; navigation requires the file to match the
 imported snapshot and open edits to be resolved. Aliases, transformed names and
 CSS cascade are not resolved. JSON numbers retain their original text; token paths
 and values are bounded, and excess warnings are labelled. Composite token values
-and multiline CSS declarations are not supported.
+and multiline CSS declarations are not supported. Reference detection handles
+multiline `var()` calls but does not resolve the cascade, escaped names or comments
+inside calls.
 
 Log Correlation reads up to eight selected project-local logs, with a combined
 16 MiB limit. It filters case-sensitively and aligns ISO timestamps with explicit
@@ -541,7 +545,7 @@ groups are not expanded. It does not access hardware. Its
 conservative XML subset accepts predefined and numeric text entities but rejects
 DTDs and custom or external entities. It does not expand forward or qualified references, derived peripheral arrays or nested and derived clusters. A field can inherit from an earlier literal field in the same register, including its bit range, access, description and enumerations; supported explicit properties override them, and explicit enumeration groups replace inherited choices. An `lsb`/`msb` override must provide both, and mixed bit-range forms are rejected. Single-level clusters, including simple
 arrays with explicit increments and numeric or comma-separated indexes, expand
-register names and addresses; cluster-level defaults are not inherited. A peripheral can inherit from a unique earlier complete peripheral when it has an explicit name and base address and no register or default-property overrides; copied register addresses are relocated. Unsupported or ambiguous inheritance is marked incomplete. A register can inherit from a unique earlier register in the
+register names and addresses. Cluster size, access and reset values override peripheral and device defaults for contained registers when declared before them; register values take precedence. Cluster reset masks and protection defaults are not inherited and are marked incomplete. A peripheral can inherit from a unique earlier complete peripheral when it has an explicit name and base address and no register or default-property overrides; copied register addresses are relocated. Unsupported or ambiguous inheritance is marked incomplete. A register can inherit from a unique earlier register in the
 same peripheral, with complete explicit field overrides. Simple peripheral arrays expand up to 256 elements with one `%s` placeholder, a nonzero address increment and numeric or unique comma-separated literal indexes; array properties must precede registers. Simple register arrays with explicit increments
 and numeric or comma-separated indexes are expanded. Field arrays expand up to
 64 elements with a nonzero bit increment, one `%s` name placeholder and numeric
@@ -660,12 +664,12 @@ API Request Studio can check a received response against a project-local asserti
 JSON file, without sending another request. For example:
 
 ```json
-{"assertions":[{"type":"status","value":200},{"type":"body_contains","value":"ready"},{"type":"json_string_equals","pointer":"/data/id","value":"123"}]}
+{"assertions":[{"type":"status","value":200},{"type":"body_contains","value":"ready"},{"type":"json_string_equals","pointer":"/data/id","value":"123"},{"type":"json_bool_equals","pointer":"/ready","value":true},{"type":"json_null","pointer":"/error","value":null}]}
 ```
 
 Checks show pass/fail without displaying expected values, JSON paths or response
 contents. Assertion files may themselves contain sensitive plaintext. JSON checks
-parse at most 1 MiB of the response, support string equality only, and fail on
+parse at most 1 MiB of the response, support string and boolean equality and null checks, and fail on
 ambiguous duplicate keys along a pointer; unsuccessful or incomplete responses
 cannot be checked. These checks do not establish that a service is secure.
 

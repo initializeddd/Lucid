@@ -81,8 +81,9 @@ bool extractCssDesignTokens(std::string_view text, DesignTokenReport& report, st
     DesignTokenReport result; std::size_t line = 0, pos = 0; bool comment = false; int braces = 0;
     std::set<std::string> names;
     while (pos < text.size()) {
-        ++line; const auto lineStart = pos; auto end = text.find('\n', pos); if (end == std::string_view::npos) end = text.size();
-        const auto raw = text.substr(pos, end - pos); pos = end == text.size() ? end : end + 1;
+        ++line; const auto lineStart = pos; auto end = text.find_first_of("\r\n", pos); if (end == std::string_view::npos) end = text.size();
+        const auto raw = text.substr(pos, end - pos);
+        pos = end == text.size() ? end : end + (text[end] == '\r' && end + 1 < text.size() && text[end + 1] == '\n' ? 2 : 1);
         // Comments and strings make declaration boundaries ambiguous. Skip the
         // whole line, but track block comments so their contents are never tokens.
         std::string clean; bool hadComment = comment;
@@ -128,16 +129,21 @@ bool findCssTokenUsages(std::string_view text, CssTokenUsageReport& report, std:
         const char c = text[i];
         if (!comment && !quote && i + 4 < text.size() && text.substr(i, 4) == "var(" &&
             (i == 0 || (static_cast<unsigned char>(text[i - 1]) < 0x80 && !ident(static_cast<unsigned char>(text[i - 1])) && text[i - 1] != '\\'))) {
-            std::size_t p = i + 4;
-            while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+            std::size_t p = i + 4, nameLine = line, nameColumn = column + 4;
+            const auto space = [](char ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f'; };
+            while (p < text.size() && space(text[p])) {
+                const char ch = text[p++];
+                if (ch == '\n' || (ch == '\r' && (p == text.size() || text[p] != '\n'))) { ++nameLine; nameColumn = 1; }
+                else if (ch != '\r') ++nameColumn;
+            }
             const std::size_t start = p;
             if (text.substr(p, 2) == "--") {
                 p += 2; while (p < text.size() && ident(static_cast<unsigned char>(text[p]))) ++p;
                 const auto end = p;
-                while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+                while (p < text.size() && space(text[p])) ++p;
                 if (end > start + 2 && p < text.size() && (text[p] == ')' || text[p] == ',')) {
                     if (report.usages.size() == maxTokens) { report.truncated = true; return true; }
-                    report.usages.push_back({std::string(text.substr(start, end - start)), line, column + start - i});
+                    report.usages.push_back({std::string(text.substr(start, end - start)), nameLine, nameColumn, start});
                 }
             }
         }
@@ -149,7 +155,7 @@ bool findCssTokenUsages(std::string_view text, CssTokenUsageReport& report, std:
             else if (c == quote) quote = 0;
         } else if (c == '/' && i + 1 < text.size() && text[i + 1] == '*') { comment = true; i += 2; column += 2; continue; }
         else if (c == '\'' || c == '"') quote = c;
-        ++i; if (c == '\n') { ++line; column = 1; } else ++column;
+        ++i; if (c == '\n' || (c == '\r' && (i == text.size() || text[i] != '\n'))) { ++line; column = 1; } else if (c != '\r') ++column;
     }
     return true;
 }

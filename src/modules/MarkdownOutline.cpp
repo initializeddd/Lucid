@@ -52,25 +52,11 @@ int endBlock(MD_BLOCKTYPE type, void*, void* data) {
     auto& c = *static_cast<SetextContext*>(data);
     if (type != MD_BLOCK_H) return 0;
     c.inHeading = false;
-    if (!c.hasLocation || c.last + 1 >= c.starts.size()) return 0;
-    // An ATX heading followed by a thematic break is not a Setext heading.
-    auto firstStart = c.starts[c.first];
-    auto firstEnd = c.source->find('\n', firstStart);
-    auto firstLine = std::string_view(*c.source).substr(firstStart, firstEnd == std::string::npos ? firstEnd : firstEnd - firstStart);
-    std::size_t markerStart = 0;
-    while (markerStart < firstLine.size() && markerStart < 4 && firstLine[markerStart] == ' ') ++markerStart;
-    if (markerStart <= 3 && markerStart < firstLine.size() && firstLine[markerStart] == '#') return 0;
-    auto start = c.starts[c.last + 1], end = c.source->find('\n', start);
-    auto underline = std::string_view(*c.source).substr(start, end == std::string::npos ? end : end - start);
-    std::size_t i = 0; while (i < underline.size() && i < 4 && underline[i] == ' ') ++i;
-    if (i > 3 || i == underline.size()) return 0;
-    const char marker = underline[i]; if ((c.level == 1 && marker != '=') || (c.level == 2 && marker != '-')) return 0;
-    while (i < underline.size() && underline[i] == marker) ++i;
-    while (i < underline.size() && (underline[i] == ' ' || underline[i] == '\t' || underline[i] == '\r')) ++i;
-    if (i == underline.size()) {
-        if (c.headings.size() >= c.cap) c.truncated = true;
-        else { c.headings.push_back({c.title, c.first, c.level}); c.truncated = c.truncated || c.titleTruncated; }
-    }
+    if (!c.hasLocation) return 0;
+    // MD4C already identifies both ATX and Setext headings, including those
+    // nested inside containers, while excluding code and thematic breaks.
+    if (c.headings.size() >= c.cap) c.truncated = true;
+    else { c.headings.push_back({c.title, c.first, c.level}); c.truncated = c.truncated || c.titleTruncated; }
     return 0;
 }
 }
@@ -106,8 +92,8 @@ MarkdownOutline markdownOutline(const editor::Document& document, std::size_t li
         result.truncated = result.truncated || titleTruncated;
         result.headings.push_back({std::move(bounded), line, static_cast<int>(level)});
     }
-    // Use MD4C's block parser to distinguish Setext headings from thematic breaks,
-    // fenced/indented code, HTML blocks, and other non-heading text.
+    // Include headings in Markdown containers using the block parser. The
+    // simple scan above preserves the source spelling of top-level ATX titles.
     auto source = document.toUtf8();
     if (source.size() <= 16U * 1024U * 1024U && source.size() <= std::numeric_limits<MD_SIZE>::max()) {
         SetextContext context; context.source = &source; context.cap = cap; context.starts.push_back(0);
@@ -122,6 +108,7 @@ MarkdownOutline markdownOutline(const editor::Document& document, std::size_t li
         } else result.truncated = true;
     } else result.truncated = true;
     std::stable_sort(result.headings.begin(), result.headings.end(), [](const auto& a, const auto& b) { return a.line < b.line; });
+    result.headings.erase(std::unique(result.headings.begin(), result.headings.end(), [](const auto& a, const auto& b) { return a.line == b.line; }), result.headings.end());
     if (result.headings.size() > cap) { result.headings.resize(cap); result.truncated = true; }
     return result;
 }

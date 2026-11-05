@@ -52,7 +52,7 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
     if (xml.size()>maxBytes) return fail("SVD exceeds byte limit");
     bool inPeripheral=false, currentPeripheralIncomplete=false;
     auto warn = [&](const char* message) { if(inPeripheral) currentPeripheralIncomplete=true; out.incomplete=true; if (std::find(out.warnings.begin(),out.warnings.end(),message)==out.warnings.end() && out.warnings.size()<16) out.warnings.emplace_back(message); };
-    Defaults deviceDefaults, peripheralDefaults; bool deviceRegistersSeen=false, peripheralRegistersSeen=false;
+    Defaults deviceDefaults, peripheralDefaults, clusterDefaults; bool deviceRegistersSeen=false, peripheralRegistersSeen=false;
     std::vector<PeripheralSource> peripheralSources; std::string peripheralDerivedFrom; std::size_t peripheralStart=0; bool peripheralOverrides=false; std::optional<std::uint64_t> peripheralDim,peripheralIncrement; std::string peripheralIndexes;
     std::vector<Node> stack; stack.reserve(64); std::string peripheral, clusterName; std::optional<std::uint64_t> base, clusterOffset, clusterDim, clusterIncrement; std::string clusterIndexes; std::size_t clusterStart=0; bool inCluster=false, clusterRegistersSeen=false, clusterSkip=false; Reg reg; Field field; EnumItem enumItem; std::string enumUsage; bool peripheralSkip=false, inReg=false, inField=false, inEnum=false, rootSeen=false; std::size_t pos=0,nodes=0,totalFields=0,emittedFields=0,derivedComparisons=0,descriptionBytes=0,emittedEnums=0,constructedEnums=0,constructedDescriptions=0;
     while(pos<xml.size()) {
@@ -89,7 +89,7 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                 if(peripheralDerived) {auto a=trim(attrs);constexpr std::string_view key="derivedFrom";if(!a.starts_with(key))return fail("Unsupported peripheral derivedFrom attribute");a.remove_prefix(key.size());a=trim(a);if(a.empty()||a.front()!='=')return fail("Invalid peripheral derivedFrom attribute");a.remove_prefix(1);a=trim(a);if(a.size()<3||(a.front()!='\''&&a.front()!='"'))return fail("Invalid peripheral derivedFrom attribute");auto quote=a.front();a.remove_prefix(1);auto end=a.find(quote);if(end==std::string_view::npos||!trim(a.substr(end+1)).empty())return fail("Invalid peripheral derivedFrom attribute");auto ref=a.substr(0,end);if(ref.empty()||ref.size()>256||!std::all_of(ref.begin(),ref.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_';}))return fail("Unsupported peripheral derivedFrom reference");peripheralDerivedFrom=std::string(ref);}
             }
             if(!parentSkip && !peripheralDerivedFrom.empty() && parentName=="peripheral" && (name=="registers" || name=="size" || name=="access" || name=="resetValue" || name=="resetMask" || name=="protection")) {peripheralOverrides=true;stack.back().skip=true;warn("Derived peripheral overrides are not expanded");}
-            if (!parentSkip && supportedCluster) {inCluster=true;clusterName.clear();clusterOffset.reset();clusterDim.reset();clusterIncrement.reset();clusterIndexes.clear();clusterStart=out.registers.size();clusterRegistersSeen=false;clusterSkip=false;}
+            if (!parentSkip && supportedCluster) {inCluster=true;clusterDefaults={};clusterName.clear();clusterOffset.reset();clusterDim.reset();clusterIncrement.reset();clusterIndexes.clear();clusterStart=out.registers.size();clusterRegistersSeen=false;clusterSkip=false;}
             if(!parentSkip && name=="register") {
                 if (inCluster && (clusterName.empty() || !clusterOffset)) return fail("Cluster name and offset must precede registers");
                 if (inCluster) clusterRegistersSeen=true;
@@ -130,9 +130,9 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
         if(stack.empty() || stack.back().name!=name) return fail("Mismatched XML tag");
         Node node=std::move(stack.back()); stack.pop_back(); auto value=trim(node.text); auto parent=stack.empty()?std::string_view{}:std::string_view(stack.back().name); std::uint64_t n=0;
         if(!node.skip) {
-            if ((parent=="device" || parent=="peripheral") && (name=="size" || name=="resetValue" || name=="access")) {
-                if ((parent=="device" && deviceRegistersSeen) || (parent=="peripheral" && peripheralRegistersSeen)) return fail("SVD defaults must precede registers");
-                auto& defaults = parent=="device" ? deviceDefaults : peripheralDefaults;
+            if ((parent=="device" || parent=="peripheral" || (inCluster && parent=="cluster")) && (name=="size" || name=="resetValue" || name=="access")) {
+                if ((parent=="device" && deviceRegistersSeen) || (parent=="peripheral" && peripheralRegistersSeen) || (parent=="cluster" && clusterRegistersSeen)) return fail("SVD defaults must precede registers");
+                auto& defaults = parent=="device" ? deviceDefaults : parent=="peripheral" ? peripheralDefaults : clusterDefaults;
                 if (name=="access") { if (value.empty() || !defaults.access.empty()) return fail("Invalid or duplicate SVD default access"); defaults.access=std::string(value); }
                 else { if (!number(value,n) || (name=="size" && (n==0 || n>64))) return fail("Invalid SVD default value"); auto& target=name=="size" ? defaults.size : defaults.reset; if (target) return fail("Duplicate SVD default value"); target=n; }
             }
@@ -141,7 +141,7 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                 if (name=="dimIndex") {if (!clusterIndexes.empty() || value.empty() || value.size()>4096) return fail("Invalid cluster dimIndex"); clusterIndexes=std::string(value);}
                 else {if (!number(value,n)) return fail("Invalid cluster array value"); auto& target=name=="dim" ? clusterDim : clusterIncrement; if (target) return fail("Duplicate cluster array value"); target=n;}
             }
-            if (inCluster && parent=="cluster" && (name=="size" || name=="access" || name=="resetValue" || name=="resetMask" || name=="protection")) warn("Cluster-level defaults are not inherited");
+            if (inCluster && parent=="cluster" && (name=="resetMask" || name=="protection")) warn("Some cluster-level defaults are not inherited");
             if (inCluster && parent=="cluster" && (name=="name" || name=="addressOffset")) { if (clusterRegistersSeen) return fail("Cluster name and offset must precede registers"); if (name=="name") clusterName=std::string(value); else {if(!number(value,n)) return fail("Invalid cluster offset"); clusterOffset=n;} }
             if(parent=="peripheral" && (name=="dim" || name=="dimIncrement" || name=="dimIndex")) {
                 if(peripheralRegistersSeen) return fail("Peripheral array properties must precede registers");
@@ -193,9 +193,9 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                 inField=false;
             }
             if(name=="register" && inReg) {
-                if (!reg.size) reg.size=peripheralDefaults.size ? peripheralDefaults.size : deviceDefaults.size;
-                if (!reg.reset) reg.reset=peripheralDefaults.reset ? peripheralDefaults.reset : deviceDefaults.reset;
-                if (reg.access.empty()) reg.access=!peripheralDefaults.access.empty() ? peripheralDefaults.access : deviceDefaults.access;
+                if (!reg.size) reg.size=inCluster && clusterDefaults.size ? clusterDefaults.size : peripheralDefaults.size ? peripheralDefaults.size : deviceDefaults.size;
+                if (!reg.reset) reg.reset=inCluster && clusterDefaults.reset ? clusterDefaults.reset : peripheralDefaults.reset ? peripheralDefaults.reset : deviceDefaults.reset;
+                if (reg.access.empty()) reg.access=inCluster && !clusterDefaults.access.empty() ? clusterDefaults.access : !peripheralDefaults.access.empty() ? peripheralDefaults.access : deviceDefaults.access;
                 for (auto& item:reg.fields) if (item.access.empty()) item.access=reg.access;
                 const auto clusterBase = inCluster ? clusterOffset.value_or(0) : 0;
                 if(!reg.skip && !peripheralSkip && !peripheral.empty() && base && !reg.name.empty() && reg.offset && clusterBase<=std::numeric_limits<std::uint64_t>::max()-*base && *reg.offset<=std::numeric_limits<std::uint64_t>::max()-*base-clusterBase && (!reg.size || (*reg.size>0 && *reg.size<=64))) {

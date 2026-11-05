@@ -60,6 +60,13 @@ bool parseApiAssertions(std::string_view json,std::vector<ApiAssertion>& asserti
         } else if(type->stringValue=="json_string_equals") {
             if(!pointer || pointer->type!=editor::JsonType::String || !pointerValid(pointer->stringValue) || value->type!=editor::JsonType::String || value->stringValue.size()>maxExpected) return fail("Invalid JSON string assertion");
             a.kind=ApiAssertionKind::JsonStringEquals; a.pointer=pointer->stringValue; a.expected=value->stringValue;
+        } else if(type->stringValue=="json_bool_equals" || type->stringValue=="json_null") {
+            const bool isBool=type->stringValue=="json_bool_equals";
+            if(!pointer || pointer->type!=editor::JsonType::String || !pointerValid(pointer->stringValue) ||
+               value->type!=(isBool ? editor::JsonType::Bool : editor::JsonType::Null)) return fail("Invalid JSON assertion");
+            a.kind=isBool ? ApiAssertionKind::JsonBoolEquals : ApiAssertionKind::JsonNull;
+            a.pointer=pointer->stringValue;
+            if(isBool) a.expected=value->boolValue ? "true" : "false";
         } else return fail("Unsupported assertion type");
         parsed.push_back(std::move(a));
     }
@@ -76,6 +83,8 @@ ApiAssertionReport evaluateApiAssertions(const ApiResponse& response,const std::
         case ApiAssertionKind::Status: if(a.status<100 || a.status>599 || !a.expected.empty() || !a.pointer.empty()) return fail("Invalid assertion set"); break;
         case ApiAssertionKind::BodyContains: if(a.expected.empty() || a.expected.size()>maxExpected || !a.pointer.empty()) return fail("Invalid assertion set"); break;
         case ApiAssertionKind::JsonStringEquals: if(a.expected.size()>maxExpected || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
+        case ApiAssertionKind::JsonBoolEquals: if((a.expected!="true" && a.expected!="false") || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
+        case ApiAssertionKind::JsonNull: if(!a.expected.empty() || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
         default: return fail("Invalid assertion set");
         }
     }
@@ -91,6 +100,16 @@ ApiAssertionReport evaluateApiAssertions(const ApiResponse& response,const std::
             const auto* value=root ? follow(*root,a.pointer) : nullptr;
             result.passed=value && value->type==editor::JsonType::String && value->stringValue==a.expected;
             result.detail=result.passed?"JSON string matched":"JSON string did not match or was unavailable"; break;
+        }
+        case ApiAssertionKind::JsonBoolEquals: {
+            const auto* value=root ? follow(*root,a.pointer) : nullptr;
+            result.passed=value && value->type==editor::JsonType::Bool && value->boolValue==(a.expected=="true");
+            result.detail=result.passed?"JSON boolean matched":"JSON boolean did not match or was unavailable"; break;
+        }
+        case ApiAssertionKind::JsonNull: {
+            const auto* value=root ? follow(*root,a.pointer) : nullptr;
+            result.passed=value && value->type==editor::JsonType::Null;
+            result.detail=result.passed?"JSON null matched":"JSON null did not match or was unavailable"; break;
         }
         }
         report.results.push_back(std::move(result));

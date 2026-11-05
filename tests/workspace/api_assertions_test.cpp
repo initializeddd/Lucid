@@ -17,5 +17,11 @@ int main() {
  response.body="{}"; response.error="secret"; report=evaluateApiAssertions(response,tests); if(report.error.empty() || !report.results.empty() || report.error.find("secret")!=std::string::npos) return 8;
  response.error.clear(); std::atomic_bool cancelled{true}; if(evaluateApiAssertions(response,tests,&cancelled).error.empty()) return 9;
  tests[0].pointer="/~"; if(evaluateApiAssertions(response,tests).error.empty()) return 10;
+ if(!parseApiAssertions(R"({"assertions":[{"type":"json_bool_equals","pointer":"/ok","value":true},{"type":"json_bool_equals","pointer":"/no","value":false},{"type":"json_null","pointer":"/empty","value":null},{"type":"json_null","pointer":"/missing","value":null}]})",tests,error)) return 11;
+ response.body=R"({"ok":true,"no":false,"empty":null})"; report=evaluateApiAssertions(response,tests);
+ if(!report.error.empty() || report.results.size()!=4 || !report.results[0].passed || !report.results[1].passed || !report.results[2].passed || report.results[3].passed) return 12;
+ response.body=R"({"ok":1,"no":null,"empty":false})"; report=evaluateApiAssertions(response,tests);
+ if(report.results[0].passed || report.results[1].passed || report.results[2].passed) return 13;
+ for(const auto* invalid:{R"({"assertions":[{"type":"json_bool_equals","pointer":"/x","value":"true"}]})",R"({"assertions":[{"type":"json_null","pointer":"/x","value":false}]})"}) if(parseApiAssertions(invalid,tests,error)) return 14;
  return 0;
 }

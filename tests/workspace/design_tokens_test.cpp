@@ -24,5 +24,14 @@ int main() {
     if (!extractCssDesignTokens(css,report,error) || css.substr(report.tokens[0].byteOffset,7)!="--brand") return 13;
     std::string warnings; for (int i=0;i<1002;++i) warnings += ":root { /* comment */\n";
     if (!extractCssDesignTokens(warnings,report,error) || !report.warningsTruncated) return 14;
+    const std::string multiline = ".x { color: var(\r\n  --brand\n  , var(\n\t--fallback\n)); }\r.y { color: var(\f --third\n); }";
+    if (!findCssTokenUsages(multiline, usages, error) || usages.usages.size() != 3 ||
+        usages.usages[0].name != "--brand" || usages.usages[0].line != 2 || usages.usages[0].column != 3 ||
+        usages.usages[1].name != "--fallback" || usages.usages[1].line != 4 || usages.usages[1].column != 2 ||
+        usages.usages[2].name != "--third" || usages.usages[2].line != 6 || usages.usages[2].column != 19 ||
+        multiline.substr(usages.usages[0].byteOffset, 7) != "--brand" || multiline.substr(usages.usages[1].byteOffset, 10) != "--fallback") return 16;
+    const std::string crCss = ":root {\r  --brand: red;\r  color: var(\r --brand\r );\r}\r";
+    if (!extractCssDesignTokens(crCss, report, error) || report.tokens.size() != 1 || report.tokens[0].line != 2 || crCss.substr(report.tokens[0].byteOffset, 7) != "--brand") return 17;
+    if (!findCssTokenUsages(crCss, usages, error) || usages.usages.size() != 1 || usages.usages[0].line != 4 || usages.usages[0].column != 2) return 18;
     return 0;
 }

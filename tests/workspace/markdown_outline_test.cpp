@@ -7,6 +7,11 @@ int main() {
     auto limited = markdownOutline(doc, 2); ok = ok && limited.truncated && limited.headings.size() == 2;
     auto hr = lucid::editor::Document::fromUtf8("# Heading\n---\n");
     auto hrOutline = markdownOutline(hr); ok = ok && hrOutline.headings.size() == 1 && hrOutline.headings[0].line == 0;
+    auto nested = lucid::editor::Document::fromUtf8("> # Quoted\n>\n> Nested title\n> ---\n\n- item\n  - ## List heading\n\n  ```\n  # Not a heading\n  ```\n\n# Outside\n");
+    auto nestedOutline = markdownOutline(nested);
+    ok = ok && nestedOutline.headings.size() == 4 && nestedOutline.headings[0].text == "Quoted" && nestedOutline.headings[0].line == 0 && nestedOutline.headings[0].level == 1 && nestedOutline.headings[1].text == "Nested title" && nestedOutline.headings[1].line == 2 && nestedOutline.headings[1].level == 2 && nestedOutline.headings[2].text == "List heading" && nestedOutline.headings[2].line == 6 && nestedOutline.headings[2].level == 2 && nestedOutline.headings[3].text == "Outside" && nestedOutline.headings[3].line == 12;
+    auto nestedLimited = markdownOutline(nested, 2);
+    ok = ok && nestedLimited.truncated && nestedLimited.headings.size() == 2 && nestedLimited.headings[0].line == 0 && nestedLimited.headings[1].line == 2;
     std::string mixed;
     for (int i = 0; i < 200; ++i) mixed += "Setext " + std::to_string(i) + "\n===\n# ATX\n";
     auto many = markdownOutline(lucid::editor::Document::fromUtf8(mixed), 3);

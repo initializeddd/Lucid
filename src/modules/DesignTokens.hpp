@@ -18,10 +18,10 @@ struct DesignTokenReport {
 [[nodiscard]] bool extractJsonDesignTokens(std::string_view text, DesignTokenReport& report, std::string& error);
 [[nodiscard]] bool extractCssDesignTokens(std::string_view text, DesignTokenReport& report, std::string& error);
 
-struct CssTokenUsage { std::string name; std::size_t line = 0, column = 0; };
+struct CssTokenUsage { std::string name; std::size_t line = 0, column = 0, byteOffset = 0; };
 struct CssTokenUsageReport { std::vector<CssTokenUsage> usages; bool truncated = false; };
-// Finds simple var(--name) references in supplied CSS, ignoring comments and
-// strings. Line and byte column are one-based. Escaped identifiers and dynamic
+// Finds simple var(--name) references in supplied CSS, including multiline
+// whitespace, ignoring comments and strings. Line and byte column are one-based. Escaped identifiers and dynamic
 // syntax are intentionally unsupported; this is not a CSS parser.
 [[nodiscard]] bool findCssTokenUsages(std::string_view text, CssTokenUsageReport& report, std::string& error);
 }

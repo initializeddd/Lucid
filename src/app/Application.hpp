@@ -479,10 +479,12 @@ private:
     bool m_localizationEditContextHasDocument = false, m_localizationEditPreview = false;
     std::optional<std::size_t> m_localizationSelected;
     bool m_localizationSelectingTranslation = false, m_localizationShowing = false;
-    struct DesignTokenResult { modules::DesignTokenReport report; std::vector<modules::DesignAliasResult> aliases; std::string snapshot, error; };
+    struct DesignTokenResult { modules::DesignTokenReport report; modules::CssTokenUsageReport usages; std::vector<modules::DesignAliasResult> aliases; std::string snapshot, error; };
     std::future<DesignTokenResult> m_designTokenFuture;
     std::shared_ptr<std::atomic_bool> m_designTokenCancel;
     modules::DesignTokenReport m_designTokenReport;
+    modules::CssTokenUsageReport m_designTokenUsages;
+    bool m_designTokenUsageShowing = false;
     std::vector<modules::DesignAliasResult> m_designTokenAliases;
     std::uint64_t m_designTokenGeneration=0;
     bool m_designTokenAliasEnabled=false;

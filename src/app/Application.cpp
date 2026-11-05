@@ -1060,7 +1060,7 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
                 m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
             }
             if (m_logShowing) { if (m_logSelected) m_logSelected.reset(); else { if (m_logCancel) m_logCancel->store(true); m_logShowing = false; m_logSnapshots.clear(); } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
-            if (m_designTokenShowing) { if (m_designTokenSelected) m_designTokenSelected.reset(); else { if (m_designTokenCancel) m_designTokenCancel->store(true); m_designTokenShowing = false; m_designTokenSnapshot.clear(); m_designTokenAliases.clear(); m_designTokenAliasEnabled=false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_designTokenShowing) { if (m_designTokenUsageShowing) m_designTokenUsageShowing = false; else if (m_designTokenSelected) m_designTokenSelected.reset(); else { if (m_designTokenCancel) m_designTokenCancel->store(true); m_designTokenShowing = false; m_designTokenSnapshot.clear(); m_designTokenAliases.clear(); m_designTokenAliasEnabled=false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_localizationShowing && m_localizationEditPreview) { m_localizationEditPreview = false; m_localizationEditPlan = {}; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_localizationShowing) { if (m_localizationSelected) m_localizationSelected.reset(); else { if (m_localizationCancel) m_localizationCancel->store(true); m_localizationShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_binaryShowing) { if (m_binaryCategory) m_binaryCategory.reset(); else { if (m_binaryCancel) m_binaryCancel->store(true); m_binaryShowing = false; m_binarySnapshot.reset(); } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
@@ -3044,9 +3044,20 @@ void Application::refreshModuleSuggestions() {
                 add(first, record.source + ":" + std::to_string(record.line), static_cast<int>(i));
             } }
         } else if (m.enabled && m_designTokenShowing) {
-            add(m_designTokenSelected ? "< Back to tokens" : "< Back to module commands", "", -27);
+            add(m_designTokenUsageShowing ? "< Back to token" : m_designTokenSelected ? "< Back to tokens" : "< Back to module commands", "", -27);
             const auto safe = [](const std::string& value) { std::string error; return value.size() <= 4096 && std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) && editor::Document::canEditLosslessly(value, error) ? value : std::string("(unreadable text)"); };
-            if (m_designTokenSelected && *m_designTokenSelected < m_designTokenReport.tokens.size()) {
+            if (m_designTokenUsageShowing && m_designTokenSelected && *m_designTokenSelected < m_designTokenReport.tokens.size()) {
+                const auto& name = m_designTokenReport.tokens[*m_designTokenSelected].name;
+                add("References in this file", "Static var() references only; CSS cascade is not resolved", -28, ui::SuggestionKind::ReadOnlyText);
+                if (m_designTokenUsages.truncated) add("Reference list truncated", "Some references were omitted", -28, ui::SuggestionKind::ReadOnlyText);
+                std::size_t count = 0;
+                for (std::size_t i = 0; i < m_designTokenUsages.usages.size(); ++i) {
+                    const auto& usage = m_designTokenUsages.usages[i];
+                    if (usage.name != name) continue;
+                    add(safe(usage.name), "Line " + std::to_string(usage.line) + ", byte column " + std::to_string(usage.column) + " · open reference", static_cast<int>(i)); ++count;
+                }
+                if (!count) add("No references found", "This checks only the imported file", -28, ui::SuggestionKind::ReadOnlyText);
+            } else if (m_designTokenSelected && *m_designTokenSelected < m_designTokenReport.tokens.size()) {
                 const auto& token = m_designTokenReport.tokens[*m_designTokenSelected];
                 add(safe(token.name), safe(token.type) + " · " + safe(token.value), -28, ui::SuggestionKind::ReadOnlyText);
                 if (m_designTokenAliasEnabled && *m_designTokenSelected<m_designTokenAliases.size()) {
@@ -3058,6 +3069,7 @@ void Application::refreshModuleSuggestions() {
                     add("Resolution limits","One JSON file; CSS cascade, embedded expressions and type compatibility are not resolved",-28,ui::SuggestionKind::ReadOnlyText);
                 }
                 add("Open token definition", "Navigate to the imported CSS declaration or JSON value", -181);
+                if (token.type == "css") add("View references in this file", "Find static CSS var() uses in the imported snapshot", -313);
                 add("Search token name", "Search project text; aliases and transformed names may differ", -182);
             } else {
             if (m_designTokenReport.warningsTruncated) add("Warning list truncated", "Some unsupported syntax notices were omitted", -28, ui::SuggestionKind::ReadOnlyText);
@@ -4548,12 +4560,15 @@ void Application::applyModuleCommand() {
         std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (extension != ".css" && extension != ".json") { setCommandStatus("Enter a project-relative .css or .json file", true); return; }
         const bool aliases=extension==".json" && std::find(found->requirements.begin(),found->requirements.end(),"design-token-aliases-v1")!=found->requirements.end();
-        auto project = m_project; m_designTokenFile = path; m_designTokenSnapshot.clear(); m_designTokenSelected.reset(); m_designTokenReport = {}; m_designTokenAliases.clear(); m_designTokenAliasEnabled=aliases; m_designTokenShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        auto project = m_project; m_designTokenFile = path; m_designTokenSnapshot.clear(); m_designTokenSelected.reset(); m_designTokenReport = {}; m_designTokenUsages = {}; m_designTokenUsageShowing = false; m_designTokenAliases.clear(); m_designTokenAliasEnabled=aliases; m_designTokenShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
         m_designTokenCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands); m_designTokenGeneration=m_searchBar.generation();
         m_designTokenFuture = std::async(std::launch::async, [project, path, extension, aliases, cancel = m_designTokenCancel] {
             DesignTokenResult result; std::string contents;
             try { if (project.readFileBounded(path, contents, result.error, 4U * 1024U * 1024U, cancel.get()) && !cancel->load()) {
-                if (extension == ".css") (void)modules::extractCssDesignTokens(contents, result.report, result.error);
+                if (extension == ".css") {
+                    (void)modules::extractCssDesignTokens(contents, result.report, result.error);
+                    if (result.error.empty() && !cancel->load()) (void)modules::findCssTokenUsages(contents, result.usages, result.error);
+                }
                 else (void)modules::extractJsonDesignTokens(contents, result.report, result.error);
                 if(result.error.empty() && aliases) (void)modules::resolveDesignTokenAliases(result.report.tokens,result.aliases,result.error,cancel.get());
                 if (result.error.empty()) result.snapshot = std::move(contents);
@@ -5343,7 +5358,10 @@ void Application::applyModuleCommand() {
         if (!m_hasDocument || m_filePath != path || m_document.toUtf8() != snapshot) { setCommandStatus("File could not be opened unchanged; compare again", true); return; }
         m_document.setCursor(line,column); m_followCursor = true; m_localizationShowing = false; m_localizationSelected.reset(); m_searchBar.close(); return;
     }
-    if (choice == -27 && m_designTokenShowing) { if (m_designTokenSelected) m_designTokenSelected.reset(); else { if (m_designTokenCancel) m_designTokenCancel->store(true); m_designTokenShowing = false; m_designTokenSnapshot.clear(); m_designTokenAliases.clear(); m_designTokenAliasEnabled=false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -27 && m_designTokenShowing) { if (m_designTokenUsageShowing) m_designTokenUsageShowing = false; else if (m_designTokenSelected) m_designTokenSelected.reset(); else { if (m_designTokenCancel) m_designTokenCancel->store(true); m_designTokenShowing = false; m_designTokenSnapshot.clear(); m_designTokenAliases.clear(); m_designTokenAliasEnabled=false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -313 && m_designTokenShowing && m_designTokenSelected && *m_designTokenSelected < m_designTokenReport.tokens.size() && m_designTokenReport.tokens[*m_designTokenSelected].type == "css") {
+        m_designTokenUsageShowing = true; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
+    }
     if (choice==-312 && m_designTokenShowing && m_designTokenSelected && *m_designTokenSelected<m_designTokenAliases.size()) {
         const auto target=m_designTokenAliases[*m_designTokenSelected].targetIndex; std::string error,contents; std::vector<modules::Module> fresh;
         if(target>=m_designTokenReport.tokens.size() || !m_hasProject || m_project.root().generic_string()!=m_designTokenRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_designTokenModule || !modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) {return m.id==m_designTokenModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"design-token-aliases-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="design-token-explorer";});})) {setCommandStatus("Token context changed; inspect again",true);return;}
@@ -5698,6 +5716,22 @@ void Application::applyModuleCommand() {
             m_logSelected = static_cast<std::size_t>(choice); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
         }
         if (m_designTokenShowing) {
+            if (m_designTokenUsageShowing && m_designTokenSelected && *m_designTokenSelected < m_designTokenReport.tokens.size()) {
+                const auto index = static_cast<std::size_t>(choice); std::string error, contents; std::vector<modules::Module> fresh;
+                if (index >= m_designTokenUsages.usages.size() || m_designTokenUsages.usages[index].name != m_designTokenReport.tokens[*m_designTokenSelected].name || !m_hasProject || m_project.root().generic_string() != m_designTokenRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_designTokenModule || !modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [&](const auto& m) { return m.id == m_designTokenModule && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action == "design-token-explorer"; }); })) { setCommandStatus("Token context changed; inspect again", true); return; }
+                const auto path = normalizeRelative(m_designTokenFile); const auto offset = m_designTokenUsages.usages[index].byteOffset;
+                if (offset >= m_designTokenSnapshot.size() || !m_project.readFileBounded(path, contents, error, 4U * 1024U * 1024U) || contents != m_designTokenSnapshot || std::any_of(contents.begin(), contents.end(), [](unsigned char c) { return c == 0 || (c < 32 && c != '\n' && c != '\r' && c != '\t' && c != '\f'); }) || !editor::Document::canEditLosslessly(contents, error)) { setCommandStatus("Token file changed or contains unsupported text; inspect again", true); return; }
+                const auto cached = std::find_if(m_inactiveDocuments.begin(), m_inactiveDocuments.end(), [&](const auto& doc) { return doc.path == path; });
+                if ((m_hasDocument && m_document.dirty()) || (cached != m_inactiveDocuments.end() && cached->document.dirty())) { setCommandStatus("Save or resolve open edits before navigating", true); return; }
+                // Document normalizes CRLF and CR into line breaks but keeps form
+                // feeds as characters. Derive the cursor using that same parser.
+                const auto prefix = editor::Document::fromUtf8(std::string_view(contents).substr(0, offset));
+                const auto line = prefix.lineCount() - 1; const auto column = prefix.line(line).size();
+                const auto normalized = editor::Document::fromUtf8(contents).toUtf8();
+                if (!m_hasDocument || m_filePath != path) openFile(path, false);
+                if (!m_hasDocument || m_filePath != path || m_document.toUtf8() != normalized) { setCommandStatus("Token file could not be opened unchanged", true); return; }
+                m_document.setCursor(line, column); m_followCursor = true; m_designTokenShowing = false; m_designTokenUsageShowing = false; m_designTokenSelected.reset(); m_designTokenSnapshot.clear(); m_searchBar.close(); return;
+            }
             if (!m_hasProject || m_project.root().generic_string() != m_designTokenRoot || m_designTokenSelected || static_cast<std::size_t>(choice) >= m_designTokenReport.tokens.size()) return;
             m_designTokenSelected=static_cast<std::size_t>(choice); m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions();
             return;
@@ -6868,7 +6902,7 @@ void Application::pollModules() {
         try { result = m_designTokenFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
         if (!cancelled && m_hasProject && m_project.root().generic_string() == m_designTokenRoot && m_designTokenShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands && m_searchBar.generation()==m_designTokenGeneration && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_designTokenModule && moduleStillEnabled(m_designTokenModule,"design-token-explorer") && (!m_designTokenAliasEnabled || ([&] { std::vector<modules::Module> fresh; std::string error; return modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_designTokenModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"design-token-aliases-v1")!=m.requirements.end();}); })())) {
             if (!result.error.empty()) setCommandStatus("Token inspection failed: " + result.error, true);
-            else { m_designTokenReport = std::move(result.report); m_designTokenAliases = std::move(result.aliases); m_designTokenSnapshot = std::move(result.snapshot); setCommandStatus(std::to_string(m_designTokenReport.tokens.size()) + " tokens; " + std::to_string(m_designTokenReport.warnings.size()) + " warnings; select a token for actions", !m_designTokenReport.warnings.empty() || m_designTokenReport.warningsTruncated); }
+            else { m_designTokenReport = std::move(result.report); m_designTokenUsages = std::move(result.usages); m_designTokenAliases = std::move(result.aliases); m_designTokenSnapshot = std::move(result.snapshot); setCommandStatus(std::to_string(m_designTokenReport.tokens.size()) + " tokens; " + std::to_string(m_designTokenReport.warnings.size()) + " warnings; select a token for actions", !m_designTokenReport.warnings.empty() || m_designTokenReport.warningsTruncated); }
             m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
         } else if (!cancelled && m_designTokenShowing && m_searchBar.isOpen() && m_searchBar.kind()==ui::PromptKind::ModuleCommands && m_moduleSelected<m_modules.size() && m_modules[m_moduleSelected].id==m_designTokenModule) {m_designTokenShowing=false;m_designTokenSnapshot.clear();m_designTokenAliases.clear();m_designTokenReport={};m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Token context changed; inspect again",true);}
     }

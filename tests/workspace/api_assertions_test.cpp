@@ -33,5 +33,11 @@ int main() {
  response.headers="HTTP/2 200\r\nContent-Type: application/json\r\n";
  if(evaluateApiAssertions(response,tests).results[0].passed) return 19;
  for(const auto* invalid:{R"({"assertions":[{"type":"header_equals","name":"bad name","value":"x"}]})",R"({"assertions":[{"type":"header_equals","name":"x","value":"bad\nvalue"}]})",R"({"assertions":[{"type":"status","name":"x","value":200}]})"}) if(parseApiAssertions(invalid,tests,error)) return 20;
+ if(!parseApiAssertions(R"({"assertions":[{"type":"json_number_equals","pointer":"/a","value":9007199254740993},{"type":"json_number_equals","pointer":"/b","value":1.2300e2},{"type":"json_number_equals","pointer":"/c","value":-0.00}]})",tests,error)) return 21;
+ response.body=R"({"a":9007199254740992,"b":123,"c":0})"; report=evaluateApiAssertions(response,tests);
+ if(!report.error.empty() || report.results[0].passed || !report.results[1].passed || !report.results[2].passed) return 22;
+ response.body=R"({"a":9007199254740993.0,"b":123.00001,"c":"0"})"; report=evaluateApiAssertions(response,tests);
+ if(!report.results[0].passed || report.results[1].passed || report.results[2].passed) return 23;
+ if(parseApiAssertions(R"({"assertions":[{"type":"json_number_equals","pointer":"/x","value":1e1000001}]})",tests,error)) return 24;
  return 0;
 }

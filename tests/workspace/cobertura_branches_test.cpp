@@ -21,6 +21,16 @@ int main(){namespace fs=std::filesystem; const auto root=fs::temp_directory_path
  if(mixed.incomplete || mixed.lines.size()!=2 || mixed.lines[0].covered || mixed.lines[0].branchesCovered || !mixed.lines[1].covered)return 11;
  const auto bounded=parseCobertura(project,"<coverage><class filename='a.cpp'><methods><method><lines><line number='1' hits='1'/><line number='2' hits='0'/></lines></method></methods></class></coverage>",nullptr,1);
  if(!bounded.incomplete || bounded.lines.size()!=1)return 12;
+ r=parse("<line number='1' hits='1' branch='true'><conditions><condition number='0' coverage='50% (1/2)'/><condition number='1' coverage='100% (2/2)'/></conditions></line>");
+ if(r.incomplete || r.lines.size()!=1 || r.lines[0].branchesCovered!=3 || r.lines[0].branchesUncovered!=1)return 13;
+ r=parse("<line number='1' hits='1' branch='true'><conditions><condition number='0' coverage='50%'/></conditions></line>");
+ if(!r.incomplete || r.lines.size()!=1 || r.lines[0].branchesCovered || r.lines[0].branchesUncovered)return 14;
+ r=parse("<line number='1' hits='1' branch='true'><conditions><condition number='0' coverage='50% (1/2)'/><condition number='0' coverage='50% (1/2)'/></conditions></line>");
+ if(!r.incomplete || r.lines.size()!=1 || r.lines[0].branchesCovered || r.lines[0].branchesUncovered)return 15;
+ r=parse("<line number='1' hits='1' branch='true' condition-coverage='50% (1/2)'><conditions><condition number='0' coverage='100% (2/2)'/></conditions></line>");
+ if(r.incomplete || r.lines[0].branchesCovered!=1 || r.lines[0].branchesUncovered!=1)return 16;
+ r=parse("<line number='1' hits='1' branch='true'><conditions><condition number='0' coverage='50% (1/2)'/></conditions>");
+ if(!r.incomplete || r.lines[0].branchesCovered || r.lines[0].branchesUncovered)return 17;
  std::atomic_bool cancel{true};r=parseCobertura(project,"<coverage/>",&cancel);if(!r.incomplete)return 8;
  fs::remove_all(root);return 0;
 }

@@ -13,4 +13,6 @@ struct UnixCrashReport { std::string error, signal; std::vector<UnixCrashThread>
 // All content, addresses and thread numbers are untrusted text, not verified debug data.
 // No path navigation, file access, command execution, or symbolication is performed.
 [[nodiscard]] UnixCrashReport parseGdbBacktrace(std::string_view text, std::size_t maxBytes=4*1024*1024, std::size_t maxThreads=256, std::size_t maxFrames=4096);
+// Parses saved LLDB `thread backtrace all` output; all text is unverified.
+[[nodiscard]] UnixCrashReport parseLldbBacktrace(std::string_view text, std::size_t maxBytes=4*1024*1024, std::size_t maxThreads=256, std::size_t maxFrames=4096);
 }

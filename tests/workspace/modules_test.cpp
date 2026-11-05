@@ -132,6 +132,13 @@ int main() {
         { std::ofstream file(unicodeDir / std::filesystem::path(u8"ü.txt")); file << "x"; }
         const auto unicodeLinks = checkMarkdownLinks(project, "döcs/readme.md", "[ü](ü.txt)");
         if (unicodeLinks.links.size()!=1 || unicodeLinks.links[0].status!=MarkdownLinkStatus::Found) return 198;
+        { std::ofstream file(scanRoot / "docs" / "guide.md"); file << "# Introduction\n\n## Same heading\n\n## Same heading\n"; }
+        const auto anchors = checkMarkdownLinks(project, "docs/readme.md", "# Current Section\n[here](#current-section) [missing](#missing) [guide](guide.md#same-heading-1) [bad](guide.md#absent) [html](space%20name.txt#part)\n");
+        if(anchors.incomplete || anchors.links.size()!=5 || anchors.links[0].status!=MarkdownLinkStatus::Found || anchors.links[1].status!=MarkdownLinkStatus::Missing || anchors.links[2].status!=MarkdownLinkStatus::Found || anchors.links[3].status!=MarkdownLinkStatus::Missing || anchors.links[4].status!=MarkdownLinkStatus::NotChecked) return 250;
+        const auto uncertain = checkMarkdownLinks(project,"docs/readme.md", "# Hello, world!\n[x](#hello-world)\n");
+        if(uncertain.links.size()!=1 || uncertain.links[0].status!=MarkdownLinkStatus::NotChecked) return 251;
+        const auto custom = checkMarkdownLinks(project,"docs/readme.md", "<a id=\"custom\"></a>\n\n# Title\n[x](#custom)\n");
+        if(custom.links.size()!=1 || custom.links[0].status!=MarkdownLinkStatus::NotChecked) return 252;
         if (!checkMarkdownLinks(project, "docs/readme.md", "[a](x) [b](y)", nullptr, 1).incomplete ||
             !checkMarkdownLinks(project, "docs/readme.md", "[a](x)", &cancel).incomplete) return 49;
         const auto coverage = parseLcov(project, "SF:source.txt\nDA:1,0\nDA:2,3\nend_of_record\nSF:source.txt\nDA:1,1\nend_of_record\n");

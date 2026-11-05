@@ -7,6 +7,36 @@
 namespace lucid::modules {
 namespace {
 constexpr std::size_t maxSpec=256U*1024U, maxAssertions=64, maxExpected=4096, maxPointer=1024, maxBody=4U*1024U*1024U, maxJsonBody=1024U*1024U;
+struct Decimal { std::string digits; long exponent=0; bool negative=false; };
+std::optional<Decimal> decimal(std::string_view s) {
+    if(s.empty() || s.size()>maxExpected) return std::nullopt;
+    Decimal result; std::size_t i=0; if(s[i]=='-') {result.negative=true; if(++i==s.size()) return std::nullopt;}
+    const auto integerStart=i;
+    while(i<s.size() && s[i]>='0' && s[i]<='9') result.digits+=s[i++];
+    if(i==integerStart || (i-integerStart>1 && s[integerStart]=='0')) return std::nullopt;
+    long fraction=0;
+    if(i<s.size() && s[i]=='.') { ++i; const auto start=i; while(i<s.size() && s[i]>='0' && s[i]<='9') {result.digits+=s[i++]; ++fraction;} if(i==start) return std::nullopt; }
+    long exponent=0;
+    if(i<s.size() && (s[i]=='e' || s[i]=='E')) {
+        ++i; bool negative=false; if(i<s.size() && (s[i]=='+' || s[i]=='-')) {negative=s[i]=='-'; ++i;}
+        const auto start=i;
+        while(i<s.size() && s[i]>='0' && s[i]<='9') { if(exponent>1000000) return std::nullopt; exponent=exponent*10+(s[i++]-'0'); }
+        if(i==start || exponent>1000000) return std::nullopt;
+        if(negative) exponent=-exponent;
+    }
+    if(i!=s.size()) return std::nullopt;
+    const auto first=result.digits.find_first_not_of('0');
+    if(first==std::string::npos) return Decimal{"0",0,false};
+    result.digits.erase(0,first); result.exponent=exponent-fraction;
+    while(result.digits.size()>1 && result.digits.back()=='0') {result.digits.pop_back(); ++result.exponent;}
+    return result;
+}
+std::string_view numberAt(std::string_view source,std::size_t offset) {
+    if(offset>=source.size()) return {};
+    auto end=offset;
+    while(end<source.size() && ((source[end]>='0' && source[end]<='9') || source[end]=='-' || source[end]=='+' || source[end]=='.' || source[end]=='e' || source[end]=='E')) ++end;
+    return source.substr(offset,end-offset);
+}
 bool headerNameValid(std::string_view s) {
     if(s.empty() || s.size()>256) return false;
     for(unsigned char c:s) if(!((c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') || std::string_view("!#$%&'*+-.^_`|~").find(c)!=std::string_view::npos)) return false;
@@ -117,6 +147,10 @@ bool parseApiAssertions(std::string_view json,std::vector<ApiAssertion>& asserti
             a.kind=isBool ? ApiAssertionKind::JsonBoolEquals : ApiAssertionKind::JsonNull;
             a.pointer=pointer->stringValue;
             if(isBool) a.expected=value->boolValue ? "true" : "false";
+        } else if(type->stringValue=="json_number_equals") {
+            if(!pointer || pointer->type!=editor::JsonType::String || !pointerValid(pointer->stringValue) || value->type!=editor::JsonType::Number) return fail("Invalid JSON number assertion");
+            const auto raw=numberAt(json,value->byteOffset); if(!decimal(raw)) return fail("Invalid JSON number assertion");
+            a.kind=ApiAssertionKind::JsonNumberEquals; a.pointer=pointer->stringValue; a.expected=raw;
         } else if(type->stringValue=="header_equals") {
             if(pointer || !name || name->type!=editor::JsonType::String || !headerNameValid(name->stringValue) || value->type!=editor::JsonType::String || !headerValueValid(value->stringValue)) return fail("Invalid header assertion");
             a.kind=ApiAssertionKind::HeaderEquals; a.pointer=name->stringValue; a.expected=value->stringValue;
@@ -138,6 +172,7 @@ ApiAssertionReport evaluateApiAssertions(const ApiResponse& response,const std::
         case ApiAssertionKind::JsonStringEquals: if(a.expected.size()>maxExpected || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
         case ApiAssertionKind::JsonBoolEquals: if((a.expected!="true" && a.expected!="false") || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
         case ApiAssertionKind::JsonNull: if(!a.expected.empty() || !pointerValid(a.pointer)) return fail("Invalid assertion set"); needsJson=true; break;
+        case ApiAssertionKind::JsonNumberEquals: if(!pointerValid(a.pointer) || !decimal(a.expected)) return fail("Invalid assertion set"); needsJson=true; break;
         case ApiAssertionKind::HeaderEquals: if(!headerNameValid(a.pointer) || !headerValueValid(a.expected)) return fail("Invalid assertion set"); break;
         default: return fail("Invalid assertion set");
         }
@@ -165,6 +200,12 @@ ApiAssertionReport evaluateApiAssertions(const ApiResponse& response,const std::
             const auto* value=root ? follow(*root,a.pointer) : nullptr;
             result.passed=value && value->type==editor::JsonType::Null;
             result.detail=result.passed?"JSON null matched":"JSON null did not match or was unavailable"; break;
+        }
+        case ApiAssertionKind::JsonNumberEquals: {
+            const auto* value=root ? follow(*root,a.pointer) : nullptr;
+            auto expected=decimal(a.expected); auto actual=value && value->type==editor::JsonType::Number ? decimal(numberAt(response.body,value->byteOffset)) : std::nullopt;
+            result.passed=expected && actual && expected->digits==actual->digits && expected->exponent==actual->exponent && expected->negative==actual->negative;
+            result.detail=result.passed?"JSON number matched":"JSON number did not match or was unavailable"; break;
         }
         }
         report.results.push_back(std::move(result));

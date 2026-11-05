@@ -173,8 +173,12 @@ remote images. Inline styling and table layout are simplified, and tables remain
 text. The local link checker checks project-contained file and directory targets
 without making network requests. Filter missing or unchecked links and select a
 result to navigate to its label when a reliable source location is available;
-changed buffers must be checked again. External links, fragments and unsupported encoded
-paths are labelled **Not checked**, rather than treated as valid or broken. Headings
+changed buffers must be checked again. Simple ASCII heading fragments are checked
+against the current buffer or a project-local Markdown file, including repeated
+heading suffixes. Markup, punctuation, non-ASCII headings, custom HTML anchors,
+and other uncertain fragment cases are labelled **Not checked**, as are external
+links and unsupported encoded paths. Fragment checking is bounded and depends on
+the target renderer using compatible heading IDs. Headings
 with text inside lists or blockquotes are included in the outline; empty nested
 headings are not currently listed.
 
@@ -356,8 +360,10 @@ precedence when both are present. Method-level totals are not displayed.
 Branch counts use `condition-coverage` fractions, accepting ordinary percentage
 rounding. Conflicting duplicate counts are shown as unknown and mark the report
 incomplete; invalid or missing branch data also marks it incomplete. When no
-branch total is available, its unknown count cannot be quantified. Nested
-condition records are not used to infer missing totals. Ambiguous, missing or outside-project
+branch total is available, its unknown count cannot be quantified. If a line has
+no branch fraction, uniquely numbered nested condition records with explicit
+covered/total fractions are summed; percentages without totals cannot be inferred.
+Ambiguous, missing or outside-project
 paths are skipped and marked incomplete. External DTDs are never fetched, and
 internal entities and unsupported XML constructs are rejected as incomplete. The
 module does not run coverage tools itself.
@@ -575,7 +581,7 @@ remain unverified. Absolute FILE paths and PUBLIC-only symbols are not mapped. M
 candidates are unverified and may be wrong or stale; ambiguous matches are not
 navigable. Source must be inside the project, readable as text and contain the
 specified line; resolve unsaved edits before navigation. No PDB/DWARF parsing,
-automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Legacy Apple crash report text is also accepted with the same limits; reported code type, exception, threads and frames are unverified and cannot be navigated. Unsupported sections are marked incomplete. Current JSON `.ips` reports are accepted for a bounded subset of exception, image and thread/frame metadata. The reader omits image paths and process details, but the input, image names and symbols can contain sensitive information. Addresses and symbols are unverified. An explicitly selected project-local TSV map can offer source navigation for a complete report with an unambiguous image name and non-overlapping matching range; the map and source remain unverified, and the same project and unsaved-edit checks apply. UUID identity is not checked, and Breakpad maps are not supported for IPS. Unsupported variants, thread state, symbolication and other debugger text formats are not supported.
+automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Saved LLDB `thread backtrace all` text is also accepted within those limits, showing reported threads and frames as unverified, without navigation or symbolication. Unsupported LLDB records are marked incomplete. Legacy Apple crash report text is also accepted with the same limits; reported code type, exception, threads and frames are unverified and cannot be navigated. Unsupported sections are marked incomplete. Current JSON `.ips` reports are accepted for a bounded subset of exception, image and thread/frame metadata. The reader omits image paths and process details, but the input, image names and symbols can contain sensitive information. Addresses and symbols are unverified. An explicitly selected project-local TSV map can offer source navigation for a complete report with an unambiguous image name and non-overlapping matching range; the map and source remain unverified, and the same project and unsaved-edit checks apply. UUID identity is not checked, and Breakpad maps are not supported for IPS. Unsupported variants, thread state, symbolication and other debugger text formats are not supported.
 
 Rust Ownership Lens reads saved rustc or Cargo newline-delimited JSON diagnostics
 from the project. It presents supported ownership and borrowing errors, compiler
@@ -671,9 +677,13 @@ JSON file, without sending another request. For example:
 
 Checks show pass/fail without displaying expected values, JSON paths or response
 contents. Assertion files may themselves contain sensitive plaintext. JSON checks
-parse at most 1 MiB of the response, support string and boolean equality and null checks, and fail on
+parse at most 1 MiB of the response, support string, boolean and exact decimal number equality and null checks, and fail on
 ambiguous duplicate keys along a pointer; unsuccessful or incomplete responses
 cannot be checked. These checks do not establish that a service is secure.
+For example, `{"type":"json_number_equals","pointer":"/count","value":123}`
+compares decimal values without rounding through floating point. Number tokens
+are limited to 4096 bytes and exponents to an absolute value of 1,000,000;
+out-of-range response values do not match.
 An assertion such as `{"type":"header_equals","name":"Content-Type","value":"application/json"}`
 checks a single header in the final complete HTTP response block. Header names
 are case-insensitive and surrounding HTTP whitespace is ignored in the received

@@ -1698,7 +1698,7 @@ struct ApplicationInteractionTest {
             put(56, 1, 4); put(60, 42, 4); put(84, 0x1234, 8); put(108, 42, 4); put(116, 0xc0000005, 4); put(132, 0xdeadbeef, 8);
             { std::ofstream out(temp / "nested" / "crash.dmp", std::ios::binary); out.write(dump.data(), static_cast<std::streamsize>(dump.size())); }
             app.m_moduleRoot = temp / "crash-modules"; std::string error;
-            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-apple-text-v1","crash-apple-ips-v1","crash-ips-source-map-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
+            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-lldb-text-v1","crash-apple-text-v1","crash-apple-ips-v1","crash-ips-source-map-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
             if (!modules::install(app.m_moduleRoot, "crash", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "crash", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 490;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleCrashPath) return 491;
@@ -1746,6 +1746,12 @@ struct ApplicationInteractionTest {
             if(app.m_crashFuture.valid() || !app.m_crashIsGdb || !app.m_crashGdb.incomplete || app.m_crashGdb.threads.size()!=1) return 1104;
             bool sawGdb=false,sawGdbFrame=false,sawGdbIncomplete=false,sawMap=false;for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions){sawGdb|=row.path=="GDB backtrace text";sawGdbFrame|=row.path=="Frame #0" && row.detail.find("unverified")!=std::string_view::npos;sawGdbIncomplete|=row.path=="Incomplete backtrace";}sawMap|=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220)!=app.m_moduleChoices.end();}
             if(!sawGdb || !sawGdbFrame || !sawGdbIncomplete || sawMap) return 1105;
+            app.m_crashShowing=false; app.m_modulePage=0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand();
+            { std::ofstream out(temp / "nested" / "lldb.txt"); out << "(lldb) thread backtrace all\n* thread #1, name = 'main'\n  * frame #0: 0x1234 app`main + 4\n"; }
+            app.m_searchBar.setQuery("lldb.txt"); app.applyModuleCommand(); const auto lldbDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+            while(app.m_crashFuture.valid() && std::chrono::steady_clock::now()<lldbDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_crashFuture.valid() || !app.m_crashIsLldb || app.m_crashIsGdb || app.m_crashGdb.incomplete || app.m_crashGdb.threads.size()!=1) return 1301;
+            bool sawLldb=false,sawLldbFrame=false;for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions){sawLldb|=row.path=="LLDB backtrace text";sawLldbFrame|=row.path=="Frame #0" && row.detail.find("unverified")!=std::string_view::npos;}} if(!sawLldb || !sawLldbFrame) return 1302;
             app.m_crashShowing=false; app.m_modulePage=0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand();
             { std::ofstream out(temp / "nested" / "apple.crash"); out << "Code Type: ARM-64 (Native)\nException Type: EXC_BAD_ACCESS\nThread 0 Crashed:: Dispatch queue: main\n0 MyApp 0x1234 main + 2\nBinary Images:\n"; }
             app.m_searchBar.setQuery("apple.crash"); app.applyModuleCommand(); const auto appleDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);

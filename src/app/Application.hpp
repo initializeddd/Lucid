@@ -587,10 +587,10 @@ private:
     std::uint64_t m_toolchainGeneration = 0;
     std::optional<std::size_t> m_toolchainSelected;
     bool m_toolchainShowing = false;
-    struct CrashInspectionResult { modules::CrashDump dump; modules::UnixCrashReport gdb; modules::AppleCrashReport apple; modules::AppleIpsReport ips; bool isGdb=false, isApple=false, isIps=false; };
+    struct CrashInspectionResult { modules::CrashDump dump; modules::UnixCrashReport gdb; modules::AppleCrashReport apple; modules::AppleIpsReport ips; bool isGdb=false, isLldb=false, isApple=false, isIps=false; };
     std::future<CrashInspectionResult> m_crashFuture;
     modules::UnixCrashReport m_crashGdb;
-    bool m_crashIsGdb=false, m_crashIsApple=false, m_crashIsIps=false;
+    bool m_crashIsGdb=false, m_crashIsLldb=false, m_crashIsApple=false, m_crashIsIps=false;
     modules::AppleIpsReport m_crashIps;
     modules::AppleCrashReport m_crashApple;
     std::shared_ptr<std::atomic_bool> m_crashCancel;

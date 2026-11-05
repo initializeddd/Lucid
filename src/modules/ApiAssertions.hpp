@@ -5,7 +5,7 @@
 #include <string_view>
 #include <vector>
 namespace lucid::modules {
-enum class ApiAssertionKind { Status, BodyContains, JsonStringEquals, JsonBoolEquals, JsonNull, HeaderEquals };
+enum class ApiAssertionKind { Status, BodyContains, JsonStringEquals, JsonBoolEquals, JsonNull, HeaderEquals, JsonNumberEquals };
 struct ApiAssertion { ApiAssertionKind kind; long status=0; std::string pointer, expected; };
 struct ApiAssertionResult { ApiAssertionKind kind; bool passed=false; std::string detail; };
 struct ApiAssertionReport { std::vector<ApiAssertionResult> results; std::string error; };

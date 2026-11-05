@@ -161,6 +161,10 @@ int main() {
         fileHistory[1].path != "first.txt" || fileHistory[1].subject != "Initial commit") return 71;
     if (!gitHistoricalFileDiff(emptyRoot, fileHistory[1].path, fileHistory[1].hash, review, error) ||
         std::none_of(review.lines.begin(), review.lines.end(), [](const auto& line) { return line.text == "+first"; })) return 72;
+    std::string historicalText;
+    if (!gitHistoricalFileText(emptyRoot, fileHistory[1].path, fileHistory[1].hash, historicalText, error) || historicalText!="first" ||
+        gitHistoricalFileText(emptyRoot, "../first.txt", fileHistory[1].hash, historicalText, error) ||
+        gitHistoricalFileText(emptyRoot, "first.txt", "HEAD", historicalText, error)) return 80;
     if (!gitHistoricalFileDiff(emptyRoot, fileHistory[0].path, fileHistory[0].hash, review, error, fileHistory[0].previousPath) ||
         std::none_of(review.lines.begin(), review.lines.end(), [](const auto& line) { return line.text == "rename from first.txt"; })) return 73;
     std::filesystem::create_directories(emptyRoot / "sub");
@@ -168,6 +172,7 @@ int main() {
     bool stoppedAtBoundary = false;
     if (!gitFileHistory(emptyRoot / "sub", "inside.txt", fileHistory, error, &stoppedAtBoundary) || !stoppedAtBoundary || fileHistory.size() != 1 ||
         fileHistory[0].path != "inside.txt" || !fileHistory[0].previousPath.empty()) return 75;
+    if (!gitHistoricalFileText(emptyRoot / "sub", "inside.txt", fileHistory[0].hash, historicalText, error) || historicalText!="first") return 81;
     if (gitHistoricalFileDiff(emptyRoot / "sub", "inside.txt", fileHistory[0].hash, review, error, "../renamed.txt")) return 76;
     if (gitRangeHistory(emptyRoot / "sub", "inside.txt", "first", 1, 1, rangeHistory, error) || error.find("repository root") == std::string::npos) return 79;
     std::filesystem::remove_all(root); return 0;

@@ -162,6 +162,9 @@ only. Open a JSON configuration such as
 `{"entry":"index.html","assets":["index.html","app.js"],"width":800,"height":600,"state":"?mode=dark"}`
 and choose **Render web preview**. Asset paths are project-relative and only
 listed files are copied into the preview; the optional state is a query or fragment.
+Explicit SVG images and TTF/OTF fonts are supported alongside the other listed
+asset types. SVG responses use a separate restrictive policy intended to block
+scripts and external resources; complex SVGs depending on them may not render correctly.
 Confirm only for trusted code: JavaScript executes in WebKit and network isolation
 is not guaranteed. Rendering readiness is heuristic. Interactive previews, Linux
 and Windows runtimes, and full-resolution viewing are not yet supported.
@@ -212,6 +215,14 @@ not verify fragments or future availability.
 Visual Regression Review compares two project-local PNG snapshots, reports changed
 pixels and shows reduced baseline, candidate and difference previews. The preview
 is limited to 1024 pixels per side; inspect original images for fine details. An
+unequal-size pair is aligned at its top-left corner: pixels present on only one
+side count as changed regardless of threshold, and added and removed totals are
+shown separately. Both previews use the same canvas; absent areas use the
+transparency checkerboard.
+The combined canvas is limited to 16 million pixels, and masks must fit within
+both screenshots. Drawing masks is unavailable for unequal sizes; manual mask
+coordinates inside the shared area remain available.
+An
 explicit confirmation replaces the baseline with the reviewed candidate after
 checking that both files are unchanged. A cross-process change between the final
 check and replacement remains possible. **Compare with configuration** reads a
@@ -405,6 +416,10 @@ Change Archaeology runs local Git commands to list up to 100 commits for the ope
 file and display a selected commit's diff. The list and diffs follow renames within
 the open project; history stops at a rename across its boundary. Historical
 lines are read-only and are not presented as locations in the current buffer.
+From a file-history diff, **View historical file** reads that commit's project-local
+blob without altering the open document. Binary and unsupported text are refused;
+the preview shows at most 1,000 lines and truncates long lines. It follows the
+historical path recorded for that commit, including in a nested project.
 To trace a function, select its lines and choose **Trace selected function or
 lines**. Git follows the selected range and shows its historical patches. The
 open buffer must exactly match the committed HEAD file, and the project must be

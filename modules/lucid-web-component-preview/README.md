@@ -1,18 +1,14 @@
-# Web Component Preview: implementation status
+# Web Component Preview
 
-This module is not yet installable as a working preview. The current host-side
-foundation validates project-local HTML configurations and provides an in-memory
-asset router for an explicit snapshot of selected HTML, JavaScript, CSS, image,
-and font files. The router performs no file or network access. It restricts paths,
-methods, file types and snapshot size, and supplies restrictive response headers.
-A preview host must build snapshots using the project's file access controls and
-rebuild them when files change.
+On macOS, Lucid can capture a reduced preview of explicitly selected project-local
+HTML, JavaScript, CSS, image and font assets. Open a preview configuration and
+select **Render web preview**. The preview is a point-in-time snapshot; it is not
+interactive and asynchronous page work may not have finished when it is captured.
+See `docs/modules.md` for the configuration format and platform limitations.
 
-There is no browser engine, HTTP server, screenshot capture, viewport rendering,
-or component-state UI yet. The router's Content Security Policy is defense in
-depth, **not a security sandbox**: JavaScript can still navigate a page or exploit
-browser behavior. Before executing project code the host needs proper isolation,
-explicit trust and permission controls, request-origin validation and a browser
-lifecycle; the snapshot router alone must not be exposed on a network interface or
-represented as making untrusted HTML safe. Inline scripts, SVG and many resource
-types are currently unsupported by this router.
+Assets are copied into a bounded in-memory router, which does not read the file
+system or make network requests while serving them. SVG responses have a separate
+restrictive policy intended to block scripts and external resources. These controls
+are defense in depth, **not a security sandbox**: use only trusted project code.
+The preview can execute JavaScript in WebKit and network isolation is not guaranteed.
+Windows and Linux previews remain unavailable pending runtime verification.

@@ -910,6 +910,11 @@ struct ApplicationInteractionTest {
                 app.m_selectedSuggestion = 2; app.applyModuleCommand();
                 while (app.m_moduleHistoryFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
                 if (app.m_moduleHistoryFuture.valid() || app.m_commandStatusIsError || !app.m_moduleHistoryDiffShowing || std::none_of(app.m_moduleHistoryDiff.lines.begin(), app.m_moduleHistoryDiff.lines.end(), [](const auto& line) { return line.text == "+historic content" && line.line == 0; })) return 422;
+                const auto snapshotChoice=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-740);
+                if(snapshotChoice==app.m_moduleChoices.end()) return 1130;
+                app.m_selectedSuggestion=static_cast<int>(snapshotChoice-app.m_moduleChoices.begin());app.applyModuleCommand();
+                while(app.m_moduleHistoryFuture.valid() && std::chrono::steady_clock::now()<deadline) {app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+                if(app.m_moduleHistoryFuture.valid() || app.m_commandStatusIsError || !app.m_moduleHistorySnapshotShowing || app.m_moduleHistoryDiff.lines.empty() || app.m_moduleHistoryDiff.lines[0].text!="historic content" || app.m_filePath!="new-name.cpp") return 1131;
                 app.m_moduleHistoryShowing = false; app.m_searchBar.close(); app.m_document.setCursor(0, 0); app.m_document.extendSelectionTo(0, 8);
                 app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.m_modulePage = 0; app.refreshSuggestions();
                 const auto rangeChoice = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), 1);
@@ -1597,6 +1602,17 @@ struct ApplicationInteractionTest {
             app.refreshSuggestions(); auto confirm=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-94); if(confirm==app.m_moduleChoices.end()) return 1039; app.m_selectedSuggestion=static_cast<int>(confirm-app.m_moduleChoices.begin()); app.applyModuleCommand();
             while (app.m_visualApprovalFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             std::string saved; if (!app.m_project.readFile("baseline.png", saved, error) || saved != std::string(reinterpret_cast<const char*>(blue), sizeof blue)) return 575;
+            const unsigned char wide[] = {0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x01,0x08,0x06,0x00,0x00,0x00,0xf4,0x22,0x7f,0x8a,0x00,0x00,0x00,0x0e,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0x60,0x60,0xf8,0xff,0x1f,0x84,0x01,0x0d,0xfb,0x03,0xfd,0x87,0x5e,0xd5,0x87,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82};
+            std::ofstream(app.m_project.root() / "candidate.png", std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(wide), sizeof wide);
+            app.m_visualShowing=false;app.m_modulePage=0;app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();app.m_selectedSuggestion=0;app.applyModuleCommand();
+            app.m_searchBar.setQuery("baseline.png");app.applyModuleCommand();app.m_searchBar.setQuery("candidate.png");app.applyModuleCommand();
+            const auto unequalDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+            while(app.m_visualFuture.valid() && std::chrono::steady_clock::now()<unequalDeadline) {app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(!app.m_visualReview || app.m_visualReview->comparison().addedPixels!=1 || app.m_visualPreview.baseline.width!=2 || std::none_of(app.m_suggestions.begin(),app.m_suggestions.end(),[](const auto& item){return item.path=="Screenshot dimensions differ";})) return 1130;
+            app.requestVisualCrop(0,0);while(app.m_visualCropFuture.valid() && std::chrono::steady_clock::now()<unequalDeadline) {app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(!app.m_visualCropMode || app.m_visualCropPreview.baseline.width!=2) return 1131;
+            app.m_visualVisible=false;app.m_visualCropMode=false;
+            std::ofstream(app.m_project.root() / "candidate.png", std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(blue), sizeof blue);
             std::ofstream(app.m_project.root() / "baseline.png", std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(red), sizeof red);
             std::ofstream(app.m_project.root() / "visual.json") << R"({"version":1,"threshold":0,"masks":[{"x":0,"y":0,"width":1,"height":1}]})";
             app.m_visualShowing = false; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 1; app.applyModuleCommand();

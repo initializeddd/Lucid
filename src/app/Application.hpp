@@ -880,13 +880,15 @@ private:
     struct SnippetSession { std::string file, root, snapshot; std::vector<modules::SnippetRange> fields; std::size_t active = 0, finalOffset = 0, finalFieldIndex = 0; std::uint64_t revision = 0; };
     std::optional<SnippetSession> m_snippetSession;
     void synchronizeSnippet(std::uint64_t previousRevision);
-    struct ModuleHistoryResult { std::vector<workspace::GitFileHistoryEntry> entries; std::vector<workspace::GitRangeHistoryEntry> ranges; workspace::GitReview diff; std::string error; bool isDiff = false, stoppedAtBoundary = false; };
+    struct ModuleHistoryResult { std::vector<workspace::GitFileHistoryEntry> entries; std::vector<workspace::GitRangeHistoryEntry> ranges; workspace::GitReview diff; std::string error; bool isDiff = false, isSnapshot = false, stoppedAtBoundary = false; };
     std::future<ModuleHistoryResult> m_moduleHistoryFuture;
     std::vector<workspace::GitFileHistoryEntry> m_moduleHistoryEntries;
     std::vector<workspace::GitRangeHistoryEntry> m_moduleRangeHistory;
     workspace::GitReview m_moduleHistoryDiff;
     std::string m_moduleHistoryRoot, m_moduleHistoryFile;
     bool m_moduleHistoryShowing = false, m_moduleHistoryDiffShowing = false;
+    bool m_moduleHistorySnapshotShowing = false;
+    std::optional<std::size_t> m_moduleHistorySelected;
     bool m_moduleHistoryRange = false;
     std::uint64_t m_moduleHistoryRevision = 0;
     std::size_t m_moduleFetchGeneration = 0;

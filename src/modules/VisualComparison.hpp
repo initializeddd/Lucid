@@ -29,10 +29,14 @@ struct VisualReviewConfig { std::uint8_t threshold = 0; std::vector<VisualMask> 
     VisualReviewConfig& config, std::string& error, const std::atomic_bool* cancel = nullptr);
 struct VisualComparison {
     std::size_t comparedPixels = 0, maskedPixels = 0, changedPixels = 0;
+    // Counts of pixels present on only one side; both are also included in
+    // changedPixels and comparedPixels. The canvas is aligned at top left.
+    std::size_t addedPixels = 0, removedPixels = 0;
     // Transparent for equal/masked pixels, opaque red for changed pixels.
     VisualImage diff;
 };
-// Dimensions must match and be nonzero; each mask must fit wholly inside the image.
+// Images align at top left. Added and removed pixels always count as changed,
+// regardless of threshold or alpha. Each mask must fit inside both images.
 // A pixel changes if any RGBA channel differs by strictly more than threshold.
 // Transparent pixels' RGB values are compared too; no image decoding or I/O occurs.
 [[nodiscard]] bool compareVisualImages(const VisualImage& baseline, const VisualImage& actual,

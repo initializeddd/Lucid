@@ -50,6 +50,22 @@ int main() {
         while (!redirectedCalled && [deadline timeIntervalSinceNow] > 0)
             [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
         if (!redirectedCalled || !redirectedValid) return 13;
+        lucid::modules::WebPreviewAssets svgAssets;
+        if (!svgAssets.load({
+                {"/index.html", "<!doctype html><html><body style='margin:0'><img src='/image.svg' width='320' height='240'></body></html>"},
+                {"/image.svg", "<svg xmlns='http://www.w3.org/2000/svg' width='320' height='240'><rect width='320' height='240' fill='#ff0000'/></svg>"}}, error)) return 14;
+        bool svgCalled = false, svgValid = false;
+        if (!preview.start(svgAssets, "/index.html", 320, 240, [&](auto result) {
+            svgCalled = true;
+            NSData* png = [NSData dataWithBytes:result.png.data() length:result.png.size()];
+            NSBitmapImageRep* image = [NSBitmapImageRep imageRepWithData:png];
+            NSColor* color = [[image colorAtX:160 y:120] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            svgValid = result.error.empty() && color && color.redComponent > 0.8 && color.greenComponent < 0.2;
+        }, error)) return 15;
+        deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+        while (!svgCalled && [deadline timeIntervalSinceNow] > 0)
+            [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        if (!svgCalled || !svgValid) return 16;
         return 0;
     }
 }

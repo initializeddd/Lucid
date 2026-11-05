@@ -36,8 +36,11 @@ std::string contentType(std::string_view path) {
     if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
     if (ext == ".gif") return "image/gif";
     if (ext == ".webp") return "image/webp";
+    if (ext == ".svg") return "image/svg+xml";
     if (ext == ".woff") return "font/woff";
     if (ext == ".woff2") return "font/woff2";
+    if (ext == ".ttf") return "font/ttf";
+    if (ext == ".otf") return "font/otf";
     return {};
 }
 WebPreviewResponse response(int status) {
@@ -69,6 +72,12 @@ WebPreviewResponse WebPreviewAssets::respond(std::string_view method, std::strin
     const auto it = std::find_if(m_assets.begin(), m_assets.end(), [&](const auto& asset) { return asset.path == path; });
     if (it == m_assets.end()) return response(404);
     auto out = response(200); out.contentType = contentType(it->path);
+    // SVG can be navigated as a document as well as loaded as an image. Give
+    // it a stricter policy than the HTML entry, with no scripts or resources.
+    if (out.contentType == "image/svg+xml") {
+        for (auto& [name, value] : out.headers) if (name == "Content-Security-Policy")
+            value = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+    }
     out.headers.emplace_back("Content-Length", std::to_string(it->bytes.size()));
     if (method == "GET") out.body = it->bytes;
     return out;

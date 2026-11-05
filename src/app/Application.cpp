@@ -591,7 +591,7 @@ void Application::handleKey(const input::KeyEvent& event) {
             if (event.key==input::Key::Escape) { if(m_visualCropCancel) m_visualCropCancel->store(true); m_visualVisible=false; m_visualCropMode=false; m_visualCropPreview={}; m_webViewActive=false; m_shaderPreviewViewActive=false; setStatus("Preview closed",false); }
             else if (m_visualCropMode && event.key==input::Key::Zero) { if(m_visualCropCancel) m_visualCropCancel->store(true); m_visualCropMode=false; m_visualCropPreview={}; setStatus("Overview · crop view closed",false); }
             else if (m_visualCropMode && m_visualReview && !m_visualCropFuture.valid()) {
-                const auto& image=m_visualReview->baselineImage(); auto x=m_visualCropX,y=m_visualCropY;
+                const auto& image=m_visualReview->comparison().diff; auto x=m_visualCropX,y=m_visualCropY;
                 const auto width=std::min<std::size_t>(512,image.width), height=std::min<std::size_t>(512,image.height);
                 if(event.key==input::Key::Left) x=x>256?x-256:0; else if(event.key==input::Key::Right) x=std::min(image.width-width,x+256); else if(event.key==input::Key::Up) y=y>256?y-256:0; else if(event.key==input::Key::Down) y=std::min(image.height-height,y+256); else return;
                 if(x!=m_visualCropX || y!=m_visualCropY) requestVisualCrop(x,y);
@@ -1066,7 +1066,7 @@ void Application::handleCommandKey(const input::KeyEvent& event, bool commandDow
             if (m_localizationShowing) { if (m_localizationSelected) m_localizationSelected.reset(); else { if (m_localizationCancel) m_localizationCancel->store(true); m_localizationShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_binaryShowing) { if (m_binaryCategory) m_binaryCategory.reset(); else { if (m_binaryCancel) m_binaryCancel->store(true); m_binaryShowing = false; m_binarySnapshot.reset(); } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_benchmarkShowing) { if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
-            if (m_moduleHistoryShowing) { if (m_moduleHistoryDiffShowing) m_moduleHistoryDiffShowing = false; else m_moduleHistoryShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+            if (m_moduleHistoryShowing) { if(m_moduleHistorySnapshotShowing) {m_moduleHistorySnapshotShowing=false;m_moduleHistoryDiffShowing=false;} else if (m_moduleHistoryDiffShowing) m_moduleHistoryDiffShowing = false; else m_moduleHistoryShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_coverageShowing) { if (m_coverageCancel) m_coverageCancel->store(true); m_coverageChoosingBaseline = false; m_coverageShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_markdownLinksShowing) { if (m_markdownExternalCancel) m_markdownExternalCancel->store(true); if (m_markdownExternalSelected) m_markdownExternalSelected.reset(); else { if (m_markdownLinksCancel) m_markdownLinksCancel->store(true); m_markdownLinksShowing = false; } m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
             if (m_markdownPreviewShowing) { m_markdownPreviewShowing = false; m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
@@ -3247,8 +3247,9 @@ void Application::refreshModuleSuggestions() {
         } else if (m.enabled && m_moduleHistoryShowing) {
             add(m_moduleHistoryDiffShowing ? "< Back to history" : "< Back to module commands", "", -18);
             if (m_moduleHistoryDiffShowing) {
-                if (m_moduleHistoryDiff.lines.empty() && !m_moduleHistoryFuture.valid() && !m_commandStatusIsError) add("No textual diff", "The commit may have no textual changes at this path", -19, ui::SuggestionKind::ReadOnlyText);
-                for (const auto& line : m_moduleHistoryDiff.lines) add(line.text, "Historical content", -19, ui::SuggestionKind::ReadOnlyText);
+                if(!m_moduleHistoryRange && !m_moduleHistorySnapshotShowing && m_moduleHistorySelected && !m_moduleHistoryFuture.valid()) add("View historical file", "Read the file as it existed in this commit", -740);
+                if (m_moduleHistoryDiff.lines.empty() && !m_moduleHistoryFuture.valid() && !m_commandStatusIsError) add(m_moduleHistorySnapshotShowing ? "Empty historical file" : "No textual diff", "Historical content is read-only", -19, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& line : m_moduleHistoryDiff.lines) add(line.text, m_moduleHistorySnapshotShowing ? "Historical file · read-only" : "Historical content", -19, ui::SuggestionKind::ReadOnlyText);
             } else if (m_moduleHistoryRange) {
                 for (std::size_t i = 0; i < m_moduleRangeHistory.size(); ++i) {
                     const auto& entry = m_moduleRangeHistory[i];
@@ -3790,7 +3791,7 @@ void Application::refreshModuleSuggestions() {
         } else if (m.enabled && m_visualShowing) {
             add("< Back to module commands", "", -90);
             if (m_visualConfigStage) {
-                if (m_visualConfigStage==1) { if(std::find(m.requirements.begin(),m.requirements.end(),"visual-mask-draw-v1")!=m.requirements.end()) add("Draw mask on candidate…", "Drag to select source pixels, then Enter to review", -313); add("Add mask…", "Enter x y width height in source pixels", -307); add("Remove mask…", "Enter a one-based mask number", -308); add("Change threshold…", "Enter a value from 0 to 255", -309); add("Cancel config edit", "No document changes", -311); }
+                if (m_visualConfigStage==1) { if(m_visualReview && m_visualReview->baselineImage().width==m_visualReview->candidateImage().width && m_visualReview->baselineImage().height==m_visualReview->candidateImage().height && std::find(m.requirements.begin(),m.requirements.end(),"visual-mask-draw-v1")!=m.requirements.end()) add("Draw mask on candidate…", "Drag to select source pixels, then Enter to review", -313); add("Add mask…", "Enter x y width height inside both screenshots", -307); add("Remove mask…", "Enter a one-based mask number", -308); add("Change threshold…", "Enter a value from 0 to 255", -309); add("Cancel config edit", "No document changes", -311); }
                 else if (m_visualConfigStage==3 || m_visualConfigStage==5) add("Reviewing configuration…", "Escape cancels", -93, ui::SuggestionKind::ReadOnlyText);
                 else if (m_visualConfigStage==4) {
                     add("Configuration draft", "JSON formatting will be normalized; screenshot files are not changed", -93, ui::SuggestionKind::ReadOnlyText);
@@ -3806,6 +3807,7 @@ void Application::refreshModuleSuggestions() {
             else if (m_visualReview) {
                 const auto& comparison = m_visualReview->comparison();
                 add("Visual comparison", std::to_string(comparison.changedPixels) + " changed of " + std::to_string(comparison.comparedPixels) + " pixels", -93, ui::SuggestionKind::ReadOnlyText);
+                if(comparison.addedPixels || comparison.removedPixels) add("Screenshot dimensions differ", std::to_string(comparison.addedPixels) + " added · " + std::to_string(comparison.removedPixels) + " removed pixels; aligned at top left", -93, ui::SuggestionKind::ReadOnlyText);
                 add("View baseline, candidate and difference", "Preview is limited to 1024 pixels per side", -91);
                 if (std::find(m.requirements.begin(),m.requirements.end(),"visual-review-crop-v1")!=m.requirements.end()) add("Inspect source-pixel crop", "Up to 512×512 source pixels; arrows move, 0 returns to overview; display may scale", -305);
                 if (m_visualConfigured && std::find(m.requirements.begin(),m.requirements.end(),"visual-config-edit-v1")!=m.requirements.end()) add("Edit visual configuration…", "Open the reviewed config file as a document first", -306);
@@ -4915,6 +4917,7 @@ void Application::applyModuleCommand() {
             m_visualConfigFromDrag=false; m_visualConfigReview=m_visualReview; m_visualConfigOriginal=m_document.toUtf8(); m_visualConfigFile=m_filePath; m_visualConfigRevision=m_document.revision(); m_visualConfigDraft={}; m_visualConfigStage=1; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return;
         }
         if (choice==-313 && m_visualConfigStage==1) {
+            if(!m_visualReview || m_visualReview->baselineImage().width!=m_visualReview->candidateImage().width || m_visualReview->baselineImage().height!=m_visualReview->candidateImage().height) {setCommandStatus("Drawn masks require equal-sized screenshots; enter coordinates inside both instead",true);return;}
             m_visualConfigFromDrag=true; if(!visualConfigAuthorized()) {m_visualConfigFromDrag=false;setCommandStatus("Module changed; reopen review",true);return;}
             m_visualMask={};m_visualMaskSelected=false;m_visualMaskDragging=false;m_visualMaskMode=true;m_visualCropMode=false;m_visualVisible=true;setStatus("Drag on candidate · Enter reviews mask · Escape cancels",false);return;
         }
@@ -5714,7 +5717,15 @@ void Application::applyModuleCommand() {
         m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
         setCommandStatus("Installing Python language server; Escape requests cancellation", false); return;
     }
-    if (choice == -18 && m_moduleHistoryShowing) { if (m_moduleHistoryDiffShowing) m_moduleHistoryDiffShowing = false; else m_moduleHistoryShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if (choice == -18 && m_moduleHistoryShowing) { if (m_moduleHistoryDiffShowing) {m_moduleHistoryDiffShowing = false;m_moduleHistorySnapshotShowing=false;} else m_moduleHistoryShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
+    if(choice == -740 && m_moduleHistoryShowing && m_moduleHistoryDiffShowing && !m_moduleHistorySnapshotShowing && !m_moduleHistoryRange && !m_moduleHistoryFuture.valid() && m_moduleHistorySelected && *m_moduleHistorySelected<m_moduleHistoryEntries.size()) {
+        if(!m_hasProject || !m_hasDocument || m_project.root().generic_string()!=m_moduleHistoryRoot || m_filePath!=m_moduleHistoryFile) {setCommandStatus("Project or file changed; reopen history",true);return;}
+        const auto root=m_project.root(); const auto entry=m_moduleHistoryEntries[*m_moduleHistorySelected];
+        m_moduleHistorySnapshotShowing=true; m_moduleHistoryDiff={}; m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1;
+        m_moduleHistoryFuture=std::async(std::launch::async,[root,entry] {ModuleHistoryResult result;result.isDiff=true;result.isSnapshot=true;std::string text;
+            try { if(workspace::gitHistoricalFileText(root,entry.path,entry.hash,text,result.error)) { std::string validity; if(!editor::Document::canEditLosslessly(text,validity)) result.error="Historical file is not supported text"; else {std::size_t start=0; while(start<text.size() && result.diff.lines.size()<1000) {auto end=text.find('\n',start);if(end==text.npos)end=text.size();auto line=text.substr(start,std::min<std::size_t>(end-start,4096));while(!line.empty() && start+line.size()<end && (static_cast<unsigned char>(text[start+line.size()])&0xc0U)==0x80U)line.pop_back();for(auto& c:line)if(static_cast<unsigned char>(c)<32 || c==127)c=' ';result.diff.lines.push_back({std::move(line),0});if(end-start>4096)result.diff.lines.push_back({"[Line truncated]",0});start=end==text.size()?end:end+1;}if(start<text.size())result.diff.lines.push_back({"[Historical file preview truncated]",0});} } } catch(const std::exception& e) {result.error=e.what();} return result;});
+        refreshSuggestions();setCommandStatus("Loading historical file…",false);return;
+    }
     if(choice==-400 && m_moduleCMakeShowing && !m_moduleCMakeEditing && m_moduleCMakeTarget && m_cmakeBuildStage==0 && m_moduleSelected<m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"cmake-build-target-v1")!=m_modules[m_moduleSelected].requirements.end()) {m_cmakeBuildStage=1;m_searchBar.open(ui::PromptKind::ModuleCMakePath);clearCommandFeedback();setCommandStatus("Enter absolute CMake executable path",false);return;}
     if(choice==-401 && m_moduleCMakeShowing && m_cmakeBuildStage==3 && !m_cmakeBuildFuture.valid()) {
         if(!m_hasProject || m_project.root().generic_string()!=m_moduleCMakeRoot || m_moduleSelected>=m_modules.size()){setCommandStatus("Project or module changed",true);return;}
@@ -5921,6 +5932,7 @@ void Application::applyModuleCommand() {
             }
             if (m_moduleHistoryDiffShowing || m_moduleHistoryFuture.valid() || !m_hasProject || !m_hasDocument || m_project.root().generic_string() != m_moduleHistoryRoot || m_filePath != m_moduleHistoryFile || static_cast<std::size_t>(choice) >= m_moduleHistoryEntries.size()) return;
             const auto root = m_project.root(); const auto entry = m_moduleHistoryEntries[static_cast<std::size_t>(choice)];
+            m_moduleHistorySelected=static_cast<std::size_t>(choice);m_moduleHistorySnapshotShowing=false;
             m_moduleHistoryDiff = {}; m_moduleHistoryDiffShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
             m_moduleHistoryFuture = std::async(std::launch::async, [root, entry] { ModuleHistoryResult result; result.isDiff = true; try { (void)workspace::gitHistoricalFileDiff(root, entry.path, entry.hash, result.diff, result.error, entry.previousPath); } catch (const std::exception& e) { result.error = e.what(); } return result; });
             refreshSuggestions(); setCommandStatus("Loading historical changes…", false); return;
@@ -6021,7 +6033,7 @@ void Application::applyModuleCommand() {
             const bool rangeHistory = found->commands[static_cast<std::size_t>(choice)].action == "git-range-history";
             if (rangeHistory && !m_document.hasSelection()) { setCommandStatus("Select the function or lines to trace first", true); return; }
             m_moduleHistoryRoot = m_project.root().generic_string(); m_moduleHistoryFile = m_filePath;
-            m_moduleHistoryEntries.clear(); m_moduleRangeHistory.clear(); m_moduleHistoryDiff = {}; m_moduleHistoryShowing = true; m_moduleHistoryDiffShowing = false; m_moduleHistoryRange = rangeHistory; m_moduleHistoryRevision = m_document.revision();
+            m_moduleHistoryEntries.clear(); m_moduleRangeHistory.clear(); m_moduleHistoryDiff = {}; m_moduleHistorySelected.reset();m_moduleHistorySnapshotShowing=false;m_moduleHistoryShowing = true; m_moduleHistoryDiffShowing = false; m_moduleHistoryRange = rangeHistory; m_moduleHistoryRevision = m_document.revision();
             m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0; const auto root = m_project.root(); const auto path = m_filePath;
             const auto start = m_document.selectionStart(), end = m_document.selectionEnd();
             const auto first = start.line + 1, last = end.column == 0 && end.line > start.line ? end.line : end.line + 1;
@@ -6497,7 +6509,7 @@ void Application::requestVisualCrop(std::size_t x, std::size_t y) {
     if (!m_visualShowing || !m_visualReview || m_visualCropFuture.valid() || m_visualApprovalFuture.valid() || !m_hasProject || m_project.root().generic_string()!=m_visualRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_visualModule) { setCommandStatus("Visual review changed or is busy",true); return; }
     std::vector<modules::Module> fresh; std::string error; const char* action=m_visualConfigured?"compare-visual-configured":"compare-visual-images";
     if (!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m) { return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-review-crop-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[&](const auto& c){return c.action==action;}); })) { setCommandStatus("Module changed; reopen the review",true); return; }
-    auto review=m_visualReview; const auto& image=review->baselineImage(); const auto width=std::min<std::size_t>(512,image.width), height=std::min<std::size_t>(512,image.height);
+    auto review=m_visualReview; const auto& image=review->comparison().diff; const auto width=std::min<std::size_t>(512,image.width), height=std::min<std::size_t>(512,image.height);
     if(!width || !height || x>image.width-width || y>image.height-height) { setCommandStatus("Crop is outside the image",true); return; }
     m_visualCropReview=review; m_visualCropCancel=std::make_shared<std::atomic_bool>(false);
     m_visualCropFuture=std::async(std::launch::async,[review,x,y,width,height,cancel=m_visualCropCancel] { VisualCropResult result; result.x=x; result.y=y; (void)ui::makeVisualReviewCrop(review->baselineImage(),review->candidateImage(),review->comparison(),{x,y,width,height},result.preview,result.error,cancel.get()); return result; });
@@ -7112,11 +7124,11 @@ void Application::pollModules() {
     }
     if (m_moduleHistoryFuture.valid() && m_moduleHistoryFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         ModuleHistoryResult result; try { result = m_moduleHistoryFuture.get(); } catch (const std::exception& e) { result.error = e.what(); }
-        if (m_moduleHistoryShowing && result.isDiff == m_moduleHistoryDiffShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
+        if (m_moduleHistoryShowing && result.isDiff == m_moduleHistoryDiffShowing && (!result.isDiff || result.isSnapshot==m_moduleHistorySnapshotShowing) && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
             if (!m_hasProject || !m_hasDocument || m_project.root().generic_string() != m_moduleHistoryRoot || m_filePath != m_moduleHistoryFile || (m_moduleHistoryRange && m_document.revision() != m_moduleHistoryRevision)) result.error = "Project or file changed; reopen history";
             if (result.error.empty()) {
                 if (result.isDiff) m_moduleHistoryDiff = std::move(result.diff); else if (m_moduleHistoryRange) m_moduleRangeHistory = std::move(result.ranges); else m_moduleHistoryEntries = std::move(result.entries);
-                setCommandStatus(result.isDiff ? "Historical changes; line numbers do not refer to the current buffer" : m_moduleHistoryRange ? (m_moduleRangeHistory.empty() ? "No history found for selected lines" : "Select a commit; range history is limited to 100 commits") : result.stoppedAtBoundary ? "History stops at a rename outside the project" : (m_moduleHistoryEntries.empty() ? "No commits found for this file" : "Select a commit; history follows renames within the project and is limited to 100 commits"), false);
+                setCommandStatus(result.isSnapshot ? "Historical file preview; read-only and limited to 1000 lines" : result.isDiff ? "Historical changes; line numbers do not refer to the current buffer" : m_moduleHistoryRange ? (m_moduleRangeHistory.empty() ? "No history found for selected lines" : "Select a commit; range history is limited to 100 commits") : result.stoppedAtBoundary ? "History stops at a rename outside the project" : (m_moduleHistoryEntries.empty() ? "No commits found for this file" : "Select a commit; history follows renames within the project and is limited to 100 commits"), false);
             } else setCommandStatus("Git history failed: " + result.error, true);
             m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions();
         }

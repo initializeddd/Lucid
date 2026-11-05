@@ -1,4 +1,5 @@
 #include "modules/VisualConfigEdit.hpp"
+#include <algorithm>
 namespace lucid::modules {
 namespace {
 VisualComparisonCounts counts(const VisualComparison& result) { return {result.comparedPixels,result.maskedPixels,result.changedPixels}; }
@@ -7,8 +8,8 @@ bool prepareVisualConfigDraft(std::string_view original,const VisualImage& basel
     const VisualConfigChange& change,VisualConfigDraft& draft,std::string& error,const std::atomic_bool* cancel) {
     draft={}; error.clear(); if(cancel && cancel->load()) {error="Visual config edit cancelled";return false;}
     VisualConfigDraft result;
-    if(!parseVisualReviewConfig(original,result.before,error) || !validateVisualReviewConfig(result.before,baseline.width,baseline.height,error)) return false;
-    if(candidate.width!=baseline.width || candidate.height!=baseline.height) {error="Screenshot dimensions do not match";return false;}
+    const auto commonWidth=std::min(baseline.width,candidate.width), commonHeight=std::min(baseline.height,candidate.height);
+    if(!parseVisualReviewConfig(original,result.before,error) || !validateVisualReviewConfig(result.before,commonWidth,commonHeight,error)) return false;
     result.after=result.before;
     switch(change.operation) {
     case VisualConfigOperation::AddMask: result.after.masks.push_back(change.mask); break;
@@ -21,7 +22,7 @@ bool prepareVisualConfigDraft(std::string_view original,const VisualImage& basel
         result.after.threshold=static_cast<std::uint8_t>(change.threshold); break;
     default: error="Unsupported visual config change"; return false;
     }
-    if(!validateVisualReviewConfig(result.after,baseline.width,baseline.height,error) || !serializeVisualReviewConfig(result.after,result.replacement,error)) return false;
+    if(!validateVisualReviewConfig(result.after,commonWidth,commonHeight,error) || !serializeVisualReviewConfig(result.after,result.replacement,error)) return false;
     VisualComparison comparison;
     if(!compareVisualImages(baseline,candidate,result.before.threshold,result.before.masks,comparison,error,cancel)) return false;
     result.beforeCounts=counts(comparison); comparison={};

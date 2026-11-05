@@ -27,6 +27,9 @@ struct GitBranches { std::string head; std::vector<GitBranch> branches; };
                                    std::string_view expectedSource, std::size_t first, std::size_t last,
                                    std::vector<GitRangeHistoryEntry>& entries, std::string& error);
 [[nodiscard]] bool gitHistoricalFileDiff(const std::filesystem::path& root, std::string_view path, std::string_view commit, GitReview& review, std::string& error, std::string_view previousPath = {});
+// Reads a historical project-relative blob without consulting or changing the working tree.
+// Rejects binary and incomplete output; contents are untrusted historical text.
+[[nodiscard]] bool gitHistoricalFileText(const std::filesystem::path& root, std::string_view path, std::string_view commit, std::string& text, std::string& error);
 [[nodiscard]] bool gitChanges(const std::filesystem::path& root, std::vector<GitChange>& changes, std::string& error);
 [[nodiscard]] bool gitReview(const std::filesystem::path& root, const GitChange& change, GitReview& review, std::string& error);
 struct GitCommitPreview { std::vector<std::string> paths; std::string indexTree; std::string head; };

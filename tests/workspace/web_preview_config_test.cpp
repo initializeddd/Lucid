@@ -36,6 +36,13 @@ int main() {
     ok = ok && !snapshot.load({{"/ok.js", "x"}, {"/ok.js", "y"}}, error);
     ok = ok && snapshot.respond("GET", "/ok.js").status == 404;
     ok = ok && !snapshot.load({{"/secret.txt", "x"}}, error);
+    ok = ok && snapshot.load({{"/shape.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"}, {"/type.ttf", "font"}, {"/type.otf", "font"}}, error);
+    const auto svg = snapshot.respond("GET", "/shape.svg");
+    ok = ok && svg.status == 200 && svg.contentType == "image/svg+xml" && !svg.body.empty();
+    bool svgPolicy = false;
+    for (const auto& header : svg.headers) if (header.first == "Content-Security-Policy") svgPolicy = header.second == "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+    ok = ok && svgPolicy && snapshot.respond("HEAD", "/shape.svg").body.empty();
+    ok = ok && snapshot.respond("GET", "/type.ttf").contentType == "font/ttf" && snapshot.respond("GET", "/type.otf").contentType == "font/otf";
     bool created = false; auto project = lucid::workspace::Project::openOrCreate(root, created, error, false, false); WebPreviewBundle bundle;
     ok = ok && error.empty() && loadWebPreviewBundle(project, R"({"entry":"index.html","assets":["index.html","pages/a.htm"],"width":400,"height":300,"state":"?dark=1"})", bundle, error);
     ok = ok && bundle.width == 400 && bundle.height == 300 && bundle.target == "/index.html?dark=1" && bundle.assets.respond("GET", "/index.html").body == "<html>";

@@ -80,15 +80,17 @@ bool compareVisualImages(const VisualImage& baseline, const VisualImage& actual,
                          VisualComparison& result, std::string& error, const std::atomic_bool* cancel) {
     result = {}; error.clear();
     if (cancel && cancel->load()) { error = "Visual comparison cancelled."; return false; }
-    if (!baseline.width || !baseline.height || baseline.width != actual.width || baseline.height != actual.height ||
-        baseline.width > maxPixels / baseline.height) { error = "Images have invalid, unequal, or excessive dimensions."; return false; }
-    const auto pixels = baseline.width * baseline.height;
-    if (baseline.rgba.size() != pixels * 4 || actual.rgba.size() != pixels * 4) { error = "Image buffer size does not match dimensions."; return false; }
+    const auto width=std::max(baseline.width,actual.width), height=std::max(baseline.height,actual.height);
+    if (!baseline.width || !baseline.height || !actual.width || !actual.height ||
+        baseline.width > maxPixels / baseline.height || actual.width > maxPixels / actual.height || width > maxPixels / height) { error = "Images have invalid or excessive dimensions."; return false; }
+    const auto pixels = width * height;
+    if (baseline.rgba.size() != baseline.width * baseline.height * 4 || actual.rgba.size() != actual.width * actual.height * 4) { error = "Image buffer size does not match dimensions."; return false; }
     if (masks.size() > maxMasks) { error = "Too many masks."; return false; }
     for (const auto& mask : masks) {
-        if (!mask.width || !mask.height || mask.x >= baseline.width || mask.y >= baseline.height ||
-            mask.width > baseline.width - mask.x || mask.height > baseline.height - mask.y) {
-            error = "Mask must be nonempty and wholly inside the image."; return false;
+        const auto commonWidth=std::min(baseline.width,actual.width), commonHeight=std::min(baseline.height,actual.height);
+        if (!mask.width || !mask.height || mask.x >= commonWidth || mask.y >= commonHeight ||
+            mask.width > commonWidth - mask.x || mask.height > commonHeight - mask.y) {
+            error = "Mask must be nonempty and wholly inside both images."; return false;
         }
     }
     // Sweep rectangle boundaries so overlapping full-image masks remain O(pixels + masks log masks).
@@ -99,22 +101,25 @@ bool compareVisualImages(const VisualImage& baseline, const VisualImage& actual,
         events.push_back({mask.y + mask.height, mask.x, mask.x + mask.width, -1});
     }
     std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) { return a.row < b.row; });
-    std::vector<int> boundaries(baseline.width + 1, 0); std::size_t event = 0;
-    VisualComparison output; output.diff.width = baseline.width; output.diff.height = baseline.height;
+    std::vector<int> boundaries(width + 1, 0); std::size_t event = 0;
+    VisualComparison output; output.diff.width = width; output.diff.height = height;
     output.diff.rgba.assign(pixels * 4, 0);
-    for (std::size_t y = 0; y < baseline.height; ++y) {
+    for (std::size_t y = 0; y < height; ++y) {
         if (cancel && cancel->load()) { error = "Visual comparison cancelled."; return false; }
         while (event < events.size() && events[event].row == y) {
             const auto& e = events[event++]; boundaries[e.left] += e.delta; boundaries[e.right] -= e.delta;
         }
         int active = 0;
-        for (std::size_t x = 0; x < baseline.width; ++x) {
-            active += boundaries[x]; const auto i = y * baseline.width + x;
+        for (std::size_t x = 0; x < width; ++x) {
+            active += boundaries[x]; const auto i = y * width + x;
+            const bool hasBaseline=x<baseline.width && y<baseline.height, hasActual=x<actual.width && y<actual.height;
+            if (!hasBaseline && !hasActual) continue;
             if (active) { ++output.maskedPixels; continue; }
-            ++output.comparedPixels; bool changed = false;
-            for (std::size_t channel = 0; channel < 4; ++channel) {
-                const auto offset = i * 4 + channel;
-                if (std::abs(static_cast<int>(baseline.rgba[offset]) - static_cast<int>(actual.rgba[offset])) > threshold) { changed = true; break; }
+            ++output.comparedPixels; bool changed = hasBaseline != hasActual;
+            if (!hasBaseline) ++output.addedPixels; else if (!hasActual) ++output.removedPixels;
+            if (!changed) for (std::size_t channel = 0; channel < 4; ++channel) {
+                const auto a=(y*baseline.width+x)*4+channel, b=(y*actual.width+x)*4+channel;
+                if (std::abs(static_cast<int>(baseline.rgba[a]) - static_cast<int>(actual.rgba[b])) > threshold) { changed = true; break; }
             }
             if (changed) { ++output.changedPixels; output.diff.rgba[i * 4] = 255; output.diff.rgba[i * 4 + 3] = 255; }
         }

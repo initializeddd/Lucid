@@ -13,5 +13,8 @@ int main(){
  for(const auto change:{VisualConfigChange{VisualConfigOperation::AddMask,{2,0,1,1}},VisualConfigChange{VisualConfigOperation::AddMask,{0,0,0,1}},VisualConfigChange{VisualConfigOperation::RemoveMask,{},0},VisualConfigChange{VisualConfigOperation::SetThreshold,{},0,256},VisualConfigChange{VisualConfigOperation::SetThreshold,{},0,0}}) if(prepareVisualConfigDraft(original,before,after,change,draft,error) || !draft.replacement.empty() || error.empty()) return 7;
  if(prepareVisualConfigDraft("{bad}",before,after,{VisualConfigOperation::SetThreshold,{},0,2},draft,error)) return 8;
  std::atomic_bool cancel{true}; if(prepareVisualConfigDraft(original,before,after,{VisualConfigOperation::SetThreshold,{},0,2},draft,error,&cancel) || !draft.original.empty()) return 9;
+ VisualImage wider{3,2,std::vector<std::uint8_t>(24,255)};
+ if(!prepareVisualConfigDraft(original,before,wider,{VisualConfigOperation::AddMask,{1,0,1,1}},draft,error) || draft.beforeCounts.changed!=2 || draft.afterCounts.changed!=2 || draft.afterCounts.masked!=1) return 10;
+ if(prepareVisualConfigDraft(original,before,wider,{VisualConfigOperation::AddMask,{2,0,1,1}},draft,error)) return 11;
  return 0;
 }

@@ -25,35 +25,37 @@ bool makeVisualReviewPreview(const modules::VisualImage& baseline,
     std::string& error) {
     preview = {}; error.clear();
     if (!valid(baseline) || !valid(candidate) || !valid(comparison.diff) ||
-        baseline.width != candidate.width || baseline.height != candidate.height ||
-        baseline.width != comparison.diff.width || baseline.height != comparison.diff.height ||
+        std::max(baseline.width,candidate.width) != comparison.diff.width ||
+        std::max(baseline.height,candidate.height) != comparison.diff.height ||
         !maxWidth || !maxHeight || maxWidth > 1024 || maxHeight > 1024) {
         error = "Invalid visual comparison or preview size."; return false;
     }
-    const auto scale = std::min({1.0, static_cast<double>(maxWidth) / baseline.width,
-                                static_cast<double>(maxHeight) / baseline.height});
-    const auto width = std::max<std::size_t>(1, static_cast<std::size_t>(baseline.width * scale));
-    const auto height = std::max<std::size_t>(1, static_cast<std::size_t>(baseline.height * scale));
+    const auto canvasWidth=comparison.diff.width, canvasHeight=comparison.diff.height;
+    const auto scale = std::min({1.0, static_cast<double>(maxWidth) / canvasWidth,
+                                static_cast<double>(maxHeight) / canvasHeight});
+    const auto width = std::max<std::size_t>(1, static_cast<std::size_t>(canvasWidth * scale));
+    const auto height = std::max<std::size_t>(1, static_cast<std::size_t>(canvasHeight * scale));
     VisualReviewPreview output;
     for (auto* image : {&output.baseline, &output.candidate, &output.difference}) {
         image->width = width; image->height = height; image->rgba.resize(width * height * 4);
     }
     for (std::size_t y = 0; y < height; ++y) for (std::size_t x = 0; x < width; ++x) {
-        const auto x0 = static_cast<std::size_t>(static_cast<std::uint64_t>(x) * baseline.width / width);
-        const auto x1 = static_cast<std::size_t>(static_cast<std::uint64_t>(x + 1) * baseline.width / width);
-        const auto y0 = static_cast<std::size_t>(static_cast<std::uint64_t>(y) * baseline.height / height);
-        const auto y1 = static_cast<std::size_t>(static_cast<std::uint64_t>(y + 1) * baseline.height / height);
+        const auto x0 = static_cast<std::size_t>(static_cast<std::uint64_t>(x) * canvasWidth / width);
+        const auto x1 = static_cast<std::size_t>(static_cast<std::uint64_t>(x + 1) * canvasWidth / width);
+        const auto y0 = static_cast<std::size_t>(static_cast<std::uint64_t>(y) * canvasHeight / height);
+        const auto y1 = static_cast<std::size_t>(static_cast<std::uint64_t>(y + 1) * canvasHeight / height);
         const auto count = (x1 - x0) * (y1 - y0);
         std::uint64_t sums[2][4]{}; bool changed = false;
         for (auto sy = y0; sy < y1; ++sy) for (auto sx = x0; sx < x1; ++sx) {
-            const auto index = (sy * baseline.width + sx) * 4;
             for (std::size_t which = 0; which < 2; ++which) {
                 const auto& image = which ? candidate : baseline;
+                if(sx>=image.width || sy>=image.height) continue;
+                const auto index = (sy * image.width + sx) * 4;
                 const auto alpha = image.rgba[index + 3];
                 for (std::size_t c = 0; c < 3; ++c) sums[which][c] += image.rgba[index + c] * alpha;
                 sums[which][3] += alpha;
             }
-            changed = changed || comparison.diff.rgba[index + 3] != 0;
+            changed = changed || comparison.diff.rgba[(sy * canvasWidth + sx) * 4 + 3] != 0;
         }
         const auto checker = static_cast<std::uint64_t>(((x / 8 + y / 8) % 2) ? 192 : 224);
         const auto destination = (y * width + x) * 4;

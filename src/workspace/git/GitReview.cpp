@@ -422,6 +422,18 @@ bool gitHistoricalFileDiff(const std::filesystem::path& root, std::string_view p
     return true;
 }
 
+bool gitHistoricalFileText(const std::filesystem::path& root, std::string_view path, std::string_view commit, std::string& text, std::string& error) {
+    text.clear(); error.clear();
+    const bool validHash = (commit.size()==40 || commit.size()==64) && std::all_of(commit.begin(),commit.end(),[](char c) { return (c>='0' && c<='9') || (c>='a' && c<='f'); });
+    if(!safePath(path) || !validHash) {error="Invalid project path or commit ID";return false;}
+    std::string prefix, output;
+    if(!git(root,{"rev-parse","--show-prefix"},prefix,error)) return false;
+    while(!prefix.empty() && (prefix.back()=='\n' || prefix.back()=='\r')) prefix.pop_back();
+    if(!git(root,{"cat-file","blob",std::string(commit)+":"+prefix+std::string(path)},output,error)) return false;
+    if(output.find('\0')!=output.npos) {error="Historical binary content cannot be previewed";return false;}
+    text=std::move(output); return true;
+}
+
 bool gitUpstream(const std::filesystem::path& root, GitUpstream& upstream, std::string& error) {
     GitUpstream value;
     auto read = [&](std::vector<std::string> args, std::string& result) {

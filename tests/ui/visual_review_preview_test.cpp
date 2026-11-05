@@ -30,5 +30,8 @@ int main() {
     const auto generation = preview.generation;
     if (!ui::makeVisualReviewPreview(large, large, largeComparison, 300, 300, preview, error) || preview.baseline.width != 300 || preview.baseline.height != 200 || preview.generation == generation || preview.difference.rgba[(99 * 300 + 149) * 4 + 1] >= 255) return 12;
     if (ui::makeVisualReviewPreview(large, large, largeComparison, 1025, 1024, preview, error)) return 13;
+    modules::VisualImage tall{1,2,{255,0,0,255,255,0,0,255}}, wide{2,1,{0,255,0,255,0,255,0,255}};
+    modules::VisualComparison unequal; if(!modules::compareVisualImages(tall,wide,0,{},unequal,error)) return 14;
+    if(!ui::makeVisualReviewPreview(tall,wide,unequal,2,2,preview,error) || preview.baseline.width!=2 || preview.baseline.height!=2 || preview.baseline.rgba[4]!=224 || preview.candidate.rgba[8]!=224 || preview.difference.rgba[7]!=255) return 15;
     return 0;
 }

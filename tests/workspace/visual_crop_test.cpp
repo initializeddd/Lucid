@@ -14,5 +14,7 @@ int main(){
  for(const auto crop:{ui::VisualReviewCrop{0,0,0,1},ui::VisualReviewCrop{4,0,1,1},ui::VisualReviewCrop{3,2,2,1},ui::VisualReviewCrop{0,0,1025,1},ui::VisualReviewCrop{std::numeric_limits<std::size_t>::max(),0,2,1}}) if(ui::makeVisualReviewCrop(baseline,candidate,comparison,crop,preview,error) || preview.generation || error.empty()) return 5;
  std::atomic_bool cancel{true}; if(ui::makeVisualReviewCrop(baseline,candidate,comparison,{0,0,1,1},preview,error,&cancel) || preview.generation || error.empty()) return 6;
  candidate.rgba.pop_back(); if(ui::makeVisualReviewCrop(baseline,candidate,comparison,{0,0,1,1},preview,error)) return 7;
+ modules::VisualImage tall{1,2,{255,0,0,255,255,0,0,255}}, wide{2,1,{0,255,0,255,0,255,0,255}};
+ if(!modules::compareVisualImages(tall,wide,0,{},comparison,error) || !ui::makeVisualReviewCrop(tall,wide,comparison,{1,0,1,2},preview,error) || preview.baseline.rgba[0]!=224 || preview.candidate.rgba[1]!=255 || preview.difference.rgba[0]<=preview.candidate.rgba[0]) return 10;
  return 0;
 }

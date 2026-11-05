@@ -1,14 +1,23 @@
 #include "modules/AccessibilityAudit.hpp"
 #include <algorithm>
 #include <cctype>
-#include <charconv>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 namespace lucid::modules {
 namespace {
 std::string lower(std::string_view s) { std::string out; for (unsigned char c:s) out.push_back(static_cast<char>(std::tolower(c))); return out; }
 bool space(char c) { return c==' ' || c=='\t' || c=='\n' || c=='\r' || c=='\f'; }
+bool parseDouble(std::string_view text, double& value) {
+    if (text.empty()) return false;
+    const std::string copy(text);
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(copy.c_str(), &end);
+    return errno == 0 && end == copy.c_str() + copy.size() && std::isfinite(value);
+}
 struct Tag { std::string name; std::unordered_map<std::string,std::string> attrs; std::size_t line=0,column=0; bool closing=false, self=false, uncertain=false; };
 std::string_view trim(std::string_view value) {
     while (!value.empty() && space(value.front())) value.remove_prefix(1);
@@ -91,9 +100,7 @@ bool viewportMayRestrictZoom(const Tag& t) {
             } else if (key == "maximum-scale") {
                 ++maximumCount;
                 double maximum = 0;
-                const auto parsed = std::from_chars(value.data(), value.data() + value.size(), maximum);
-                tooSmallMaximum = !value.empty() && parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
-                                  std::isfinite(maximum) && maximum > 0 && maximum < 2;
+                tooSmallMaximum = parseDouble(value, maximum) && maximum > 0 && maximum < 2;
             }
         }
         if (separator == std::string_view::npos) break;

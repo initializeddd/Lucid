@@ -32,6 +32,10 @@ target_include_directories(lucid_sqlite PUBLIC "${PROJECT_SOURCE_DIR}/third_part
 target_compile_definitions(lucid_sqlite PRIVATE SQLITE_OMIT_LOAD_EXTENSION SQLITE_DQS=0)
 add_library(lucid_core STATIC ${LUCID_CORE_SOURCES})
 
+if(MSVC)
+    target_compile_options(lucid_core PRIVATE /bigobj)
+endif()
+
 add_dependencies(lucid_core lucid_shaders)
 
 target_include_directories(lucid_core PUBLIC

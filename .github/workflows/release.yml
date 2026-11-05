@@ -125,16 +125,8 @@ jobs:
             "" \
             "All required shared libraries are bundled in lib/." \
             > "${stage}/README.txt"
-          while read -r library; do
-            case "$(basename "${library}")" in
-              libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|libutil.so.*|libgcc_s.so.*|libstdc++.so.*|libresolv.so.*|ld-linux*) continue ;;
-            esac
-            cp -L "${library}" "${stage}/lib/"
-          done < <(ldd build/bin/lucid | awk '/=> \// {print $3}')
-          if ldd "${stage}/lucid" | grep -q "not found"; then
-            ldd "${stage}/lucid"
-            exit 1
-          fi
+          python3 tests/packaging/linux_bundle_libraries_test.py
+          bash packaging/linux/bundle-libraries.sh "${stage}/lucid" "${stage}/lucid-shader-preview-helper" "${stage}/lib"
           tar -czf "dist/${name}.tar.gz" -C "${stage}" .
           sed "s/@LUCID_RELEASE_TAG@/${RELEASE_TAG}/g" packaging/linux/install.sh > dist/install.sh
 

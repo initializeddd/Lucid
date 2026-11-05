@@ -30,8 +30,9 @@ ctest --test-dir build --output-on-failure
 For an optional cross-platform smoke check, install a MinGW C++20 compiler and
 run `python3 tools/modules/check_mingw.py`. Pass
 `--compiler i686-w64-mingw32-g++` to check 32-bit Windows instead of the
-default 64-bit target. This checks the syntax of eight module translation units;
-it does not link or run Lucid and does not replace native Windows tests.
+default 64-bit target. This checks module translation units except the three
+that require target-specific libcurl headers. It does not link or run Lucid and
+does not replace native Windows tests.
 
 ## Code style
 

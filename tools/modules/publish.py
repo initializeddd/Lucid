@@ -133,6 +133,8 @@ def collect(owner):
             raise ValueError(f"Configured container actions require project, network and process access: {path}")
         if "api-response-assertions-v1" in requirements and (not permissions["project"] or not permissions["network"] or "api-request-studio-v1" not in requirements or not any(command.get("action") in ("open-api-requests", "open-api-environment") for command in commands)):
             raise ValueError(f"Response assertions require project access and an API request command: {path}")
+        if "coverage-cobertura-branches-v1" in requirements and (not permissions["project"] or "coverage-cobertura-v1" not in requirements or not any(command.get("action") == "coverage-cobertura" for command in commands)):
+            raise ValueError(f"Cobertura branch coverage requires project access and Cobertura import: {path}")
         if "design-token-aliases-v1" in requirements and (not permissions["project"] or "design-token-explorer-v1" not in requirements or not any(command.get("action") == "design-token-explorer" for command in commands)):
             raise ValueError(f"Design token aliases require project access and token exploration: {path}")
         if "diagram-flow-branches-v1" in requirements and ("diagram-preview-v1" not in requirements or not any(command.get("action") == "diagram-preview" for command in commands)):

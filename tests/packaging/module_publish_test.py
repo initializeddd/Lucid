@@ -334,6 +334,13 @@ class PublishTest(unittest.TestCase):
             self.invoke("--publish")
         self.assertFalse(self.registry)
 
+    def test_cobertura_branches_require_cobertura_import(self):
+        data = {"name":"Coverage", "version":"1", "requires":["coverage-cobertura-v1","coverage-cobertura-branches-v1"], "permissions":{"project":True,"network":False,"processes":False,"settings":False}, "commands":[{"title":"Import","action":"coverage-cobertura"}]}
+        self.manifest.write_text(json.dumps(data)); self.invoke("--publish"); self.registry.clear()
+        data["requires"].remove("coverage-cobertura-v1"); self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError): self.invoke("--publish")
+        self.assertFalse(self.registry)
+
     def test_design_aliases_require_token_explorer(self):
         data = {"name":"Tokens", "version":"1", "requires":["design-token-explorer-v1","design-token-aliases-v1"], "permissions":{"project":True,"network":False,"processes":False,"settings":False}, "commands":[{"title":"Explore","action":"design-token-explorer"}]}
         self.manifest.write_text(json.dumps(data)); self.invoke("--publish"); self.registry.clear()

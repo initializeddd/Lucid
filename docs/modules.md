@@ -348,8 +348,13 @@ It flags malformed reports, inaccessible or outside-project files, and the 10,00
 display limit as incomplete. Gutter markers and cursor status show imported coverage
 for an unedited buffer that matches the source captured at import; markers disappear
 when that buffer changes. The report can still predate the captured source.
-Cobertura support covers class-level line hits and project-contained source paths;
-branch and method coverage are not imported. Ambiguous, missing or outside-project
+Cobertura support covers class-level line hits, supported line-level branch
+fractions and project-contained source paths; method coverage is not imported.
+Branch counts use `condition-coverage` fractions, accepting ordinary percentage
+rounding. Conflicting duplicate counts are shown as unknown and mark the report
+incomplete; invalid or missing branch data also marks it incomplete. When no
+branch total is available, its unknown count cannot be quantified. Nested
+condition records are not used to infer missing totals. Ambiguous, missing or outside-project
 paths are skipped and marked incomplete. External DTDs are never fetched, and
 internal entities and unsupported XML constructs are rejected as incomplete. The
 module does not run coverage tools itself.
@@ -566,7 +571,7 @@ remain unverified. Absolute FILE paths and PUBLIC-only symbols are not mapped. M
 candidates are unverified and may be wrong or stale; ambiguous matches are not
 navigable. Source must be inside the project, readable as text and contain the
 specified line; resolve unsaved edits before navigation. No PDB/DWARF parsing,
-automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Legacy Apple crash report text is also accepted with the same limits; reported code type, exception, threads and frames are unverified and cannot be navigated. Unsupported sections are marked incomplete. JSON `.ips`, thread state, binary image metadata and other debugger text formats are not supported.
+automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Legacy Apple crash report text is also accepted with the same limits; reported code type, exception, threads and frames are unverified and cannot be navigated. Unsupported sections are marked incomplete. Current JSON `.ips` reports are accepted for a bounded subset of exception, image and thread/frame metadata. The reader omits image paths and process details, but the input, image names and symbols can contain sensitive information. Addresses and symbols are unverified, and cannot be navigated. Unsupported variants, thread state, symbolication and other debugger text formats are not supported.
 
 Rust Ownership Lens reads saved rustc or Cargo newline-delimited JSON diagnostics
 from the project. It presents supported ownership and borrowing errors, compiler

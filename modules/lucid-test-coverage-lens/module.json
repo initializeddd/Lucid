@@ -1,10 +1,11 @@
 {
   "name": "Test Coverage Lens",
   "version": "0.1.0",
-  "description": "Import project-local LCOV or Cobertura line coverage reports; reports may be stale.",
+  "description": "Import local LCOV or Cobertura line and supported branch coverage; reports may be stale.",
   "requires": [
     "coverage-lcov-v1",
-    "coverage-cobertura-v1"
+    "coverage-cobertura-v1",
+    "coverage-cobertura-branches-v1"
   ],
   "permissions": {
     "project": true,

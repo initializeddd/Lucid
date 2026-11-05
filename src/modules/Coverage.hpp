@@ -11,6 +11,9 @@ struct CoverageReport { std::vector<CoverageLine> lines; std::size_t skippedFile
 [[nodiscard]] CoverageReport parseLcov(const workspace::Project& project, std::string_view report,
                                        const std::atomic_bool* cancel = nullptr, std::size_t limit = 100000);
 // Parses a bounded Cobertura subset without loading DTDs or external entities.
+// Line-level condition-coverage fractions provide branch counts. Malformed,
+// missing or conflicting counts mark the report incomplete; nested condition
+// records are not used to infer counts.
 [[nodiscard]] CoverageReport parseCobertura(const workspace::Project& project, std::string_view report,
                                             const std::atomic_bool* cancel = nullptr, std::size_t limit = 100000);
 }

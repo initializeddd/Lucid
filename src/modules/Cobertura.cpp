@@ -1,6 +1,7 @@
 #include "modules/Coverage.hpp"
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -40,13 +41,33 @@ bool decode(std::string_view text, std::string& result) {
     }
     return true;
 }
+struct BranchCounts { std::size_t covered=0, uncovered=0; };
+bool parseBranchCounts(std::string_view text,BranchCounts& out) {
+    out={}; while(!text.empty() && whitespace(text.front())) text.remove_prefix(1); while(!text.empty() && whitespace(text.back())) text.remove_suffix(1);
+    // Accept Cobertura's N% (covered/total) form. The fraction is authoritative;
+    // percentage precision and rounding differ across report producers.
+    auto percent=text.find('%'); if(percent==text.npos || percent==0 || percent>16) return false;
+    auto number=text.substr(0,percent); bool dot=false, digit=false, nonzeroFraction=false; unsigned whole=0; double fraction=0.0, scale=0.1;
+    for(char c:number) { if(c=='.' && !dot && digit) {dot=true;continue;} if(c<'0' || c>'9') return false; digit=true; if(!dot) {if(whole>100) return false;whole=whole*10+static_cast<unsigned>(c-'0');} else {nonzeroFraction|=c!='0';fraction+=static_cast<unsigned>(c-'0')*scale;scale*=0.1;} }
+    if(!digit || number.back()=='.' || whole>100 || (whole==100 && nonzeroFraction)) return false;
+    auto rest=text.substr(percent+1); while(!rest.empty() && whitespace(rest.front())) rest.remove_prefix(1);
+    if(rest.size()<5 || rest.front()!='(' || rest.back()!=')') return false;
+    rest=rest.substr(1,rest.size()-2); const auto slash=rest.find('/'); if(slash==rest.npos || !slash || slash+1==rest.size()) return false;
+    std::size_t covered=0,total=0; auto a=std::from_chars(rest.data(),rest.data()+slash,covered), b=std::from_chars(rest.data()+slash+1,rest.data()+rest.size(),total);
+    if(a.ec!=std::errc{} || a.ptr!=rest.data()+slash || b.ec!=std::errc{} || b.ptr!=rest.data()+rest.size() || !total || total>1000000 || covered>total) return false;
+    // Allow common integer/decimal rounding, but reject materially contradictory
+    // percentages rather than presenting the fraction as trustworthy coverage.
+    if(std::abs(static_cast<double>(whole)+fraction-100.0*static_cast<double>(covered)/static_cast<double>(total))>1.0) return false;
+    out={covered,total-covered};return true;
+}
 std::string trim(std::string s) {
     while (!s.empty() && whitespace(s.back())) s.pop_back();
     auto i = s.begin(); while (i != s.end() && whitespace(*i)) ++i; s.erase(s.begin(), i); return s;
 }
 }
 CoverageReport parseCobertura(const workspace::Project& project, std::string_view report, const std::atomic_bool* cancel, std::size_t limit) {
-    CoverageReport out; std::map<std::pair<std::string,std::size_t>, bool> lines;
+    struct Entry { bool covered=false, branchSeen=false, branchConflict=false; BranchCounts branch{}; std::size_t unknown=0; };
+    CoverageReport out; std::map<std::pair<std::string,std::size_t>, Entry> lines;
     if (report.size() > workspace::Project::maxFileSize) { out.incomplete = true; return out; }
     if (std::any_of(report.begin(), report.end(), [](unsigned char c) { return c < 0x20 && c != 9 && c != 10 && c != 13; })) { out.incomplete = true; return out; }
     limit = std::min<std::size_t>(limit, 100000);
@@ -123,13 +144,29 @@ CoverageReport parseCobertura(const workspace::Project& project, std::string_vie
             if (n==attrs.end() || h==attrs.end()) out.incomplete=true;
             else { const auto a=std::from_chars(n->second.data(),n->second.data()+n->second.size(),number), b=std::from_chars(h->second.data(),h->second.data()+h->second.size(),hits);
                 if (a.ec!=std::errc{} || a.ptr!=n->second.data()+n->second.size() || !number || b.ec!=std::errc{} || b.ptr!=h->second.data()+h->second.size()) out.incomplete=true;
-                else { auto key=std::make_pair(currentFile,number-1); auto found=lines.find(key); if (found!=lines.end()) found->second |= hits!=0; else if (lines.size()>=limit) {out.incomplete=true; break;} else lines.emplace(std::move(key),hits!=0); }
+                else {
+                    const auto branch=attrs.find("branch"), condition=attrs.find("condition-coverage"); bool hasBranch=false, branchValid=true; BranchCounts parsed{};
+                    if(branch!=attrs.end() && branch->second!="true" && branch->second!="false") {hasBranch=true;branchValid=false;}
+                    if(condition!=attrs.end()) { hasBranch=true; if((branch!=attrs.end() && branch->second=="false") || !parseBranchCounts(condition->second,parsed)) branchValid=false; }
+                    else if(branch!=attrs.end() && branch->second=="true") {hasBranch=true;branchValid=false;}
+                    else if(branch!=attrs.end() && branch->second=="false") hasBranch=true;
+                    if(!branchValid) out.incomplete=true;
+                    auto key=std::make_pair(currentFile,number-1); auto found=lines.find(key);
+                    if(found==lines.end()) { if(lines.size()>=limit) {out.incomplete=true;break;} found=lines.emplace(std::move(key),Entry{}).first; }
+                    auto& entry=found->second; entry.covered|=hits!=0;
+                    if(hasBranch && branchValid) {
+                        const auto total=parsed.covered+parsed.uncovered;
+                        if(entry.branchConflict) entry.unknown=std::max(entry.unknown,total);
+                        else if(entry.branchSeen && (entry.branch.covered!=parsed.covered || entry.branch.uncovered!=parsed.uncovered)) {entry.branchConflict=true;entry.unknown=std::max(total,entry.branch.covered+entry.branch.uncovered);entry.branch={};out.incomplete=true;}
+                        else {entry.branchSeen=true;entry.branch=parsed;}
+                    } else if(hasBranch && !branchValid) {entry.unknown=std::max(entry.unknown,entry.branch.covered+entry.branch.uncovered);entry.branch={};entry.branchConflict=true;}
+                }
             }
         }
         if (!self) stack.push_back(std::move(name)); else if (stack.empty()) endedRoot=true;
     }
     if (!sawRoot || !endedRoot || !stack.empty()) out.incomplete=true;
-    for (const auto& [key, covered] : lines) out.lines.push_back({key.first,key.second,covered});
+    for (const auto& [key, entry] : lines) out.lines.push_back({key.first,key.second,entry.covered,entry.branch.covered,entry.branch.uncovered,entry.unknown});
     return out;
 }
 }

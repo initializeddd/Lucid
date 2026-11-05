@@ -2772,7 +2772,15 @@ void Application::refreshModuleSuggestions() {
             }
         } else if (m.enabled && m_crashShowing) {
             add("< Back to module commands", "", -57);
-            if(m_crashIsApple) {
+            if(m_crashIsIps) {
+                const auto safe=[](const std::string& value){std::string error;return editor::Document::canEditLosslessly(value,error) ? value : std::string("(unreadable text)");};
+                add("Apple JSON crash report","Unverified and potentially sensitive; no source navigation or symbolication",-58,ui::SuggestionKind::ReadOnlyText);
+                if(!m_crashIps.architecture.empty()) add("Reported code type",safe(m_crashIps.architecture),-58,ui::SuggestionKind::ReadOnlyText);
+                if(!m_crashIps.exceptionType.empty()) add("Reported exception",safe(m_crashIps.exceptionType),-58,ui::SuggestionKind::ReadOnlyText);
+                if(!m_crashIps.signal.empty()) add("Reported signal",safe(m_crashIps.signal),-58,ui::SuggestionKind::ReadOnlyText);
+                if(m_crashIps.incomplete) add("Incomplete crash report","Some data was omitted or a limit was reached",-58,ui::SuggestionKind::ReadOnlyText);
+                std::size_t shown=0;bool limited=false;std::size_t threadNumber=0;for(const auto& thread:m_crashIps.threads){add("Reported thread "+std::to_string(threadNumber++),thread.triggered?"Reported triggered":"Reported thread",-58,ui::SuggestionKind::ReadOnlyText);for(const auto& frame:thread.frames){if(shown++>=512){limited=true;break;}const auto& image=m_crashIps.images[frame.imageIndex];std::ostringstream detail;detail<<safe(image.name)<<" · image offset 0x"<<std::hex<<frame.imageOffset;if(!frame.symbol.empty())detail<<" · "<<safe(frame.symbol);detail<<" · unverified";add("Reported frame",detail.str(),-58,ui::SuggestionKind::ReadOnlyText);}if(limited)break;}if(limited)add("Frame display limited","Only the first 512 frames are shown",-58,ui::SuggestionKind::ReadOnlyText);
+            } else if(m_crashIsApple) {
                 const auto safe=[](const std::string& value){std::string error;return editor::Document::canEditLosslessly(value,error) ? value : std::string("(unreadable text)");};
                 add("Apple crash report text","Unverified supplied text; no source navigation or symbolication",-58,ui::SuggestionKind::ReadOnlyText);
                 if(!m_crashApple.architecture.empty()) add("Reported code type",safe(m_crashApple.architecture),-58,ui::SuggestionKind::ReadOnlyText);
@@ -3188,6 +3196,7 @@ void Application::refreshModuleSuggestions() {
                 detail += m_coverageReport.incomplete ? " · incomplete report · may be stale" : " · report may be stale";
                 add("Imported line coverage", detail, -150, ui::SuggestionKind::ReadOnlyText);
                 if (counts.branchesCovered || counts.branchesUncovered || counts.branchesUnknown) add("Imported branches", std::to_string(counts.branchesCovered) + " covered · " + std::to_string(counts.branchesUncovered) + " uncovered · " + std::to_string(counts.branchesUnknown) + " no count" + (m_coverageReport.incomplete ? " · incomplete report · may be stale" : " · report may be stale"), -150, ui::SuggestionKind::ReadOnlyText);
+                if (m_coverageCobertura && m_coverageReport.incomplete) add("Cobertura import incomplete", "Some branch totals may be unavailable; unknown counts are not uncovered outcomes", -150, ui::SuggestionKind::ReadOnlyText);
                 if (m_coverageFilesMode) {
                     add("< Back to coverage lines", "Return to line results", -154);
                     for (std::size_t i = 0; i < m_coverageSummary.files.size(); ++i) {
@@ -4268,11 +4277,11 @@ void Application::applyModuleCommand() {
             if (!map.error.empty() || map.incomplete) { setCommandStatus(map.error.empty() ? "Source map exceeds limits" : map.error, true); return; }
             m_crashSourceMap = std::move(map); m_crashMapIdentity = std::move(identityLabel); m_crashMapInput = false; m_searchBar.open(ui::PromptKind::ModuleCommands); m_modulePage = 0; m_selectedSuggestion = -1; refreshSuggestions(); setCommandStatus(m_crashMapIdentity + "; frames are unverified", false); return;
         }
-        auto project = m_project; const bool allowApple=std::find(reviewed.requirements.begin(),reviewed.requirements.end(),"crash-apple-text-v1")!=reviewed.requirements.end(); const bool allowGdb=std::find(reviewed.requirements.begin(),reviewed.requirements.end(),"crash-gdb-text-v1")!=reviewed.requirements.end(); m_crashDump = {}; m_crashGdb={}; m_crashApple={}; m_crashIsGdb=false; m_crashIsApple=false; m_crashSourceMap = {}; m_crashMapIdentity.clear(); m_crashShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
+        auto project = m_project; const bool allowIps=std::find(reviewed.requirements.begin(),reviewed.requirements.end(),"crash-apple-ips-v1")!=reviewed.requirements.end(); const bool allowApple=std::find(reviewed.requirements.begin(),reviewed.requirements.end(),"crash-apple-text-v1")!=reviewed.requirements.end(); const bool allowGdb=std::find(reviewed.requirements.begin(),reviewed.requirements.end(),"crash-gdb-text-v1")!=reviewed.requirements.end(); m_crashDump = {}; m_crashGdb={}; m_crashApple={}; m_crashIps={}; m_crashIsGdb=false; m_crashIsApple=false; m_crashIsIps=false; m_crashSourceMap = {}; m_crashMapIdentity.clear(); m_crashShowing = true; m_modulePage = 0; m_selectedSuggestion = -1; m_pagedScroll = 0;
         m_crashCancel = std::make_shared<std::atomic_bool>(false); m_searchBar.open(ui::PromptKind::ModuleCommands);
-        m_crashFuture = std::async(std::launch::async, [project, path, allowGdb, allowApple, cancel = m_crashCancel] {
+        m_crashFuture = std::async(std::launch::async, [project, path, allowGdb, allowApple, allowIps, cancel = m_crashCancel] {
             CrashInspectionResult result; std::string bytes;
-            try { if (project.readFileBounded(path, bytes, result.dump.error, 128U * 1024U * 1024U, cancel.get()) && !cancel->load()) { if(!std::string_view(bytes).starts_with("MDMP") && allowApple && (bytes.find("Exception Type:")!=std::string::npos || bytes.find("Code Type:")!=std::string::npos)){result.isApple=true;result.apple=modules::parseAppleCrashReport(bytes);} else if(allowGdb && !std::string_view(bytes).starts_with("MDMP")){result.isGdb=true;result.gdb=modules::parseGdbBacktrace(bytes);} else result.dump=modules::readCrashDump(bytes,512,512); } }
+            try { if (project.readFileBounded(path, bytes, result.dump.error, 128U * 1024U * 1024U, cancel.get()) && !cancel->load()) { if(allowIps && bytes.find_first_not_of(" \t\r\n")!=std::string::npos && bytes[bytes.find_first_not_of(" \t\r\n")]=='{'){result.isIps=true;result.ips=modules::parseAppleIpsReport(bytes);} else if(!std::string_view(bytes).starts_with("MDMP") && allowApple && (bytes.find("Exception Type:")!=std::string::npos || bytes.find("Code Type:")!=std::string::npos)){result.isApple=true;result.apple=modules::parseAppleCrashReport(bytes);} else if(allowGdb && !std::string_view(bytes).starts_with("MDMP")){result.isGdb=true;result.gdb=modules::parseGdbBacktrace(bytes);} else result.dump=modules::readCrashDump(bytes,512,512); } }
             catch (const std::exception& e) { result.dump.error = e.what(); }
             return result;
         });
@@ -5332,7 +5341,7 @@ void Application::applyModuleCommand() {
         m_toolchainSaveFuture=std::async(std::launch::async,[project,file,draft,cancel]() mutable {std::string e;if(!project.writeFile(file,draft.updated,e,&draft.original,false,cancel.get()) && e.empty()) e="Could not save target profiles";return e;});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Saving target profiles…",false);return;
     }
     if (choice == -193 && m_toolchainShowing) { if(m_targetConfigureFuture.valid()){if(m_targetConfigureCancel)m_targetConfigureCancel->store(true);setCommandStatus("Cancellation requested; build files may already be changed",true);return;} if(m_targetConfigureStage){m_targetConfigureStage=0;} else if(m_toolchainSaveFuture.valid()) {if(m_toolchainSaveCancel)m_toolchainSaveCancel->store(true);setCommandStatus("Cancelling target save; it may already have completed",true);return;} else if(m_toolchainEditMode){m_toolchainEditMode=0;m_toolchainDraft={};} else if (m_toolchainSelected) m_toolchainSelected.reset(); else { if (m_toolchainCancel) m_toolchainCancel->store(true); m_toolchainShowing=false; m_toolchainProfiles.clear(); } m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
-    if (choice == -220 && m_crashShowing && !m_crashIsGdb && !m_crashIsApple && !m_crashFuture.valid() && m_hasProject && m_project.root().generic_string() == m_crashRoot) { m_crashMapInput = true; m_searchBar.open(ui::PromptKind::ModuleCrashPath); setCommandStatus("Enter project-relative TSV or Breakpad .sym; mappings are unverified", false); return; }
+    if (choice == -220 && m_crashShowing && !m_crashIsGdb && !m_crashIsApple && !m_crashIsIps && !m_crashFuture.valid() && m_hasProject && m_project.root().generic_string() == m_crashRoot) { m_crashMapInput = true; m_searchBar.open(ui::PromptKind::ModuleCrashPath); setCommandStatus("Enter project-relative TSV or Breakpad .sym; mappings are unverified", false); return; }
     if (choice == -57 && m_crashShowing) { if (m_crashCancel) m_crashCancel->store(true); m_crashDump = {}; m_crashShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if(choice==-403 && m_rustOwnershipShowing && m_rustRunStage==2 && !m_rustRunFuture.valid()) {
         if(!m_hasProject || m_project.root().generic_string()!=m_rustOwnershipRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_rustRunModule){setCommandStatus("Rust project or module changed",true);return;}
@@ -5822,7 +5831,7 @@ void Application::applyModuleCommand() {
         if (found->commands[static_cast<std::size_t>(choice)].action == "crash-dump-reader") {
             if (!m_hasProject) { setCommandStatus("Open a project first", true); return; }
             if (m_crashFuture.valid()) { setCommandStatus("A crash inspection is still finishing", false); return; }
-            m_crashMapInput = false; m_crashRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleCrashPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative minidump, GDB text or Apple crash text", false); return;
+            m_crashMapInput = false; m_crashRoot = m_project.root().generic_string(); m_searchBar.open(ui::PromptKind::ModuleCrashPath); clearCommandFeedback(); setCommandStatus("Enter a project-relative minidump, GDB or Apple crash report", false); return;
         }
         if (found->commands[static_cast<std::size_t>(choice)].action == "run-rust-ownership") {
             if(!m_hasProject){setCommandStatus("Open a Rust project first",true);return;}if(m_rustRunFuture.valid() || m_rustOwnershipFuture.valid()){setCommandStatus("A Rust operation is still finishing",false);return;}
@@ -6598,8 +6607,9 @@ void Application::pollModules() {
         const bool cancelled = m_crashCancel && m_crashCancel->load(); m_crashCancel.reset(); CrashInspectionResult result;
         try { result = m_crashFuture.get(); } catch (const std::exception& e) { result.dump.error = e.what(); }
         if (!cancelled && m_hasProject && m_project.root().generic_string() == m_crashRoot && m_crashShowing && m_searchBar.isOpen() && m_searchBar.kind() == ui::PromptKind::ModuleCommands) {
-            m_crashIsGdb=result.isGdb; m_crashIsApple=result.isApple; m_crashApple=std::move(result.apple); m_crashGdb=std::move(result.gdb); m_crashDump=std::move(result.dump);
-            if(m_crashIsApple) {if(!m_crashApple.error.empty()) setCommandStatus("Crash inspection failed: "+m_crashApple.error,true);else setCommandStatus(m_crashApple.incomplete?"Apple crash text incomplete; supplied frames are unverified":"Apple crash text is unverified; no source navigation",m_crashApple.incomplete);}
+            m_crashIsGdb=result.isGdb; m_crashIsApple=result.isApple; m_crashIsIps=result.isIps; m_crashIps=std::move(result.ips); m_crashApple=std::move(result.apple); m_crashGdb=std::move(result.gdb); m_crashDump=std::move(result.dump);
+            if(m_crashIsIps) {if(!m_crashIps.error.empty()) setCommandStatus("Crash inspection failed: "+m_crashIps.error,true);else setCommandStatus(m_crashIps.incomplete?"IPS incomplete; data is unverified and may be sensitive":"IPS data is unverified and may be sensitive",m_crashIps.incomplete);}
+            else if(m_crashIsApple) {if(!m_crashApple.error.empty()) setCommandStatus("Crash inspection failed: "+m_crashApple.error,true);else setCommandStatus(m_crashApple.incomplete?"Apple crash text incomplete; supplied frames are unverified":"Apple crash text is unverified; no source navigation",m_crashApple.incomplete);}
             else if(m_crashIsGdb) {if(!m_crashGdb.error.empty()) setCommandStatus("Crash inspection failed: "+m_crashGdb.error,true);else setCommandStatus(m_crashGdb.incomplete?"GDB text incomplete; supplied frames are unverified":"GDB text is unverified; no source navigation",m_crashGdb.incomplete);}
             else if (!m_crashDump.error.empty()) setCommandStatus("Crash inspection failed: " + m_crashDump.error, true);
             else setCommandStatus(m_crashDump.incomplete ? "Dump incomplete; frame candidates are heuristic" : "Frame candidates are heuristic; no symbolication or source navigation", m_crashDump.incomplete);
@@ -12147,7 +12157,7 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     case ui::PromptKind::ModuleVisualPath: state.commandPlaceholder = m_visualConfigured && m_visualConfigPath.empty() ? "Visual configuration JSON path..." : m_visualBaseline.empty() ? "Baseline PNG path..." : "Candidate PNG path..."; break;
     case ui::PromptKind::ModuleSqlExportPath: state.commandPlaceholder = "New project-relative CSV path..."; break;
     case ui::PromptKind::ModuleSqlPath: state.commandPlaceholder = m_sqlBound && !m_sqlDatabase.empty() ? "Project-relative typed bindings JSON..." : "Project-relative SQLite database..."; break;
-    case ui::PromptKind::ModuleCrashPath: state.commandPlaceholder = m_crashMapInput ? "Project-relative TSV or Breakpad .sym..." : "Project-relative minidump, GDB or Apple text..."; break;
+    case ui::PromptKind::ModuleCrashPath: state.commandPlaceholder = m_crashMapInput ? "Project-relative TSV or Breakpad .sym..." : "Project-relative minidump, GDB or Apple report..."; break;
     case ui::PromptKind::ModuleRustPath: state.commandPlaceholder = m_rustRunStage==1 ? "Absolute Cargo executable..." : "Project-relative Rust JSON diagnostics..."; break;
     case ui::PromptKind::ModulePreview: state.commandPlaceholder = "Review module before installing..."; break;
     case ui::PromptKind::ModuleCatalog: state.commandPlaceholder = "Search GitHub modules..."; break;

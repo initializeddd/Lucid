@@ -7,10 +7,9 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCES = (
-    "ApiRequests.cpp", "Coverage.cpp", "Cobertura.cpp", "DiagramPreview.cpp",
-    "GitHubPullRequests.cpp", "SqlWorkbench.cpp", "DesignTokens.cpp", "CTestRunner.cpp",
-)
+# These need a target-specific libcurl development package, which a standalone
+# cross-compiler installation does not necessarily provide.
+CURL_SOURCES = {"ApiTransport.cpp", "ExternalLinks.cpp", "Registry.cpp"}
 
 
 def main():
@@ -21,10 +20,16 @@ def main():
     compiler = shutil.which(args.compiler)
     if not compiler:
         parser.error("MinGW compiler not found: " + args.compiler)
-    includes = ("src", "third_party/sqlite", "third_party/md4c", "third_party/sha2")
+    includes = ("src", "third_party/sqlite", "third_party/md4c", "third_party/sha2",
+                "third_party/picosha2", "third_party/stb")
+    sources = sorted(path for path in (ROOT / "src/modules").glob("*.cpp")
+                     if path.name not in CURL_SOURCES)
+    if not sources:
+        parser.error("No module translation units found")
     command = [compiler, "-std=c++20", *("-I" + str(ROOT / path) for path in includes),
-               "-fsyntax-only", *(str(ROOT / "src/modules" / source) for source in SOURCES)]
-    print("Checking eight module translation units; this does not link or run Lucid.", flush=True)
+               "-fsyntax-only", *(str(path) for path in sources)]
+    print(f"Checking {len(sources)} module translation units; three libcurl sources are excluded. "
+          "This does not link or run Lucid.", flush=True)
     return subprocess.run(command, cwd=ROOT, check=False).returncode
 
 

@@ -1667,7 +1667,7 @@ struct ApplicationInteractionTest {
             put(56, 1, 4); put(60, 42, 4); put(84, 0x1234, 8); put(108, 42, 4); put(116, 0xc0000005, 4); put(132, 0xdeadbeef, 8);
             { std::ofstream out(temp / "nested" / "crash.dmp", std::ios::binary); out.write(dump.data(), static_cast<std::streamsize>(dump.size())); }
             app.m_moduleRoot = temp / "crash-modules"; std::string error;
-            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-apple-text-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
+            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-apple-text-v1","crash-apple-ips-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
             if (!modules::install(app.m_moduleRoot, "crash", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "crash", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 490;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleCrashPath) return 491;
@@ -1722,6 +1722,13 @@ struct ApplicationInteractionTest {
             if(app.m_crashFuture.valid() || !app.m_crashIsApple || !app.m_crashApple.incomplete || app.m_crashApple.threads.size()!=1) return 1106;
             bool sawApple=false,sawAppleFrame=false,sawAppleIncomplete=false,sawAppleMap=false;for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions){sawApple|=row.path=="Apple crash report text";sawAppleFrame|=row.path=="Frame #0" && row.detail.find("unverified")!=std::string_view::npos;sawAppleIncomplete|=row.path=="Incomplete crash report";}sawAppleMap|=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220)!=app.m_moduleChoices.end();}
             if(!sawApple || !sawAppleFrame || !sawAppleIncomplete || sawAppleMap) return 1107;
+            app.m_crashShowing=false; app.m_modulePage=0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand();
+            { std::ofstream out(temp / "nested" / "report.ips"); out << R"({"bug_type":"309"})" << "\n" << R"({"cpuType":"ARM-64","usedImages":[{"name":"App","base":4096,"size":256,"path":"/secret"}],"threads":[{"triggered":true,"frames":[{"imageIndex":0,"imageOffset":12,"symbol":"main"},{"imageIndex":9,"imageOffset":0}]}]})"; }
+            app.m_searchBar.setQuery("report.ips"); app.applyModuleCommand(); const auto ipsDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);while(app.m_crashFuture.valid() && std::chrono::steady_clock::now()<ipsDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_crashFuture.valid() || !app.m_crashIsIps || !app.m_crashIps.incomplete || app.m_crashIps.threads.size()!=1) return 1108;
+            bool sawIps=false,sawIpsFrame=false,sawIpsIncomplete=false,sawIpsMap=false,sawSecret=false;for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions){sawIps|=row.path=="Apple JSON crash report" && row.detail.find("sensitive")!=std::string_view::npos;sawIpsFrame|=row.path=="Reported frame" && row.detail.find("unverified")!=std::string_view::npos;sawIpsIncomplete|=row.path=="Incomplete crash report";sawSecret|=row.detail.find("/secret")!=std::string_view::npos;}sawIpsMap|=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220)!=app.m_moduleChoices.end();}
+            if(!sawIps || !sawIpsFrame || !sawIpsIncomplete || sawIpsMap || sawSecret) return 1109;
+            app.m_crashIsIps=false; std::filesystem::remove(temp / "nested" / "report.ips");
             app.m_crashIsApple=false; std::filesystem::remove(temp / "nested" / "apple.crash");
             app.m_crashIsGdb=false; std::filesystem::remove(temp / "nested" / "trace.txt");
             app.openFile("example.txt", false); std::filesystem::remove(temp / "nested" / "crash-map.tsv"); std::filesystem::remove(temp / "nested" / "crash.sym"); std::filesystem::remove(temp / "nested" / "crash-source.cpp");
@@ -2281,21 +2288,30 @@ struct ApplicationInteractionTest {
         {
             const auto oldRoot = app.m_moduleRoot; auto oldModules = app.m_modules; const auto oldSelected = app.m_moduleSelected;
             { std::ofstream source(temp / "nested" / "coverage-source.txt"); source << "one\ntwo\n"; }
-            { std::ofstream report(temp / "nested" / "coverage.xml"); report << R"(<coverage><sources><source>.</source></sources><packages><package><classes><class filename="coverage-source.txt"><lines><line number="1" hits="1"/><line number="2" hits="0"/></lines></class></classes></package></packages></coverage>)"; }
+            { std::ofstream report(temp / "nested" / "coverage.xml"); report << R"xml(<coverage><sources><source>.</source></sources><packages><package><classes><class filename="coverage-source.txt"><lines><line number="1" hits="1"/><line number="2" hits="0" branch="true" condition-coverage="50% (1/2)"/></lines></class></classes></package></packages></coverage>)xml"; }
             app.m_moduleRoot = temp / "cobertura-modules"; std::string error;
-            const std::string manifest = R"({"name":"Coverage XML","version":"1","requires":["coverage-cobertura-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Import","action":"coverage-cobertura"}]})";
+            const std::string manifest = R"({"name":"Coverage XML","version":"1","requires":["coverage-cobertura-v1","coverage-cobertura-branches-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Import","action":"coverage-cobertura"}]})";
             if (!modules::install(app.m_moduleRoot, "coverage-xml", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "coverage-xml", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 690;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleCoveragePath || app.m_searchBar.query() != "coverage.xml") return 691;
             app.applyModuleCommand(); const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
             while (app.m_coverageFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             if (app.m_coverageFuture.valid() || app.m_coverageReport.incomplete || app.m_coverageReport.lines.size() != 2 || app.m_coverageReport.lines[0].covered) return 692;
+            if(app.m_coverageReport.lines[0].branchesCovered!=1 || app.m_coverageReport.lines[0].branchesUncovered!=1 || app.m_coverageSummary.total.branchesCovered!=1 || app.m_coverageSummary.total.branchesUncovered!=1) return 1066;
+            bool branchSummary=false;for(std::size_t page=0;page<4;++page){app.m_modulePage=page;app.refreshSuggestions();branchSummary |= std::any_of(app.m_suggestions.begin(),app.m_suggestions.end(),[](const auto& item){return item.path=="Imported branches" && item.detail.find("1 covered · 1 uncovered")!=std::string_view::npos;});}if(!branchSummary)return 1067;
+            app.m_modulePage=0;app.refreshSuggestions();
             auto choice = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), 0);
             if (choice == app.m_moduleChoices.end()) { app.m_modulePage = 1; app.refreshSuggestions(); choice = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), 0); }
             if (choice == app.m_moduleChoices.end()) return 693;
             app.m_selectedSuggestion = static_cast<int>(choice - app.m_moduleChoices.begin()); app.applyModuleCommand();
             if (app.m_filePath != "coverage-source.txt" || app.m_document.cursorLine() != 1) return 694;
-            app.m_coverageShowing = false; app.openFile("example.txt", false); app.m_searchBar.close(); app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected;
+            app.m_coverageShowing = false; app.openFile("example.txt", false);
+            {std::ofstream report(temp/"nested"/"coverage.xml",std::ios::trunc);report << R"xml(<coverage><class filename="coverage-source.txt"><lines><line number="2" hits="1" branch="true" condition-coverage="50% (1/2)"/><line number="2" hits="1" branch="true" condition-coverage="100% (2/2)"/></lines></class></coverage>)xml";}
+            app.m_modulePage=0;app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();app.m_selectedSuggestion=0;app.applyModuleCommand();app.applyModuleCommand();
+            const auto conflictDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);while(app.m_coverageFuture.valid() && std::chrono::steady_clock::now()<conflictDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_coverageFuture.valid() || !app.m_coverageReport.incomplete || app.m_coverageReport.lines.size()!=1 || app.m_coverageReport.lines[0].branchesUnknown!=2) return 1068;
+            bool incompleteSeen=false;for(std::size_t page=0;page<4;++page){app.m_modulePage=page;app.refreshSuggestions();incompleteSeen |= std::any_of(app.m_suggestions.begin(),app.m_suggestions.end(),[](const auto& item){return item.path=="Cobertura import incomplete" && item.detail.find("unavailable")!=std::string_view::npos;});}if(!incompleteSeen)return 1069;
+            app.m_coverageShowing=false;app.m_searchBar.close(); app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected;
             std::filesystem::remove(temp / "nested" / "coverage-source.txt"); std::filesystem::remove(temp / "nested" / "coverage.xml");
         }
         {

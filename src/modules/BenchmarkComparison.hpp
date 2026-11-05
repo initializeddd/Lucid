@@ -36,7 +36,9 @@ struct BenchmarkComparisonEntry {
 struct BenchmarkComparison { std::vector<BenchmarkComparisonEntry> entries; };
 // On failure, clears run and sets error. Input is bounded to 4 MiB / 10,000 entries.
 [[nodiscard]] bool parseBenchmarkRun(std::string_view json, BenchmarkRun& run, std::string& error);
-// Threshold is a nonnegative percentage. A possible regression is an observed
+// Time measurements using ns, us, ms or s are compared in a common unit;
+// the entry retains each original value, unit and sample spread. Other unit
+// mismatches remain incomparable. Threshold is a nonnegative percentage. A possible regression is an observed
 // change, not statistical proof; repeated measurements are not inferred.
 [[nodiscard]] BenchmarkComparison compareBenchmarkRuns(const BenchmarkRun& baseline, const BenchmarkRun& candidate,
                                                         double thresholdPercent = 5.0);

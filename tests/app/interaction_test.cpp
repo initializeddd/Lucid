@@ -1595,12 +1595,18 @@ struct ApplicationInteractionTest {
             while (app.m_releaseNotesFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             if (!app.m_releaseNotesShowing || app.m_releaseNotesEntries.size() != 1 || app.m_releaseNotesEntries[0].selected) return 522;
             const auto chooseReleaseRow = [&](int choice) { for (std::size_t page=0;page<8;++page) { app.m_modulePage=page; app.refreshSuggestions(); auto row=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),choice); if (row!=app.m_moduleChoices.end()) { app.m_selectedSuggestion=static_cast<int>(row-app.m_moduleChoices.begin()); app.applyModuleCommand(); return true; } } return false; };
+            if (!chooseReleaseRow(-710) || app.m_searchBar.kind()!=ui::PromptKind::ModuleReleaseHeader) return 1110;
+            app.m_searchBar.setQuery("v1.2.3"); app.applyCommand(false);
+            if(app.m_releaseNotesVersion!="v1.2.3" || app.m_searchBar.kind()!=ui::PromptKind::ModuleCommands) return 1111;
+            if (!chooseReleaseRow(-711)) return 1112;
+            app.m_searchBar.setQuery("2026-11-05"); app.applyCommand(false);
+            if(app.m_releaseNotesDate!="2026-11-05") return 1113;
             if (!chooseReleaseRow(0)) return 523;
             if (!app.m_releaseNotesEntries[0].selected) return 523;
             if (!chooseReleaseRow(-197) || app.m_releaseNotesFilter!=1 || !chooseReleaseRow(-195) || !app.m_releaseNotesPreview || app.m_releaseNotesDraft.markdown.find("Improve release testing")==std::string::npos || !app.m_document.toUtf8().empty()) return 790;
             const auto reviewedDraft=app.m_releaseNotesDraft.markdown;
             if (!chooseReleaseRow(-73)) return 791;
-            if (app.m_searchBar.isOpen() || app.m_document.toUtf8().find("Improve release testing") == std::string::npos || app.m_document.toUtf8().find("# Release Draft") == std::string::npos) return 524;
+            if (app.m_searchBar.isOpen() || app.m_document.toUtf8().find("Improve release testing") == std::string::npos || app.m_document.toUtf8().find("# Release v1.2.3 — 2026-11-05") == std::string::npos) return 524;
             if (app.m_document.toUtf8()!=reviewedDraft) return 792;
             app.m_document = std::move(oldDocument); app.m_filePath = oldPath; app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected; app.m_project = std::move(oldProject); app.m_hasProject = oldHasProject; app.m_searchBar.close();
         }

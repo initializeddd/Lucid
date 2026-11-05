@@ -17,8 +17,8 @@ int main() {
     if (comparison.entries[0].assessment != BenchmarkAssessment::Incomparable) return 4;
     if (parseBenchmarkRun(R"({"measurements":[{"name":"x","unit":"s","direction":"lower","value":1},{"name":"x","unit":"s","direction":"lower","value":2}]})", b, error) || !b.measurements.empty()) return 5;
     if (parseBenchmarkRun(R"({"measurements":[{"name":"x","unit":"s","direction":"lower","value":-1}]})", b, error)) return 6;
-    b = a; b.measurements[0].unit = "ns"; comparison = compareBenchmarkRuns(a, b);
-    if (comparison.entries[0].assessment != BenchmarkAssessment::Incomparable || comparison.entries[0].baselineUnit != "ms" || comparison.entries[0].candidateUnit != "ns") return 7;
+    b = a; b.measurements[0].unit = "ns"; b.measurements[0].value = 150000000; comparison = compareBenchmarkRuns(a, b);
+    if (comparison.entries[0].assessment != BenchmarkAssessment::PossibleRegression || comparison.entries[0].baselineUnit != "ms" || comparison.entries[0].candidateUnit != "ns" || std::abs(comparison.entries[0].percentChange-50)>1e-9) return 7;
     const std::string google = R"({"context":{"host_name":"host","build":"release","environment":"linux","date":"today","num_cpus":8,"caches":[{"type":"Data"}]},"benchmarks":[
       {"name":"BM/a","run_name":"BM/a","run_type":"iteration","repetition_index":0,"real_time":10,"cpu_time":8,"time_unit":"ns"},
       {"name":"BM/a","run_name":"BM/a","run_type":"iteration","repetition_index":1,"real_time":14,"cpu_time":10,"time_unit":"ns"},
@@ -46,5 +46,14 @@ int main() {
     if(!parseBenchmarkRun(R"({"measurements":[{"name":"x","unit":"s","direction":"lower","samples":[0,1e200]}]})",b,error) || b.measurements[0].hasSampleSpread || !std::isfinite(b.measurements[0].value)) return 19;
     if(!parseBenchmarkRun(google,b,error) || !b.measurements[1].hasSampleSpread || b.measurements[1].sampleMin!=10 || b.measurements[1].sampleMax!=14 || std::abs(b.measurements[1].sampleStddev-std::sqrt(8.0))>1e-12) return 20;
     if(!parseBenchmarkRun(aggregateOnly,b,error) || b.measurements[0].hasSampleSpread) return 21;
+    if(!parseBenchmarkRun(base,a,error)) return 22;
+    b=a; b.measurements[0].unit="s"; b.measurements[0].value=0.1; comparison=compareBenchmarkRuns(a,b);
+    if(comparison.entries[0].assessment!=BenchmarkAssessment::WithinThreshold || std::abs(comparison.entries[0].percentChange)>1e-9 || comparison.entries[0].baseline!=100 || comparison.entries[0].candidate!=0.1) return 23;
+    b.measurements[0].unit="minutes"; comparison=compareBenchmarkRuns(a,b);
+    if(comparison.entries[0].assessment!=BenchmarkAssessment::Incomparable || comparison.entries[0].hasPercentChange) return 24;
+    b.measurements[0].unit="us"; b.measurements[0].value=120000; b.measurements[0].lowerIsBetter=false; comparison=compareBenchmarkRuns(a,b);
+    if(comparison.entries[0].assessment!=BenchmarkAssessment::Incomparable) return 25;
+    b=a; b.measurements[0].unit="us"; b.measurements[0].value=120000; b.context.machine="other"; comparison=compareBenchmarkRuns(a,b);
+    if(comparison.entries[0].assessment!=BenchmarkAssessment::Incomparable || comparison.entries[0].hasPercentChange) return 26;
     return 0;
 }

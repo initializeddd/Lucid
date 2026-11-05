@@ -621,6 +621,8 @@ private:
     modules::ReleaseNoteDraft m_releaseNotesDraft;
     bool m_releaseNotesPreview = false;
     int m_releaseNotesFilter = 0;
+    bool m_releaseNotesEditingDate = false;
+    std::string m_releaseNotesVersion, m_releaseNotesDate;
     std::string m_releaseNotesRoot, m_releaseNotesFile, m_releaseNotesModule;
     std::uint64_t m_releaseNotesRevision = 0, m_releaseNotesGeneration = 0;
     bool m_releaseNotesShowing = false;

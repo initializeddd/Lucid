@@ -43,5 +43,9 @@ int main() {
     if (!r.incomplete || !r.findings.empty()) return 22;
     r=auditHtml("<meta name='viewport' content='initial-scale=1; MAXIMUM-SCALE=.75'>");
     if (r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="viewport-zoom") return 23;
+    r=auditHtml("<html lang='  '>\n<div tabindex='+02'></div><button tabindex='1' disabled></button><span tabindex='0'></span><span tabindex='-1'></span></html>");
+    if (r.incomplete || r.findings.size()!=2 || r.findings[0].rule!="html-lang" || r.findings[1].rule!="positive-tabindex" || r.findings[1].line!=2) return 24;
+    r=auditHtml("<html lang='en'><div tabindex='1x'></div><div tabindex='1' hidden></div><div tabindex='1' inert></div><div tabindex='1' style='display:none'></div><input type='hidden' tabindex='1'><div tabindex='{{index}}'></div></html>");
+    if (!r.incomplete || !r.findings.empty()) return 25;
     return 0;
 }

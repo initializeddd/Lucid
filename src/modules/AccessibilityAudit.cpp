@@ -38,6 +38,21 @@ bool possiblyTabbableAriaHidden(const Tag& t) {
     }
     return formControl || ((t.name == "a" || t.name == "area") && t.attrs.count("href"));
 }
+// Positive tabindex overrides document order. The finding is advisory because
+// rendered visibility, scripting, and ancestor state are not available here.
+bool positiveTabindex(const Tag& t) {
+    if (t.attrs.count("hidden") || t.attrs.count("inert") || t.attrs.count("disabled") || t.attrs.count("style")) return false;
+    if (t.name == "input") {
+        const auto type = t.attrs.find("type");
+        if (type != t.attrs.end() && lower(trim(type->second)) == "hidden") return false;
+    }
+    const auto it = t.attrs.find("tabindex");
+    if (it == t.attrs.end()) return false;
+    auto value = trim(it->second);
+    if (!value.empty() && value.front() == '+') value.remove_prefix(1);
+    if (value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= '0' && c <= '9'; })) return false;
+    return std::any_of(value.begin(), value.end(), [](char c) { return c != '0'; });
+}
 // The viewport declaration is a list of literal key/value pairs. We deliberately
 // ignore expressions and duplicated keys, whose browser behavior can differ.
 bool viewportMayRestrictZoom(const Tag& t) {
@@ -137,6 +152,7 @@ AccessibilityAudit auditHtml(std::string_view html, std::size_t maxBytes, std::s
         if (t.closing) { if (t.name=="label" && labelDepth) --labelDepth; continue; }
         if (t.uncertain) continue;
         if (possiblyTabbableAriaHidden(t)) add(t, "aria-hidden-focus", "Element is aria-hidden but may remain keyboard focusable; check its rendered state.");
+        if (positiveTabindex(t)) add(t, "positive-tabindex", "Positive tabindex may create an unexpected keyboard focus order; check the rendered page.");
         if (viewportMayRestrictZoom(t)) add(t, "viewport-zoom", "Viewport settings may restrict users from zooming to 200%; verify browser behavior.");
         // ARIA ID references may point forward, so compare against the full parsed
         // source. Incomplete input and undecoded IDs could contain the target.
@@ -158,7 +174,11 @@ AccessibilityAudit auditHtml(std::string_view html, std::size_t maxBytes, std::s
             }
         }
         if (t.name=="label") { if (!t.self) ++labelDepth; continue; }
-        if (t.name=="html" && !t.attrs.count("lang")) add(t,"html-lang","HTML element has no lang attribute.");
+        if (t.name=="html") {
+            const auto lang=t.attrs.find("lang");
+            if (lang==t.attrs.end()) add(t,"html-lang","HTML element has no lang attribute.");
+            else if (trim(lang->second).empty()) add(t,"html-lang","HTML language is empty; specify the document language.");
+        }
         if (t.name=="img" && !t.attrs.count("alt") && !t.attrs.count("aria-label") && !t.attrs.count("aria-labelledby")) add(t,"image-alt","Image has no alt attribute or ARIA name.");
         if (t.name=="input" || t.name=="select" || t.name=="textarea") {
             auto type=t.attrs.find("type"); if (type!=t.attrs.end()) { auto v=lower(type->second); if (v=="hidden" || v=="submit" || v=="reset" || v=="button" || v=="image") continue; }

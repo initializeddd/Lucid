@@ -30,6 +30,15 @@ bool contextString(const editor::JsonValue& object, const char* key, std::string
     if (value->type != JsonType::String || value->stringValue.size() > 4096) return false;
     result = value->stringValue; return true;
 }
+// Time units are converted only when both sides use one of these exact,
+// unambiguous spellings. Other units (including rates) require exact matches.
+long double timeScale(std::string_view unit) {
+    if (unit == "ns") return 1.0e-9L;
+    if (unit == "us") return 1.0e-6L;
+    if (unit == "ms") return 1.0e-3L;
+    if (unit == "s") return 1.0L;
+    return 0.0L;
+}
 }
 bool parseBenchmarkRun(std::string_view json, BenchmarkRun& run, std::string& error) {
     run = {}; error.clear();
@@ -139,16 +148,19 @@ BenchmarkComparison compareBenchmarkRuns(const BenchmarkRun& baseline, const Ben
         if (duplicate.count(name)) entry.reason = "Duplicate measurement name";
         else if (x == old.end()) entry.assessment = BenchmarkAssessment::CandidateOnly;
         else if (y == current.end()) entry.assessment = BenchmarkAssessment::BaselineOnly;
-        else if (x->second->unit != y->second->unit || x->second->lowerIsBetter != y->second->lowerIsBetter) entry.reason = "Unit or direction differs";
+        else if ((x->second->unit != y->second->unit && (!timeScale(x->second->unit) || !timeScale(y->second->unit))) || x->second->lowerIsBetter != y->second->lowerIsBetter) entry.reason = "Unit or direction differs";
         else if (x->second->statistic != y->second->statistic) entry.reason = "Measurement statistics differ";
         else if (!std::isfinite(entry.baseline) || !std::isfinite(entry.candidate) || entry.baseline < 0 || entry.candidate < 0) entry.reason = "Invalid measurement value";
         else if (!contextKnown) entry.reason = "Machine, build, or environment context is missing";
         else if (!contextMatches) entry.reason = "Machine, build, or environment context differs";
         else if (entry.baseline == 0) entry.reason = "Percentage change is undefined for a zero baseline";
         else {
-            entry.percentChange = (entry.candidate / entry.baseline - 1) * 100;
-            if (!std::isfinite(entry.percentChange)) entry.reason = "Percentage change is out of range";
+            const auto oldScale = x->second->unit == y->second->unit ? 1.0L : timeScale(x->second->unit);
+            const auto newScale = x->second->unit == y->second->unit ? 1.0L : timeScale(y->second->unit);
+            const long double percent = ((static_cast<long double>(entry.candidate) / static_cast<long double>(entry.baseline)) * (newScale / oldScale) - 1.0L) * 100.0L;
+            if (!std::isfinite(percent) || std::abs(percent) > static_cast<long double>(std::numeric_limits<double>::max())) entry.reason = "Percentage change is out of range";
             else {
+                entry.percentChange = static_cast<double>(percent);
                 entry.hasPercentChange = true;
                 const auto worse = x->second->lowerIsBetter ? entry.percentChange : -entry.percentChange;
                 entry.assessment = worse > thresholdPercent ? BenchmarkAssessment::PossibleRegression :

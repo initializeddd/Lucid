@@ -139,7 +139,7 @@ outside the project, and other build inputs or the executable can change after r
 
 Release-Note Builder reads saved project tasks and up to 50 recent local Git commits.
 Open a Markdown document, choose entries in the module, filter to selected items,
-and preview the generated Markdown before inserting the exact reviewed draft at
+optionally set a release version and date, and preview the generated Markdown before inserting the exact reviewed draft at
 the cursor. The inserted draft is editable. No entry is selected automatically. Conventional `feat:` and
 `fix:` subjects are grouped as features and fixes; other commits are changes. Git
 must be installed for history, and the module reports unavailable or truncated
@@ -309,7 +309,8 @@ be selected to navigate to their source. It checks a limited set of possible
 missing HTML language, image alternative text and form-control labels, plus
 repeated literal IDs that can make label and ARIA references ambiguous, possible
 keyboard focus on elements marked aria-hidden, and literal viewport settings that
-may restrict zoom below 200%. It also checks whether common ARIA ID references
+may restrict zoom below 200%. It flags empty document language and positive
+`tabindex` values that may create an unexpected focus order. It also checks whether common ARIA ID references
 resolve within fully parsed literal HTML, including forward references. Verify
 these findings against the rendered page: ancestor state, CSS and scripts can
 change focusability. It is a heuristic, not an accessibility conformance test.
@@ -405,9 +406,11 @@ shown as incomparable. A change beyond 5% is a possible regression or improvemen
 not a statistical conclusion. Filter to possible regressions or incomparable
 measurements and select a result to inspect each side's unit, direction, statistic
 and sample count. Unknown sample counts are labelled; no significance or noise
-estimate is implied. Google Benchmark repetitions are averaged; raw
-samples, unit conversions and significance tests are not shown. The module does
-not run benchmarks.
+estimate is implied. Google Benchmark repetitions are averaged; sample ranges
+and standard deviation are shown when available. Time units `ns`, `us`, `ms`
+and `s` are converted for comparison while the original values and units remain
+visible. Other mismatched units remain incomparable. Significance tests are not
+performed, and the module does not run benchmarks.
 
 Binary Inspector reads a project-local file of up to 128 MiB without executing it.
 It shows architecture, sections, available symbols and linked libraries for ELF,

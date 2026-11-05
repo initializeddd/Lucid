@@ -43,6 +43,7 @@ enum class PromptKind {
     ModuleCommands,
     ModuleImport,
     ModuleSnippetName,
+    ModuleReleaseHeader,
     ModuleCMakePath,
     ModuleCoveragePath,
     ModuleBenchmarkPath,

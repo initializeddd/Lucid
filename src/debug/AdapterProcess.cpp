@@ -154,9 +154,9 @@ bool AdapterProcess::start(const std::string& executable, const std::vector<std:
 #if defined(__OpenBSD__)
     // OpenBSD can report spawn success even when exec later fails in the child.
     // Check PATH first so a missing adapter can be reported to the user.
-    std::string resolvedExecutable;
+    bool found = false;
     if (executable.find('/') != std::string::npos) {
-        if (::access(executable.c_str(), X_OK) == 0) resolvedExecutable = executable;
+        found = ::access(executable.c_str(), X_OK) == 0;
     } else {
         const char* path = std::getenv("PATH");
         std::string_view paths = path ? path : "/bin:/usr/bin";
@@ -164,12 +164,12 @@ bool AdapterProcess::start(const std::string& executable, const std::vector<std:
             const auto end = paths.find(':');
             const auto directory = paths.substr(0, end);
             const auto candidate = (directory.empty() ? std::string(".") : std::string(directory)) + "/" + executable;
-            if (::access(candidate.c_str(), X_OK) == 0) { resolvedExecutable = candidate; break; }
+            if (::access(candidate.c_str(), X_OK) == 0) { found = true; break; }
             if (end == std::string_view::npos) break;
             paths.remove_prefix(end + 1);
         } while (true);
     }
-    if (resolvedExecutable.empty()) { error = "Could not find debug adapter: " + executable; return false; }
+    if (!found) { error = "Could not find debug adapter: " + executable; return false; }
 #endif
     int sockets[2]; if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) { error = "Could not create debugger connection"; return false; }
     for (int fd : sockets) (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -183,12 +183,7 @@ bool AdapterProcess::start(const std::string& executable, const std::vector<std:
     posix_spawn_file_actions_addclose(&actions, sockets[0]); posix_spawn_file_actions_addclose(&actions, sockets[1]);
     std::vector<std::string> values; values.push_back(executable); values.insert(values.end(), arguments.begin(), arguments.end());
     std::vector<char*> argv; for (auto& v : values) argv.push_back(v.data()); argv.push_back(nullptr);
-    pid_t child = -1;
-#if defined(__OpenBSD__)
-    const int rc = posix_spawn(&child, resolvedExecutable.c_str(), &actions, nullptr, argv.data(), environ);
-#else
-    const int rc = posix_spawnp(&child, executable.c_str(), &actions, nullptr, argv.data(), environ);
-#endif
+    pid_t child = -1; const int rc = posix_spawnp(&child, executable.c_str(), &actions, nullptr, argv.data(), environ);
     posix_spawn_file_actions_destroy(&actions); ::close(sockets[1]);
     if (rc != 0) { ::close(sockets[0]); error = "Could not start debug adapter: " + std::string(std::strerror(rc)); return false; }
     const int flags = fcntl(sockets[0], F_GETFL, 0);

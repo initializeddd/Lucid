@@ -166,6 +166,9 @@ struct FrameState {
     const VisualReviewPreview* visualPreview = nullptr;
     bool webPreviewMode = false;
     bool shaderPreviewMode = false;
+    bool visualMaskMode = false, visualMaskSelected = false;
+    modules::VisualMask visualMask{};
+    std::size_t visualMaskSourceWidth=0, visualMaskSourceHeight=0;
     bool diagramPreviewVisible = false;
     double diagramZoom = 1.0, diagramPanX = 0.0, diagramPanY = 0.0;
     std::span<const modules::DiagramPositionedNode> diagramNodes;

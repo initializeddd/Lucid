@@ -6,7 +6,8 @@
     "visual-regression-review-v1",
     "visual-regression-config-v1",
     "visual-review-crop-v1",
-    "visual-config-edit-v1"
+    "visual-config-edit-v1",
+    "visual-mask-draw-v1"
   ],
   "permissions": {
     "project": true,

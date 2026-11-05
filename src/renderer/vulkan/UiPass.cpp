@@ -4,6 +4,7 @@
 #include "editor/syntax/Syntax.hpp"
 #include "ui/Overlay.hpp"
 #include "ui/Welcome.hpp"
+#include "ui/VisualMaskSelection.hpp"
 #include "renderer/vulkan/Device.hpp"
 #include "renderer/vulkan/VulkanCommon.hpp"
 #include "text/font/FontAtlas.hpp"
@@ -499,7 +500,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
     editorCaretRects.reserve(8);
     std::vector<WelcomeRectSpec> diagnosticRects;
     diagnosticRects.reserve(24);
-    std::vector<WelcomeRectSpec> overlayRects;
+    std::vector<WelcomeRectSpec> overlayRects, visualMaskRects;
     std::vector<WelcomeRectSpec> diagramRects;
     std::vector<TextVertex> diagramVertices;
     VkRect2D diagramScissor = fullScissor;
@@ -1028,7 +1029,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             const float x0 = inset, y0 = inset, x1 = viewportWidth - inset, y1 = viewportHeight - inset;
             if (x1 > x0 + 120.0F * contentScale && y1 > y0 + 120.0F * contentScale) {
                 addRect({x0, y0, x1, y1}, 8.0F * contentScale, contentScale, 0.99F, ui::theme::kSurface, ui::theme::kBorder);
-                appendText(vertices, state.shaderPreviewMode ? "Shader preview · GPU-rendered snapshot · Escape to close" : state.webPreviewMode ? "Web preview · snapshot · Escape to close" : "Visual review · preview · Escape to close", x0 + 16.0F * contentScale, y0 + 30.0F * contentScale, normalText);
+                appendText(vertices, state.shaderPreviewMode ? "Shader preview · GPU-rendered snapshot · Escape to close" : state.webPreviewMode ? "Web preview · snapshot · Escape to close" : state.visualMaskMode ? "Drag candidate · Enter reviews mask · Escape cancels" : "Visual review · preview · Escape to close", x0 + 16.0F * contentScale, y0 + 30.0F * contentScale, normalText);
                 const std::array<const modules::VisualImage*, 3> images{&state.visualPreview->baseline, &state.visualPreview->candidate, &state.visualPreview->difference};
                 const std::array<const char*, 3> labels{"Baseline", "Candidate", "Difference"};
                 const float gap = 12.0F * contentScale, top = y0 + 62.0F * contentScale;
@@ -1043,6 +1044,15 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                     const float startX = left + (cellWidth - image.width * scale) * 0.5F;
                     const float startY = top + (cellHeight - image.height * scale) * 0.5F;
                     previewQuads.push_back({startX, startY, startX + image.width * scale, startY + image.height * scale, state.webPreviewMode ? 1 : n});
+                    if(state.visualMaskMode && state.visualMaskSelected && n==1 && state.visualMaskSourceWidth && state.visualMaskSourceHeight) {
+                        const auto fitted=ui::visualReviewPaneRect(logicalWidth,logicalHeight,1,image.width,image.height); ui::VisualPreviewRect overlay;
+                        if(ui::visualMaskOverlay(fitted,state.visualMaskSourceWidth,state.visualMaskSourceHeight,{0,0,state.visualMaskSourceWidth,state.visualMaskSourceHeight},state.visualMask,overlay)) {
+                            const float ax=static_cast<float>(overlay.x)*contentScale, ay=static_cast<float>(overlay.y)*contentScale, bx=static_cast<float>(overlay.x+overlay.width)*contentScale, by=static_cast<float>(overlay.y+overlay.height)*contentScale, stroke=std::max(2.0F,2.0F*contentScale);
+                            const auto edge=[&](float l,float t,float r,float b) { visualMaskRects.push_back(WelcomeRectSpec{l,t,r,b,0,0,0,1,ui::theme::kPrimary,ui::theme::kPrimary}); };
+                            edge(ax,ay,bx,ay+stroke);edge(ax,by-stroke,bx,by);edge(ax,ay,ax+stroke,by);edge(bx-stroke,ay,bx,by);
+                        }
+                    }
+
                 }
             }
         }
@@ -3190,6 +3200,8 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
             vkCmdDraw(commandBuffer, 6, 1, static_cast<std::uint32_t>(previewFirst + i * 6), 0);
         }
     }
+
+    for (const auto& spec:visualMaskRects) { RectPushConstants push{}; fillRectPushConstants(push,spec.x0,spec.y0,spec.x1,spec.y1,spec.radius,spec.borderWidth,spec.blur,spec.opacity,spec.fill,spec.border); drawRect(commandBuffer,push); }
 
     if (state.diagramPreviewVisible && diagramScissor.extent.width && diagramScissor.extent.height) {
         vkCmdSetScissor(commandBuffer,0,1,&diagramScissor);

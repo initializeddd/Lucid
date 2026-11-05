@@ -149,6 +149,8 @@ def collect(owner):
             raise ValueError(f"Benchmark samples require project access and benchmark comparison support: {path}")
         if "log-json-lines-v1" in requirements and (not permissions["project"] or "log-correlation-v1" not in requirements or not any(command.get("action") == "log-correlation-json" for command in commands)):
             raise ValueError(f"JSON log correlation requires project access and log correlation support: {path}")
+        if "visual-mask-draw-v1" in requirements and (not permissions["project"] or "visual-config-edit-v1" not in requirements or not any(command.get("action") == "compare-visual-configured" for command in commands)):
+            raise ValueError(f"Drawing visual masks requires configured visual editing: {path}")
         if "visual-config-edit-v1" in requirements and (not permissions["project"] or "visual-regression-config-v1" not in requirements or not any(command.get("action") == "compare-visual-configured" for command in commands)):
             raise ValueError(f"Visual config editing requires project access and configured review: {path}")
         if "visual-review-crop-v1" in requirements and (not permissions["project"] or "visual-regression-review-v1" not in requirements or not any(command.get("action") in ("compare-visual-images", "compare-visual-configured") for command in commands)):

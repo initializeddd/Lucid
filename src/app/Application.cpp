@@ -581,6 +581,12 @@ void Application::run() {
 void Application::handleKey(const input::KeyEvent& event) {
     if (m_visualVisible) {
         if (event.action == input::KeyAction::Press || event.action == input::KeyAction::Repeat) {
+            if (m_visualMaskMode && event.key==input::Key::Enter && event.action==input::KeyAction::Press) {
+                if(!m_visualMaskSelected || m_visualMaskDragging) {setStatus("Draw a mask first",true);return;}
+                modules::VisualConfigChange change{}; change.operation=modules::VisualConfigOperation::AddMask; change.mask=m_visualMask;
+                m_visualVisible=false; m_visualMaskMode=false; m_visualMaskDragging=false; m_visualMaskSelected=false; prepareVisualConfigChange(change); return;
+            }
+            if (m_visualMaskMode && event.key==input::Key::Escape) {m_visualVisible=false;m_visualMaskMode=false;m_visualMaskDragging=false;m_visualMaskSelected=false;setCommandStatus("Mask selection cancelled",false);return;}
             if (event.key==input::Key::Escape) { if(m_visualCropCancel) m_visualCropCancel->store(true); m_visualVisible=false; m_visualCropMode=false; m_visualCropPreview={}; m_webViewActive=false; m_shaderPreviewViewActive=false; setStatus("Preview closed",false); }
             else if (m_visualCropMode && event.key==input::Key::Zero) { if(m_visualCropCancel) m_visualCropCancel->store(true); m_visualCropMode=false; m_visualCropPreview={}; setStatus("Overview · crop view closed",false); }
             else if (m_visualCropMode && m_visualReview && !m_visualCropFuture.valid()) {
@@ -1577,7 +1583,14 @@ void Application::selectAllText() {
 
 void Application::handleMouseButton(const input::MouseButtonEvent& event) {
     if (m_diagramPreviewVisible) { if (event.button==input::MouseButton::Left || event.button==input::MouseButton::Middle) { if (event.action==input::KeyAction::Press && std::isfinite(event.x) && std::isfinite(event.y)) { m_diagramDragging=true; m_diagramDragX=event.x; m_diagramDragY=event.y; } else if (event.action==input::KeyAction::Release) m_diagramDragging=false; } return; }
-    if (m_visualVisible) return;
+    if (m_visualVisible) {
+        if(m_visualMaskMode && event.button==input::MouseButton::Left) {
+            const float zoom=m_uiZoom>0?m_uiZoom:1.0F;
+            if(event.action==input::KeyAction::Press && m_visualReview) {int width=0,height=0;uiSize(width,height); const auto& image=m_visualPreview.candidate; auto rect=ui::visualReviewPaneRect(width,height,1,image.width,image.height); ui::VisualPreviewPoint point; if(ui::visualPreviewSourcePoint(rect,image.width,image.height,event.x/zoom,event.y/zoom,point)) {m_visualMaskFitted=rect;m_visualMaskStartX=event.x/zoom;m_visualMaskStartY=event.y/zoom;m_visualMaskDragging=true;m_visualMaskSelected=false;updateVisualMaskDrag(event.x,event.y);} }
+            else if(event.action==input::KeyAction::Release && m_visualMaskDragging) {updateVisualMaskDrag(event.x,event.y);m_visualMaskDragging=false;if(!m_visualMaskSelected)setStatus("Drag inside the candidate image",true);}
+        }
+        return;
+    }
     if (m_gitBranchFuture.valid()) return;
     if (event.action == input::KeyAction::Press) m_completionOpen = false;
     if (event.button == input::MouseButton::Left &&
@@ -1729,7 +1742,7 @@ void Application::handleMouseButton(const input::MouseButtonEvent& event) {
 
 void Application::handleMouseMove(const input::MouseMoveEvent& event) {
     if (m_diagramPreviewVisible) { if (m_diagramDragging && std::isfinite(event.x) && std::isfinite(event.y)) { int width=0,height=0; m_window.windowSize(width,height); if (width>0 && height>0) { m_diagramPanX=std::clamp(m_diagramPanX+(event.x-m_diagramDragX)/width,-0.95,0.95); m_diagramPanY=std::clamp(m_diagramPanY+(event.y-m_diagramDragY)/height,-0.95,0.95); } m_diagramDragX=event.x; m_diagramDragY=event.y; } return; }
-    if (m_visualVisible) return;
+    if (m_visualVisible) {if(m_visualMaskMode && m_visualMaskDragging) updateVisualMaskDrag(event.x,event.y);return;}
     if (m_commandSelecting && m_searchBar.isOpen()) {
         (void)placeCommandCaretAt(event.x, event.y, true, true);
         return;
@@ -2849,7 +2862,7 @@ void Application::refreshModuleSuggestions() {
             } else { if(std::find(m.requirements.begin(),m.requirements.end(),"toolchain-target-edit-v1")!=m.requirements.end()) add("Add target…","Review before saving",-250); if (m_toolchainProfiles.empty()) add("No profiles", "Add profiles to the selected JSON file",-194,ui::SuggestionKind::ReadOnlyText); for (std::size_t i=0;i<m_toolchainProfiles.size();++i) add(safe(m_toolchainProfiles[i].name),safe(m_toolchainProfiles[i].targetTriple) + " · select for details",static_cast<int>(i)); }
         } else if (m.enabled && m_svdShowing) {
             add(m_svdSelected ? "< Back to registers" : "< Back to module commands", "", -221);
-            add("Declared metadata only", "No hardware access; peripheral arrays, derived fields and nested or derived clusters may be missing", -222, ui::SuggestionKind::ReadOnlyText);
+            add("Declared metadata only", "No hardware access; peripheral overrides, arrays, derived fields and nested clusters may be missing", -222, ui::SuggestionKind::ReadOnlyText);
             const auto safe=[](const std::string& v) { std::string e; return v.size()<=1024 && std::none_of(v.begin(),v.end(),[](unsigned char c){return c<32 || c==127;}) && editor::Document::canEditLosslessly(v,e) ? v : std::string("(unreadable name)"); };
             if (m_svdFuture.valid()) add("Reading SVD…", "Escape cancels", -222, ui::SuggestionKind::ReadOnlyText);
             else if (!m_svdRegisters.error.empty()) add("SVD inspection failed", safe(m_svdRegisters.error), -222, ui::SuggestionKind::ReadOnlyText);
@@ -3667,7 +3680,7 @@ void Application::refreshModuleSuggestions() {
         } else if (m.enabled && m_visualShowing) {
             add("< Back to module commands", "", -90);
             if (m_visualConfigStage) {
-                if (m_visualConfigStage==1) { add("Add mask…", "Enter x y width height in source pixels", -307); add("Remove mask…", "Enter a one-based mask number", -308); add("Change threshold…", "Enter a value from 0 to 255", -309); add("Cancel config edit", "No document changes", -311); }
+                if (m_visualConfigStage==1) { if(std::find(m.requirements.begin(),m.requirements.end(),"visual-mask-draw-v1")!=m.requirements.end()) add("Draw mask on candidate…", "Drag to select source pixels, then Enter to review", -313); add("Add mask…", "Enter x y width height in source pixels", -307); add("Remove mask…", "Enter a one-based mask number", -308); add("Change threshold…", "Enter a value from 0 to 255", -309); add("Cancel config edit", "No document changes", -311); }
                 else if (m_visualConfigStage==3 || m_visualConfigStage==5) add("Reviewing configuration…", "Escape cancels", -93, ui::SuggestionKind::ReadOnlyText);
                 else if (m_visualConfigStage==4) {
                     add("Configuration draft", "JSON formatting will be normalized; screenshot files are not changed", -93, ui::SuggestionKind::ReadOnlyText);
@@ -4150,9 +4163,7 @@ void Application::applyModuleCommand() {
             else if(m_visualConfigOperation==1 && numbers.size()==1 && numbers[0]>0) { change.operation=modules::VisualConfigOperation::RemoveMask; change.index=numbers[0]-1; }
             else if(m_visualConfigOperation==2 && numbers.size()==1 && numbers[0]<=255) { change.operation=modules::VisualConfigOperation::SetThreshold; change.threshold=static_cast<unsigned>(numbers[0]); }
             else {setCommandStatus("Invalid mask or threshold values",true);return;}
-            if(m_visualConfigFuture.valid() || m_visualConfigApplyFuture.valid()) {setCommandStatus("Previous edit is still finishing",false);return;}
-            m_visualConfigChange=change; auto project=m_project; auto review=m_visualConfigReview; auto original=m_visualConfigOriginal; m_visualConfigCancel=std::make_shared<std::atomic_bool>(false); m_visualConfigStage=3; m_modulePage=0; m_selectedSuggestion=-1; m_searchBar.open(ui::PromptKind::ModuleCommands); m_visualConfigGeneration=m_searchBar.generation();
-            m_visualConfigFuture=std::async(std::launch::async,[project,review,original,change,cancel=m_visualConfigCancel] { VisualConfigResult result; if(review->screenshotsStillCurrent(project,result.error,cancel.get())) (void)modules::prepareVisualConfigDraft(original,review->baselineImage(),review->candidateImage(),change,result.draft,result.error,cancel.get()); return result; }); refreshSuggestions(); setCommandStatus("Preparing config draft… Escape cancels",false); return;
+            m_visualConfigFromDrag=false; prepareVisualConfigChange(change); return;
         }
         if (!m_hasProject || m_project.root().generic_string() != m_visualRoot || m_moduleSelected >= m_modules.size() || m_modules[m_moduleSelected].id != m_visualModule) { setCommandStatus("Project or module changed; reopen the command", true); return; }
         std::vector<modules::Module> fresh; std::string error;
@@ -4710,7 +4721,11 @@ void Application::applyModuleCommand() {
         if (choice == -306 && m_visualReview && m_visualConfigured && !m_visualConfigFuture.valid() && !m_visualConfigApplyFuture.valid()) {
             if (!m_hasProject || m_project.root().generic_string()!=m_visualRoot || !m_hasDocument || normalizeRelative(m_filePath)!=normalizeRelative(m_visualConfigPath) || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_visualModule) { setCommandStatus("Open the reviewed configuration document first",true); return; }
             std::vector<modules::Module> fresh; std::string error; if(!modules::list(m_moduleRoot,fresh,error) || std::none_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-config-edit-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c){return c.action=="compare-visual-configured";});})) {setCommandStatus("Module changed; reopen review",true);return;}
-            m_visualConfigReview=m_visualReview; m_visualConfigOriginal=m_document.toUtf8(); m_visualConfigFile=m_filePath; m_visualConfigRevision=m_document.revision(); m_visualConfigDraft={}; m_visualConfigStage=1; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return;
+            m_visualConfigFromDrag=false; m_visualConfigReview=m_visualReview; m_visualConfigOriginal=m_document.toUtf8(); m_visualConfigFile=m_filePath; m_visualConfigRevision=m_document.revision(); m_visualConfigDraft={}; m_visualConfigStage=1; m_modulePage=0; m_selectedSuggestion=-1; refreshSuggestions(); return;
+        }
+        if (choice==-313 && m_visualConfigStage==1) {
+            m_visualConfigFromDrag=true; if(!visualConfigAuthorized()) {m_visualConfigFromDrag=false;setCommandStatus("Module changed; reopen review",true);return;}
+            m_visualMask={};m_visualMaskSelected=false;m_visualMaskDragging=false;m_visualMaskMode=true;m_visualCropMode=false;m_visualVisible=true;setStatus("Drag on candidate · Enter reviews mask · Escape cancels",false);return;
         }
         if (m_visualConfigStage==1 && (choice==-307 || choice==-308 || choice==-309)) { m_visualConfigOperation=choice==-307?0:choice==-308?1:2; m_visualConfigStage=2; m_searchBar.open(ui::PromptKind::ModuleVisualPath); setCommandStatus(choice==-307?"Enter x y width height":choice==-308?"Enter one-based mask number":"Enter threshold 0–255",false); return; }
         if (choice==-310 && m_visualConfigStage==4) {
@@ -6185,10 +6200,24 @@ void Application::refreshModuleCatalog() {
     setCommandStatus("Loading GitHub module catalog…", false);
 }
 
+void Application::updateVisualMaskDrag(double x,double y) {
+    if(!m_visualMaskMode || !m_visualReview) return;
+    int width=0,height=0;uiSize(width,height);const auto& image=m_visualPreview.candidate;const auto fitted=ui::visualReviewPaneRect(width,height,1,image.width,image.height);
+    if(fitted.x!=m_visualMaskFitted.x || fitted.y!=m_visualMaskFitted.y || fitted.width!=m_visualMaskFitted.width || fitted.height!=m_visualMaskFitted.height) {m_visualMaskSelected=false;return;}
+    const auto& source=m_visualReview->candidateImage();const float zoom=m_uiZoom>0?m_uiZoom:1.0F;
+    m_visualMaskSelected=ui::visualMaskFromDrag(fitted,source.width,source.height,{0,0,source.width,source.height},m_visualMaskStartX,m_visualMaskStartY,x/zoom,y/zoom,m_visualMask);
+}
+void Application::prepareVisualConfigChange(const modules::VisualConfigChange& change) {
+    if(!m_visualShowing || !m_visualReview || m_visualReview!=m_visualConfigReview || !m_hasProject || m_project.root().generic_string()!=m_visualRoot || !m_hasDocument || m_filePath!=m_visualConfigFile || m_document.revision()!=m_visualConfigRevision || m_document.toUtf8()!=m_visualConfigOriginal || !visualConfigAuthorized()) {setCommandStatus("Review or document changed; start again",true);return;}
+    if(m_visualConfigFuture.valid() || m_visualConfigApplyFuture.valid()) {setCommandStatus("Previous edit is still finishing",false);return;}
+    m_visualConfigChange=change; auto project=m_project; auto review=m_visualConfigReview; auto original=m_visualConfigOriginal; m_visualConfigCancel=std::make_shared<std::atomic_bool>(false); m_visualConfigStage=3; m_modulePage=0; m_selectedSuggestion=-1; m_searchBar.open(ui::PromptKind::ModuleCommands); m_visualConfigGeneration=m_searchBar.generation();
+    m_visualConfigFuture=std::async(std::launch::async,[project,review,original,change,cancel=m_visualConfigCancel] { VisualConfigResult result; if(review->screenshotsStillCurrent(project,result.error,cancel.get())) (void)modules::prepareVisualConfigDraft(original,review->baselineImage(),review->candidateImage(),change,result.draft,result.error,cancel.get()); return result; }); refreshSuggestions(); setCommandStatus("Preparing config draft… Escape cancels",false);
+}
+
 bool Application::visualConfigAuthorized() const {
     if(m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_visualModule) return false;
     std::vector<modules::Module> fresh; std::string error;
-    return modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[this](const auto& m) { return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-config-edit-v1")!=m.requirements.end() && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action=="compare-visual-configured"; }); });
+    return modules::list(m_moduleRoot,fresh,error) && std::any_of(fresh.begin(),fresh.end(),[this](const auto& m) { return m.id==m_visualModule && m.enabled && m.valid && m.project && std::find(m.requirements.begin(),m.requirements.end(),"visual-config-edit-v1")!=m.requirements.end() && (!m_visualConfigFromDrag || std::find(m.requirements.begin(),m.requirements.end(),"visual-mask-draw-v1")!=m.requirements.end()) && std::any_of(m.commands.begin(),m.commands.end(),[](const auto& c) { return c.action=="compare-visual-configured"; }); });
 }
 
 void Application::requestVisualCrop(std::size_t x, std::size_t y) {
@@ -11416,7 +11445,7 @@ void Application::syncAccessibility(const ui::FrameState& frame) {
         label = "Shader preview"; value = "GPU-rendered shader snapshot. Press Escape to close."; key = label + value;
     } else if (frame.visualPreview && m_visualReview) {
         label = "Visual comparison preview";
-        value = std::string(m_visualCropMode ? "Source-pixel crop; arrows move, zero returns to overview; the display may scale. " : "Baseline, candidate and difference reduced previews. ") + std::to_string(m_visualReview->comparison().changedPixels) + " changed pixels of " + std::to_string(m_visualReview->comparison().comparedPixels) + ". Press Escape to close.";
+        value = m_visualMaskMode ? "Drag on the candidate image to select a mask. Enter reviews it; Escape cancels. Manual coordinates are available in configuration editing." : std::string(m_visualCropMode ? "Source-pixel crop; arrows move, zero returns to overview; the display may scale. " : "Baseline, candidate and difference reduced previews. ") + std::to_string(m_visualReview->comparison().changedPixels) + " changed pixels of " + std::to_string(m_visualReview->comparison().comparedPixels) + ". Press Escape to close.";
         key = label + value;
     } else if (frame.diagramPreviewVisible) {
         label = "Diagram preview"; value = "Mermaid flowchart. Arrow keys pan; plus or minus zoom; zero resets to fit; Escape closes. Zoom " + std::to_string(static_cast<int>(m_diagramZoom*100)) + " percent.";
@@ -12088,6 +12117,8 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     ui::FrameState state =
         m_searchBar.frameState(timeSeconds, m_animationSpeed);
     state.visualPreview = m_visualVisible ? (m_visualCropMode ? &m_visualCropPreview : &m_visualPreview) : nullptr;
+    state.visualMaskMode=m_visualVisible && m_visualMaskMode;state.visualMaskSelected=state.visualMaskMode && m_visualMaskSelected;state.visualMask=m_visualMask;
+    if(state.visualMaskMode && m_visualReview) {state.visualMaskSourceWidth=m_visualReview->candidateImage().width;state.visualMaskSourceHeight=m_visualReview->candidateImage().height;}
     state.webPreviewMode = m_visualVisible && (m_webViewActive || m_shaderPreviewViewActive);
     state.shaderPreviewMode = m_visualVisible && m_shaderPreviewViewActive;
     state.diagramPreviewVisible = m_diagramPreviewVisible;

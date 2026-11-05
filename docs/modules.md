@@ -539,11 +539,11 @@ choices (including usage and defaults when supplied). Choices are unverified met
 not live register values; wildcard/binary-pattern encodings and derived enumeration
 groups are not expanded. It does not access hardware. Its
 conservative XML subset accepts predefined and numeric text entities but rejects
-DTDs and custom or external entities. It does not expand peripheral or field derived definitions,
-forward or qualified register references, peripheral arrays, index
+DTDs and custom or external entities. It does not expand field derived definitions,
+forward or qualified references, peripheral arrays, index
 ranges or nested and derived clusters. Single-level clusters, including simple
 arrays with explicit increments and numeric or comma-separated indexes, expand
-register names and addresses; cluster-level defaults are not inherited. A register can inherit from a unique earlier register in the
+register names and addresses; cluster-level defaults are not inherited. A peripheral can inherit from a unique earlier complete peripheral when it has an explicit name and base address and no register or default-property overrides; copied register addresses are relocated. Unsupported or ambiguous inheritance is marked incomplete. A register can inherit from a unique earlier register in the
 same peripheral, with complete explicit field overrides. Simple register arrays with explicit increments
 and numeric or comma-separated indexes are expanded. Field arrays expand up to
 64 elements with a nonzero bit increment, one `%s` name placeholder and numeric
@@ -721,3 +721,10 @@ cycles, ambiguous names and chains exceeding 64 hops; following a target checks
 that the imported source snapshot still matches. Embedded expressions, composite
 values, JSON pointers, cross-file references, CSS cascade and type compatibility
 are not resolved. Imported token values may themselves be sensitive.
+
+Configured visual reviews also offer **Draw mask on candidate**: drag inside the
+candidate image, inspect the outline, then press Enter to review the source-pixel
+rectangle and its effect on coverage counts. Escape cancels. Dragging outside the
+image is rejected; manual coordinate entry remains available from the keyboard.
+Applying the draft changes only the open configuration document and remains
+undoable, with the same screenshot and document checks as other config edits.

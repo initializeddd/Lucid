@@ -45,6 +45,7 @@
 #include "modules/SqlRowDiff.hpp"
 #include "modules/DesignTokenAliases.hpp"
 #include "ui/VisualReviewCrop.hpp"
+#include "ui/VisualMaskSelection.hpp"
 #include "modules/VisualConfigEdit.hpp"
 #include "modules/GitHubPullRequests.hpp"
 #include "modules/PullRequestPatch.hpp"
@@ -174,6 +175,8 @@ private:
     [[nodiscard]] platform::WebPreviewContext windowsWebPreviewContext(bool& authorized) const;
 #endif
     void requestVisualCrop(std::size_t x, std::size_t y);
+    void prepareVisualConfigChange(const modules::VisualConfigChange& change);
+    void updateVisualMaskDrag(double x, double y);
     [[nodiscard]] bool visualConfigAuthorized() const;
     void refreshModuleCatalog();
     void openGitReview();
@@ -807,6 +810,10 @@ private:
     std::string m_visualConfigOriginal, m_visualConfigFile;
     std::uint64_t m_visualConfigRevision=0, m_visualConfigGeneration=0;
     int m_visualConfigStage=0, m_visualConfigOperation=0;
+    bool m_visualMaskMode=false, m_visualMaskDragging=false, m_visualMaskSelected=false, m_visualConfigFromDrag=false;
+    double m_visualMaskStartX=0, m_visualMaskStartY=0;
+    ui::VisualPreviewRect m_visualMaskFitted{};
+    modules::VisualMask m_visualMask{};
     struct VisualResult { std::shared_ptr<modules::VisualReview> review; ui::VisualReviewPreview preview; std::string error; };
     std::future<VisualResult> m_visualFuture;
     std::future<std::string> m_visualApprovalFuture;

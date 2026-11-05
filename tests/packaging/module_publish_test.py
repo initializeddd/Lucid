@@ -390,6 +390,12 @@ class PublishTest(unittest.TestCase):
         with self.assertRaises(ValueError): self.invoke("--publish")
         self.assertFalse(self.registry)
 
+    def test_visual_draw_mask_requires_config_edit(self):
+        data={"name":"Visual","version":"1","requires":["visual-regression-config-v1","visual-config-edit-v1","visual-mask-draw-v1"],"permissions":{"project":True,"network":False,"processes":False,"settings":False},"commands":[{"title":"Configured","action":"compare-visual-configured"}]}
+        self.manifest.write_text(json.dumps(data));self.invoke("--publish");self.registry.clear();data["requires"].remove("visual-config-edit-v1");self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):self.invoke("--publish")
+        self.assertFalse(self.registry)
+
     def test_visual_config_edit_requires_configured_review(self):
         data = {"name":"Visual", "version":"1", "requires":["visual-regression-review-v1","visual-regression-config-v1","visual-config-edit-v1"], "permissions":{"project":True,"network":False,"processes":False,"settings":False}, "commands":[{"title":"Configured","action":"compare-visual-configured"}]}
         self.manifest.write_text(json.dumps(data)); self.invoke("--publish"); self.registry.clear()

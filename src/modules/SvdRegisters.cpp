@@ -24,14 +24,17 @@ struct Node { std::string name, text; bool skip=false; };
 struct Field { std::string name,access,description; std::optional<std::uint64_t> off,width,lsb,msb,dim,increment; std::string dimIndex; std::vector<SvdEnumValue> values; };
 struct EnumItem { std::string name; std::optional<std::uint64_t> value; bool isDefault=false, invalid=false; };
 struct Defaults { std::optional<std::uint64_t> size,reset; std::string access; };
+struct PeripheralSource { std::string name; std::uint64_t base; std::size_t start,end; bool complete; };
 struct Reg { std::string name,access,dimIndex,description; std::optional<std::uint64_t> offset,size,reset,dim,increment; std::vector<SvdField> fields; bool skip=false; };
 }
 SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::size_t maxRegisters) {
     SvdRegisters out; auto fail=[&](const char* message) { out.error=message; out.registers.clear(); return out; };
     maxBytes=std::min<std::size_t>(maxBytes,16*1024*1024); maxRegisters=std::min<std::size_t>(maxRegisters,100000);
     if (xml.size()>maxBytes) return fail("SVD exceeds byte limit");
-    auto warn = [&](const char* message) { out.incomplete=true; if (std::find(out.warnings.begin(),out.warnings.end(),message)==out.warnings.end() && out.warnings.size()<16) out.warnings.emplace_back(message); };
+    bool inPeripheral=false, currentPeripheralIncomplete=false;
+    auto warn = [&](const char* message) { if(inPeripheral) currentPeripheralIncomplete=true; out.incomplete=true; if (std::find(out.warnings.begin(),out.warnings.end(),message)==out.warnings.end() && out.warnings.size()<16) out.warnings.emplace_back(message); };
     Defaults deviceDefaults, peripheralDefaults; bool deviceRegistersSeen=false, peripheralRegistersSeen=false;
+    std::vector<PeripheralSource> peripheralSources; std::string peripheralDerivedFrom; std::size_t peripheralStart=0; bool peripheralOverrides=false;
     std::vector<Node> stack; stack.reserve(64); std::string peripheral, clusterName; std::optional<std::uint64_t> base, clusterOffset, clusterDim, clusterIncrement; std::string clusterIndexes; std::size_t clusterStart=0; bool inCluster=false, clusterRegistersSeen=false, clusterSkip=false; Reg reg; Field field; EnumItem enumItem; std::string enumUsage; bool peripheralSkip=false, inReg=false, inField=false, inEnum=false, rootSeen=false; std::size_t pos=0,nodes=0,totalFields=0,emittedFields=0,derivedComparisons=0,descriptionBytes=0,emittedEnums=0,constructedEnums=0,constructedDescriptions=0;
     while(pos<xml.size()) {
         auto lt=xml.find('<',pos); if(lt==std::string_view::npos) { if(!trim(xml.substr(pos)).empty()) return fail("Text outside XML root"); break; }
@@ -53,12 +56,18 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
             const bool fieldArrayProperty = inField && parentName=="field" && (name=="dim" || name=="dimIndex" || name=="dimIncrement");
             const bool derived = attrs.find("derivedFrom")!=std::string_view::npos;
             const bool registerDerived = name=="register" && derived;
+            const bool peripheralDerived = name=="peripheral" && derived;
             const bool supportedCluster = name=="cluster" && !inCluster && parentName=="registers" && !derived;
             const bool clusterArrayProperty = inCluster && !inReg && parentName=="cluster" && (name=="dim" || name=="dimIndex" || name=="dimIncrement");
-            const bool unsupported=(derived && !registerDerived) || (name=="cluster" && !supportedCluster) || (!registerArrayProperty && !clusterArrayProperty && !fieldArrayProperty && (name=="dim" || name=="dimIndex" || name=="dimIncrement"));
+            const bool unsupported=(derived && !registerDerived && !peripheralDerived) || (name=="cluster" && !supportedCluster) || (!registerArrayProperty && !clusterArrayProperty && !fieldArrayProperty && (name=="dim" || name=="dimIndex" || name=="dimIncrement"));
             if(unsupported) {warn(name=="cluster" ? "Clusters are not expanded" : (name=="dim" || name=="dimIndex" || name=="dimIncrement") ? "Arrays are not expanded" : "derivedFrom definitions are not expanded"); if(name=="dim"||name=="dimIndex"||name=="dimIncrement") {if(inReg) reg.skip=true; else if(inCluster) {if(clusterRegistersSeen) return fail("Cluster array properties must precede registers"); clusterSkip=true;} else peripheralSkip=true;} }
             stack.push_back({std::string(name),{},parentSkip || unsupported});
-            if(!parentSkip && name=="peripheral") {peripheral.clear();base.reset();peripheralDefaults={};peripheralRegistersSeen=false;peripheralSkip=unsupported;}
+            if(!parentSkip && name=="peripheral") {
+                inPeripheral=true;currentPeripheralIncomplete=false;peripheralStart=out.registers.size();peripheralDerivedFrom.clear();peripheralOverrides=false;
+                peripheral.clear();base.reset();peripheralDefaults={};peripheralRegistersSeen=false;peripheralSkip=unsupported;
+                if(peripheralDerived) {auto a=trim(attrs);constexpr std::string_view key="derivedFrom";if(!a.starts_with(key))return fail("Unsupported peripheral derivedFrom attribute");a.remove_prefix(key.size());a=trim(a);if(a.empty()||a.front()!='=')return fail("Invalid peripheral derivedFrom attribute");a.remove_prefix(1);a=trim(a);if(a.size()<3||(a.front()!='\''&&a.front()!='"'))return fail("Invalid peripheral derivedFrom attribute");auto quote=a.front();a.remove_prefix(1);auto end=a.find(quote);if(end==std::string_view::npos||!trim(a.substr(end+1)).empty())return fail("Invalid peripheral derivedFrom attribute");auto ref=a.substr(0,end);if(ref.empty()||ref.size()>256||!std::all_of(ref.begin(),ref.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_';}))return fail("Unsupported peripheral derivedFrom reference");peripheralDerivedFrom=std::string(ref);}
+            }
+            if(!parentSkip && !peripheralDerivedFrom.empty() && parentName=="peripheral" && (name=="registers" || name=="size" || name=="access" || name=="resetValue" || name=="resetMask" || name=="protection")) {peripheralOverrides=true;stack.back().skip=true;warn("Derived peripheral overrides are not expanded");}
             if (!parentSkip && supportedCluster) {inCluster=true;clusterName.clear();clusterOffset.reset();clusterDim.reset();clusterIncrement.reset();clusterIndexes.clear();clusterStart=out.registers.size();clusterRegistersSeen=false;clusterSkip=false;}
             if(!parentSkip && name=="register") {
                 if (inCluster && (clusterName.empty() || !clusterOffset)) return fail("Cluster name and offset must precede registers");
@@ -177,6 +186,21 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                 } else warn("Some registers have missing or invalid metadata"); inReg=false;
             }
         } else { if(name=="field") inField=false; if(name=="register") inReg=false; if(name=="enumeratedValue") inEnum=false; }
+        if(name=="peripheral" && !node.skip) {
+            if(!peripheralDerivedFrom.empty() && !peripheralOverrides && !peripheralSkip) {
+                const PeripheralSource* source=nullptr;bool ambiguous=false;
+                for(const auto& item:peripheralSources){if(++derivedComparisons>1000000){warn("Peripheral derivedFrom lookup limit reached");ambiguous=true;break;}if(item.name==peripheralDerivedFrom){if(source){ambiguous=true;break;}source=&item;}}
+                if(!source||ambiguous||!source->complete||peripheral.empty()||!base){warn("Peripheral derivedFrom reference unavailable, incomplete or ambiguous");}
+                else {
+                    const auto start=source->start,end=source->end;const auto sourceBase=source->base;
+                    bool valid=true;for(std::size_t i=start;i<end;++i){const auto& item=out.registers[i];if(item.address<sourceBase||item.address-sourceBase>std::numeric_limits<std::uint64_t>::max()-*base){valid=false;break;}}
+                    if(!valid)warn("Derived peripheral address overflow");
+                    else for(std::size_t i=start;i<end;++i){const auto& item=out.registers[i];if(out.registers.size()>=maxRegisters){warn("Register limit reached");break;}if(item.fields.size()>100000-emittedFields){warn("Expanded field limit reached");break;}std::size_t descriptions=item.description.size(),enums=0;for(const auto& f:item.fields){descriptions+=f.description.size();enums+=f.values.size();}if(descriptions>16U*1024U*1024U-descriptionBytes){warn("Expanded description limit reached");break;}if(enums>100000-emittedEnums){warn("Expanded enumerated value limit reached");break;}auto copy=item;copy.peripheral=peripheral;copy.address=*base+(item.address-sourceBase);emittedFields+=item.fields.size();descriptionBytes+=descriptions;emittedEnums+=enums;out.registers.push_back(std::move(copy));}
+                }
+            }
+            if(!peripheral.empty()&&base)peripheralSources.push_back({peripheral,*base,peripheralStart,out.registers.size(),!currentPeripheralIncomplete&&!peripheralSkip});
+            inPeripheral=false;
+        }
         if (name=="cluster" && !node.skip) {
             if (clusterDim || clusterIncrement || !clusterIndexes.empty()) {
                 if (!clusterDim || !clusterIncrement || !*clusterDim || !*clusterIncrement || *clusterDim>10000 || clusterName.find("%s")==std::string::npos || clusterName.find("%s")!=clusterName.rfind("%s")) return fail("Invalid cluster array definition");

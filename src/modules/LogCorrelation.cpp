@@ -65,6 +65,30 @@ bool syslogTimestamp(std::string_view s, const LogCorrelationOptions& options, s
     return true;
 }
 
+// RFC 5424 records carry their own timezone and do not need the assumptions
+// required for traditional BSD syslog. Only inspect the header, never execute
+// or interpret message or structured-data content.
+bool rfc5424Timestamp(std::string_view s, std::int64_t& result) {
+    if(s.size()<6 || s.front()!='<') return false;
+    const auto close=s.find('>');
+    if(close==std::string_view::npos || close<2 || close>4 || (close>2 && s[1]=='0')) return false;
+    int priority=0; if(!digits(s,1,close-1,priority) || priority>191) return false;
+    s.remove_prefix(close+1);
+    if(!s.starts_with("1 ")) return false;
+    s.remove_prefix(2);
+    const auto end=s.find(' '); if(end==std::string_view::npos || end<20 || s[10]!='T') return false;
+    const auto time=s.substr(0,end);
+    // RFC 5424 uses a dot separator and up to six fractional digits.
+    const auto dot=time.find('.');
+    if(time.find(',')!=time.npos) return false;
+    if(dot!=time.npos) {auto p=dot+1; while(p<time.size() && time[p]>='0' && time[p]<='9') ++p; if(p==dot+1 || p-dot-1>6) return false;}
+    if(!timestamp(time,false,result,true)) return false;
+    s.remove_prefix(end+1);
+    // A header has hostname, app-name, procid, msgid and structured-data.
+    for(int i=0;i<4;++i) {const auto fieldEnd=s.find(' '); if(fieldEnd==s.npos || !fieldEnd) return false; s.remove_prefix(fieldEnd+1);}
+    return !s.empty() && (s.front()=='-' || s.front()=='[');
+}
+
 }
 LogCorrelationResult correlateLogs(const std::vector<LogInput>& inputs, std::string_view query, std::size_t maxBytes, std::size_t maxLines, std::size_t maxRecords, LogCorrelationOptions options, const std::atomic_bool* cancel) {
     LogCorrelationResult out; std::size_t bytes = 0, sequence = 0;
@@ -118,7 +142,7 @@ LogCorrelationResult correlateLogs(const std::vector<LogInput>& inputs, std::str
             auto trimmed=text; while(!trimmed.empty() && (trimmed.front()==' ' || trimmed.front()=='\t')) trimmed.remove_prefix(1);
             const bool jsonCandidate=options.enableJsonLines && !trimmed.empty() && trimmed.front()=='{';
             const bool isJson=jsonCandidate && jsonTimestamp(trimmed,time);
-            if (isJson || timestamp(timestampText, bracketed, time) || syslogTimestamp(text, options, time)) {
+            if (isJson || timestamp(timestampText, bracketed, time) || rfc5424Timestamp(text, time) || syslogTimestamp(text, options, time)) {
                 if(isJson) ++out.jsonLines;
                 flush(); pending = {input.source, std::string(text), line, time}; hasPending = true;
             } else if (!jsonCandidate && hasPending && !text.empty() && (text.front() == ' ' || text.front() == '\t')) {

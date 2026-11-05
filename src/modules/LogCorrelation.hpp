@@ -11,7 +11,8 @@ struct LogRecord { std::string source, text; std::size_t line = 0; std::int64_t 
 struct LogInput { std::string source; std::string_view text; };
 struct LogCorrelationOptions { int syslogYear = 0; int syslogUtcOffsetMinutes = 0; bool enableSyslog = false; bool enableJsonLines = false; };
 struct LogCorrelationResult { std::vector<LogRecord> records; std::size_t unparseableLines = 0, scannedLines = 0, jsonLines = 0; bool incomplete = false; };
-// ISO 8601 dates with explicit Z or numeric offset, and optionally syslog with
+// ISO 8601 dates with explicit Z or numeric offset, RFC 5424 syslog headers,
+// and optionally traditional syslog with
 // caller-supplied year and UTC offset. Optional JSON Lines require one top-level
 // string field named timestamp, @timestamp, or time with an explicit ISO zone;
 // duplicate/ambiguous timestamp fields and lines over 64 KiB are rejected.

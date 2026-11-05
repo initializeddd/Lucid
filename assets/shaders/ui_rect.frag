@@ -23,7 +23,11 @@ float roundedBoxDistance(vec2 point, vec2 halfSize, float cornerRadius) {
 void main() {
     const vec2 center = (push.rectMin + push.rectMax) * 0.5;
     const vec2 halfSize = (push.rectMax - push.rectMin) * 0.5;
-    const float distance = roundedBoxDistance(vPixel - center, halfSize, push.radius);
+    // A negative radius marks a diagram decision diamond. Its signed distance
+    // comes from the four edges, so one draw retains smooth antialiasing.
+    const vec2 diamondScale = 1.0 / max(halfSize, vec2(0.0001));
+    const float diamondDistance = (dot(abs(vPixel - center), diamondScale) - 1.0) / length(diamondScale);
+    const float distance = push.radius < 0.0 ? diamondDistance : roundedBoxDistance(vPixel - center, halfSize, push.radius);
 
     const float antialias = max(fwidth(distance), 0.0001);
     const float softness = max(antialias, push.blur);

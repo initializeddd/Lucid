@@ -8,7 +8,7 @@
 namespace lucid::modules {
 struct CMakeCompileGroup { std::string language; std::vector<std::string> includes, definitions, flags; };
 struct CMakeSource { std::string path; int compileGroup = -1; bool generated = false; };
-struct CMakeTarget { std::string configuration, name, type; std::vector<CMakeSource> sources; std::vector<CMakeCompileGroup> groups; };
+struct CMakeTarget { std::string configuration, name, type; std::vector<CMakeSource> sources; std::vector<CMakeCompileGroup> groups; std::vector<std::string> dependencies, artifacts; };
 struct CMakeOption { std::string name, value, description; };
 struct CMakeModel { std::string sourceDirectory, buildDirectory; std::vector<CMakeTarget> targets; std::vector<CMakeOption> options; bool optionsAvailable = false; };
 struct CMakeCacheUpdate { std::string path, original, replacement; };

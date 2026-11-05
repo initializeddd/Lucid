@@ -1620,10 +1620,10 @@ struct ApplicationInteractionTest {
             app.handleChar(U'0'); if (app.m_diagramZoom!=1.0 || app.m_diagramPanX!=0 || app.m_diagramPanY!=0) return 814;
             input::KeyEvent escape{}; escape.key = input::Key::Escape; escape.action = input::KeyAction::Press; app.handleKey(escape);
             if (app.m_diagramPreviewVisible) return 508;
-            app.m_document=editor::Document::fromUtf8("flowchart LR\nA(Round) & B([Capsule]) <--> |first| C -->|second| A --> A\n");
+            app.m_document=editor::Document::fromUtf8("flowchart LR\nA(Round) & B([Capsule]) <--> |first| C{Decision} -->|second| A --> A\n");
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand();
             const auto cycleDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15); while(app.m_diagramPreviewFuture.valid() && std::chrono::steady_clock::now()<cycleDeadline) {app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
-            const auto cycleFrame=app.makeFrameState(1.0); if(app.m_diagramPreviewFuture.valid() || !app.m_diagramPreviewVisible || cycleFrame.diagramNodes.size()!=3 || cycleFrame.diagramNodes[0].shape!=modules::DiagramNodeShape::Rounded || cycleFrame.diagramNodes[1].shape!=modules::DiagramNodeShape::Stadium || cycleFrame.diagramEdges.size()!=4 || cycleFrame.diagramEdges[3].points.size()!=6 || !cycleFrame.diagramEdges[0].bidirectional || !cycleFrame.diagramEdges[1].bidirectional || cycleFrame.diagramEdges[2].bidirectional || cycleFrame.diagramEdges[0].label!="first" || cycleFrame.diagramEdges[1].label!="first" || cycleFrame.diagramEdges[2].label!="second") return 1054;
+            const auto cycleFrame=app.makeFrameState(1.0); if(app.m_diagramPreviewFuture.valid() || !app.m_diagramPreviewVisible || cycleFrame.diagramNodes.size()!=3 || cycleFrame.diagramNodes[0].shape!=modules::DiagramNodeShape::Rounded || cycleFrame.diagramNodes[1].shape!=modules::DiagramNodeShape::Stadium || cycleFrame.diagramNodes[2].shape!=modules::DiagramNodeShape::Diamond || cycleFrame.diagramEdges.size()!=4 || cycleFrame.diagramEdges[3].points.size()!=6 || !cycleFrame.diagramEdges[0].bidirectional || !cycleFrame.diagramEdges[1].bidirectional || cycleFrame.diagramEdges[2].bidirectional || cycleFrame.diagramEdges[0].label!="first" || cycleFrame.diagramEdges[1].label!="first" || cycleFrame.diagramEdges[2].label!="second") return 1054;
             app.handleKey(escape); if(app.m_diagramPreviewVisible) return 1055; app.m_document=editor::Document::fromUtf8(original);
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             app.m_searchBar.close(); app.m_searchBar.open(ui::PromptKind::ModuleCommands);
@@ -2602,6 +2602,9 @@ struct ApplicationInteractionTest {
             auto target = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), 0);
             if (target == app.m_moduleChoices.end()) return 388;
             app.m_selectedSuggestion = static_cast<int>(target - app.m_moduleChoices.begin()); app.applyModuleCommand();
+            app.m_moduleCMakeModel.targets[0].dependencies.push_back("test-helper"); app.m_moduleCMakeModel.targets[0].artifacts.push_back("bin/example"); app.refreshSuggestions();
+            if(std::find(app.m_suggestionPaths.begin(),app.m_suggestionPaths.end(),"Depends on: test-helper")==app.m_suggestionPaths.end() || std::find(app.m_suggestionPaths.begin(),app.m_suggestionPaths.end(),"Output: bin/example")==app.m_suggestionPaths.end()) return 928;
+            app.m_moduleCMakeModel.targets[0].dependencies.clear(); app.m_moduleCMakeModel.targets[0].artifacts.clear(); app.refreshSuggestions();
 #if !defined(_WIN32)
             const auto fakeBuild=temp/"fake-cmake-build";{std::ofstream out(fakeBuild);out << "#!/bin/sh\nprintf ran > \"$0.ran\"\nexit 0\n";}std::filesystem::permissions(fakeBuild,std::filesystem::perms::owner_all);
             auto buildChoice=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-400);if(buildChoice==app.m_moduleChoices.end())return 896;app.m_selectedSuggestion=static_cast<int>(buildChoice-app.m_moduleChoices.begin());app.applyModuleCommand();

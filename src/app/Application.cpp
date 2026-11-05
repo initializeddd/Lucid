@@ -3952,6 +3952,9 @@ void Application::refreshModuleSuggestions() {
             } else if (m_moduleCMakeTarget && *m_moduleCMakeTarget < m_moduleCMakeModel.targets.size()) {
                 const auto& target = m_moduleCMakeModel.targets[*m_moduleCMakeTarget];
                 if(!m_moduleCMakeEditing && !m_moduleCMakeStale && std::find(m.requirements.begin(),m.requirements.end(),"cmake-build-target-v1")!=m.requirements.end()) add("Build this target…","Review executable and command before running",-400);
+                const auto safeCMakeText=[](const std::string& text) { std::string error; return std::none_of(text.begin(),text.end(),[](unsigned char c){return c<32 || c==127;}) && editor::Document::canEditLosslessly(text,error) ? text : std::string("[unreadable text]"); };
+                for (const auto& dependency : target.dependencies) add("Depends on: " + safeCMakeText(dependency), "CMake File API dependency; model may be stale", -10, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& artifact : target.artifacts) add("Output: " + safeCMakeText(artifact), "CMake File API artifact path; existence is not verified", -10, ui::SuggestionKind::ReadOnlyText);
                 for (std::size_t i = 0; i < target.sources.size(); ++i) add(target.sources[i].path, target.sources[i].generated ? "Generated source" : "Source", static_cast<int>(i));
                 for (const auto& group : target.groups) {
                     add("Language: " + group.language, "Compile group", -10);
@@ -11590,6 +11593,7 @@ void Application::syncAccessibility(const ui::FrameState& frame) {
             value += "\nNode " + node.id + ": " + node.label;
             if (node.shape == modules::DiagramNodeShape::Rounded) value += " (rounded)";
             else if (node.shape == modules::DiagramNodeShape::Stadium) value += " (stadium)";
+            else if (node.shape == modules::DiagramNodeShape::Diamond) value += " (decision diamond)";
         }
         for (const auto& edge : frame.diagramEdges) value += "\n" + edge.from + (edge.bidirectional ? " bidirectional with " : " to ") + edge.to + (edge.label.empty() ? "" : ": " + edge.label);
         key = label + value;

@@ -34,6 +34,7 @@ bool node(std::string_view s, ParsedNode& out) {
     if (s.empty()) { out.label=out.id; return true; }
     std::string_view label;
     if(s.size()>=5 && s.starts_with("([") && s.ends_with("])")) {out.shape=DiagramNodeShape::Stadium;label=s.substr(2,s.size()-4);if(label.find_first_of("()")!=label.npos)return false;}
+    else if(s.size()>=3 && s.front()=='{' && s.back()=='}') {out.shape=DiagramNodeShape::Diamond;label=s.substr(1,s.size()-2);if(label.find_first_of("{}")!=label.npos)return false;}
     else if(s.size()>=3 && s.front()=='[' && s.back()==']') {out.shape=DiagramNodeShape::Rectangle;label=s.substr(1,s.size()-2);}
     else if(s.size()>=3 && s.front()=='(' && s.back()==')' && !s.starts_with("((") && !s.ends_with("))")) {out.shape=DiagramNodeShape::Rounded;label=s.substr(1,s.size()-2);if(label.find_first_of("()")!=label.npos)return false;}
     else return false;
@@ -119,7 +120,7 @@ bool layoutMermaidFlowchart(const DiagramGraph& graph, DiagramLayout& layout, st
         const auto& item = graph.nodes[i];
         if (item.id.empty() || item.id.size()>256 || !letter(item.id.front()) ||
             !std::all_of(item.id.begin()+1,item.id.end(),[](char c){ return letter(c) || digit(c); }) ||
-            !plainText(item.label,4096) || (item.shape!=DiagramNodeShape::Rectangle && item.shape!=DiagramNodeShape::Rounded && item.shape!=DiagramNodeShape::Stadium) || !indices.emplace(item.id,i).second) {
+            !plainText(item.label,4096) || (item.shape!=DiagramNodeShape::Rectangle && item.shape!=DiagramNodeShape::Rounded && item.shape!=DiagramNodeShape::Stadium && item.shape!=DiagramNodeShape::Diamond) || !indices.emplace(item.id,i).second) {
             error = "Invalid, oversized or duplicate node"; return false;
         }
     }

@@ -115,8 +115,11 @@ Private-key header detection includes PEM, OpenSSH and PGP private-key blocks;
 public-key blocks do not produce this finding.
 
 The CMake Navigator reads an existing CMake File API codemodel from a selected
-project-relative build directory and shows targets, source files, compile groups and
-Boolean and supported text/path cache options. Text and path values are checked
+project-relative build directory and shows targets, source files, compile groups,
+target dependencies and reported output artifact paths, as well as
+Boolean and supported text/path cache options. Dependencies and artifact paths are
+read-only declarations from the last configuration; output existence is not checked.
+Text and path values are checked
 against simple declared STRINGS choices when present; complex escaped choices are
 unsupported. Values are reviewed before a conflict-checked write, paths are not
 verified, and no CMake reconfigure occurs automatically. **Prepare CMake query** creates the codemodel and cache query
@@ -287,7 +290,10 @@ including unsaved edits. It accepts a small Mermaid flowchart subset: directed
 graphs, including cycles, self-loops and bidirectional `<-->` links, with plain node labels and simple edge labels such as `A -->|yes| B`,
 with one node or edge chain per line (for example, `A --> B -->|yes| C`).
 Branch groups such as `A & B --> C & D` expand to all four links; members of
-one group must be unique. Rounded `A(label)` and stadium `A([label])` nodes are supported; other custom shapes and styling are unsupported. Parentheses inside these labels are unsupported. Edge labels are
+one group must be unique. Rounded `A(label)`, stadium `A([label])` and decision
+diamond `A{label}` nodes are supported; other custom shapes and styling are
+unsupported. Parentheses inside rounded and stadium labels and braces inside
+diamond labels are unsupported. Edge labels are
 plain text up to 256 bytes and may
 be truncated visually; their full text is exposed to screen readers. The preview limits
 graphs to 24 nodes and 48 edges after branch expansion and reports unsupported syntax instead of running
@@ -472,7 +478,10 @@ inside calls.
 
 Log Correlation reads up to eight selected project-local logs, with a combined
 16 MiB limit. It filters case-sensitively and aligns ISO timestamps with explicit
-offsets; syslog timestamps require a user-supplied year and fixed UTC offset.
+offsets, including timestamps in RFC 5424 version 1 syslog headers; traditional
+syslog timestamps require a user-supplied year and fixed UTC offset. RFC 5424
+headers are recognized for their timestamps rather than fully validated, and
+fractional precision beyond milliseconds is truncated.
 Indented lines attach to the preceding record. The results report unparsed lines
 and scan limits, and can preview matching records. Select a record to open its
 source line; navigation refuses changed snapshots, unsupported text and dirty

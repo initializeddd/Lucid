@@ -2,6 +2,7 @@
 #include "editor/json/Json.hpp"
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <system_error>
 
@@ -97,12 +98,29 @@ bool readCMakeModel(const std::filesystem::path& buildDirectory, CMakeModel& mod
     for (const auto& config : configs->children) {
         const auto* name = field(config, "name", JsonType::String); const auto* targets = field(config, "targets", JsonType::Array);
         if (!name || !targets || targets->children.size() > 10000 || value.targets.size() + targets->children.size() > 10000) { error = "Invalid or oversized CMake target list"; return false; }
+        std::map<std::string,std::string> targetNames;
+        for (const auto& reference : targets->children) {
+            const auto* id=field(reference,"id",JsonType::String); const auto* targetName=field(reference,"name",JsonType::String);
+            if (id && targetName) {
+                if(id->stringValue.empty() || id->stringValue.size()>16384 || targetName->stringValue.size()>16384 || !targetNames.emplace(id->stringValue,targetName->stringValue).second) { error="Invalid or duplicate CMake target identity"; return false; }
+            }
+        }
         for (const auto& reference : targets->children) {
             const auto* filename = field(reference, "jsonFile", JsonType::String); if (!filename) { error = "Missing CMake target reply"; return false; }
             const auto target = readReply(replies, filename->stringValue, budget, error); if (!target) return false;
             const auto* targetName = field(*target, "name", JsonType::String); const auto* type = field(*target, "type", JsonType::String);
             if (!targetName || !type) { error = "Invalid CMake target"; return false; }
             CMakeTarget output; output.configuration = name->stringValue; output.name = targetName->stringValue; output.type = type->stringValue;
+            if(const auto* dependencies=target->find("dependencies")) {
+                if(dependencies->type!=JsonType::Array || dependencies->children.size()>10000) {error="Invalid CMake dependencies";return false;}
+                for(const auto& dependency:dependencies->children) {
+                    const auto* id=field(dependency,"id",JsonType::String);
+                    if(!id || id->stringValue.empty() || id->stringValue.size()>16384) {error="Invalid CMake dependency";return false;}
+                    const auto resolved=targetNames.find(id->stringValue);
+                    output.dependencies.push_back(resolved==targetNames.end() ? id->stringValue : resolved->second);
+                }
+            }
+            if(!strings(*target,"artifacts","path",output.artifacts)) {error="Invalid CMake artifacts";return false;}
             if (const auto* groups = target->find("compileGroups")) {
                 if (groups->type != JsonType::Array || groups->children.size() > 10000) { error = "Invalid CMake compile groups"; return false; }
                 for (const auto& group : groups->children) {

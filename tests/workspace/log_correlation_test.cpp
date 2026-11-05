@@ -36,5 +36,7 @@ int main() {
     const std::vector<LogInput> invalidJson{{"a", "2024-01-01T00:00:00Z first\n  {bad}\n  continuation\n" R"({"timestamp":"2024-01-01T00:00:00Z","timestamp":"2024-01-01T00:00:00Z"})" "\n"}};
     r=correlateLogs(invalidJson,{},10000,100,100,jsonOptions); if(r.records.size()!=1 || r.unparseableLines!=3 || r.jsonLines!=0 || r.records[0].text.find("bad")!=std::string::npos) return 18;
     std::string huge="{\"timestamp\":\"2024-01-01T00:00:00Z\",\"message\":\""+std::string(65536,'x')+"\"}"; r=correlateLogs({{"a",huge}}, {}, 100000,100,100,jsonOptions); if(r.records.size()!=0 || r.unparseableLines!=1) return 19;
+    const std::vector<LogInput> rfc{{"sys", "<34>1 2024-01-01T01:00:00.123456+01:00 host app 123 id - hello\n<0>1 2024-01-01T00:00:00Z - - - - [example@1 key=\"x\"] hi\n<192>1 2024-01-01T00:00:00Z host app - - - invalid\n<01>1 2024-01-01T00:00:00Z host app - - - invalid\n<1>2 2024-01-01T00:00:00Z host app - - - invalid\n<1>1 - host app - - - missing time\n<1>1 2024-01-01T00:00:00.1234567Z host app - - - precision\n<1>1 2024-01-01T00:00:00Z incomplete\n"}};
+    r=correlateLogs(rfc); if(r.incomplete || r.records.size()!=2 || r.unparseableLines!=6 || r.records[0].line!=2 || r.records[1].line!=1 || r.records[1].timestampMillis-r.records[0].timestampMillis!=123) return 20;
     return 0;
 }

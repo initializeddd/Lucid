@@ -359,8 +359,29 @@ struct ApplicationInteractionTest {
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0;
             app.m_activeDiagnosticMessage.clear(); app.applyModuleCommand();
             if (!app.m_commandStatusIsError || app.m_searchBar.kind() != ui::PromptKind::ModuleCommands) return 368;
-            app.m_activeDiagnosticMessage = "Expected semicolon"; app.applyModuleCommand();
-            if (app.m_searchBar.kind() != ui::PromptKind::Ai || !app.m_aiDebugExplanation || app.m_aiDebugOpenRouter || app.m_aiDebugContext.find("Expected semicolon") == std::string::npos) return 369;
+            const auto previousDocument=app.m_document;
+            const auto previousDiagnostics=app.m_diagnostics; const auto previousDiagnosticsRevision=app.m_diagnosticsRevision;
+            const auto previousDiagnosticsValid=app.m_diagnosticsValid; const auto previousDiagnosticsPath=app.m_compilerAppliedPath;
+            const auto previousIgnored=app.m_ignoredDiagnostics; const auto previousDiagnosticKey=app.m_activeDiagnosticKey;
+            const auto previousDiagnosticLine=app.m_activeDiagnosticLine; const auto previousDiagnosticColumn=app.m_activeDiagnosticColumn;
+            app.m_document=editor::Document::fromUtf8("int main() {\n  return 0\n}\n");
+            app.m_activeDiagnosticLine=1; app.m_activeDiagnosticColumn=3;
+            app.m_activeDiagnosticMessage = "Expected semicolon";
+            app.m_diagnostics={editor::Diagnostic{1,3,1,"Expected semicolon"}};
+            app.m_activeDiagnosticKey=app.m_diagnostics[0].key(); app.m_ignoredDiagnostics.clear();
+            app.m_diagnosticsValid=true; app.m_compilerAppliedPath=app.absoluteDocumentPath();
+            app.m_diagnosticsRevision=app.m_document.revision()+1; app.applyModuleCommand();
+            if(!app.m_commandStatusIsError || app.m_searchBar.kind()!=ui::PromptKind::ModuleCommands) return 8998;
+            app.m_diagnosticsRevision=app.m_document.revision(); app.m_activeDiagnosticKey="not-a-diagnostic"; app.applyModuleCommand();
+            if(!app.m_commandStatusIsError || app.m_searchBar.kind()!=ui::PromptKind::ModuleCommands) return 8997;
+            app.m_activeDiagnosticKey=app.m_diagnostics[0].key(); app.applyModuleCommand();
+            if (app.m_searchBar.kind() != ui::PromptKind::Ai || !app.m_aiDebugExplanation || !app.m_aiDiagnosticExplanation || app.m_aiDebugOpenRouter || app.m_aiDebugContext.find("Expected semicolon") == std::string::npos || app.m_aiDebugContext.find("2 >   return 0") == std::string::npos || app.m_commandStatus.find("nearby code") == std::string::npos) return 369;
+            app.m_document.pasteUtf8("changed"); app.applyCommand(false);
+            if(!app.m_commandStatusIsError || app.m_aiFuture.valid()) return 8999;
+            app.m_document=previousDocument;
+            app.m_diagnostics=previousDiagnostics; app.m_diagnosticsRevision=previousDiagnosticsRevision; app.m_diagnosticsValid=previousDiagnosticsValid;
+            app.m_compilerAppliedPath=previousDiagnosticsPath; app.m_ignoredDiagnostics=previousIgnored; app.m_activeDiagnosticKey=previousDiagnosticKey;
+            app.m_activeDiagnosticLine=previousDiagnosticLine; app.m_activeDiagnosticColumn=previousDiagnosticColumn;
             app.m_searchBar.close(); app.m_activeDiagnosticMessage.clear();
             auto previousSession = app.m_debugSession;
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 1; app.applyModuleCommand();
@@ -2330,6 +2351,7 @@ struct ApplicationInteractionTest {
             app.openFile("coverage-source.txt", false);
             if (app.makeFrameState(1.3).coverageCursor != -1) return 421;
             { std::ofstream baseline(temp / "nested" / "coverage-before.info"); baseline << "SF:coverage-source.txt\nDA:1,0\nDA:2,1\nend_of_record\n"; }
+            app.m_searchBar.open(ui::PromptKind::ModuleCommands);
             bool openedComparison = false;
             for (std::size_t page = 0; page < 8 && !openedComparison; ++page) {
                 app.m_modulePage = page; app.refreshSuggestions(); const auto compare = std::find(app.m_moduleChoices.begin(), app.m_moduleChoices.end(), -213);
@@ -2390,6 +2412,23 @@ struct ApplicationInteractionTest {
             const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(15);
             while (app.m_coverageFuture.valid() && std::chrono::steady_clock::now()<deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
             if (app.m_coverageFuture.valid() || app.m_coverageReport.incomplete || app.m_coverageReport.lines.size()!=1) return 696;
+            app.m_coverageReport.lines.push_back({"branch-source.txt", 0, true, 1, 0, 0});
+            app.m_coverageReport.lines.push_back({"branch-source.txt", 0, true, 0, 0, 1});
+            auto applyCoverageFilter = [&](int action) {
+                for (std::size_t page=0; page<8; ++page) { app.m_modulePage=page; app.refreshSuggestions();
+                    auto it=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),action);
+                    if(it!=app.m_moduleChoices.end()) {app.m_selectedSuggestion=static_cast<int>(it-app.m_moduleChoices.begin());app.applyModuleCommand();return true;}
+                } return false;
+            };
+            auto coverageHasChoice = [&](int value) {
+                for (std::size_t page=0; page<8; ++page) { app.m_modulePage=page; app.refreshSuggestions();
+                    if(std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),value)!=app.m_moduleChoices.end()) return true;
+                } return false;
+            };
+            if(!applyCoverageFilter(-701) || app.m_coverageFilter!=3 || !coverageHasChoice(0) || coverageHasChoice(1) || coverageHasChoice(2)) return 1100;
+            if(!applyCoverageFilter(-702) || app.m_coverageFilter!=4 || !coverageHasChoice(0) || coverageHasChoice(1) || !coverageHasChoice(2)) return 1101;
+            if(!applyCoverageFilter(-151) || app.m_coverageFilter!=0) return 1102;
+            app.m_coverageReport.lines.resize(1);
             bool summarySeen=false, lineSeen=false, navigated=false;
             for (std::size_t page=0; page<4 && !navigated; ++page) { app.m_modulePage=page; app.refreshSuggestions();
                 for (std::size_t i=0; i<app.m_suggestions.size(); ++i) {

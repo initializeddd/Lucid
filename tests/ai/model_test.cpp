@@ -37,6 +37,12 @@ int main() {
     }
     auto doc = lucid::editor::Document::fromUtf8("style_before();\nold_code();\nstyle_after();");
     std::string request;
+    const auto context=lucid::ai::diagnosticContext(doc,1,0,"Expected semicolon");
+    if(context.find("Expected semicolon")==std::string::npos || context.find("1 | style_before();")==std::string::npos || context.find("2 > old_code();")==std::string::npos || context.find("3 | style_after();")==std::string::npos) return 19;
+    const auto unicodeDoc=lucid::editor::Document::fromUtf8(std::string(300,'a')+"β"+std::string(5000,'b'));
+    const auto bounded=lucid::ai::diagnosticContext(unicodeDoc,0,300,std::string(2047,'x')+"β");
+    if(bounded.size()>4000 || bounded.find("β")==std::string::npos || bounded.find("[truncated]")==std::string::npos || bounded.find("...")==std::string::npos) return 20;
+    if(lucid::ai::diagnosticContext(doc,99,0,"oops").find("Nearby source")!=std::string::npos) return 21;
     if (lucid::ai::cleanupRequest(doc, "sample.cpp", request, error)) return 6;
     doc.setCursor(1, 0); doc.extendSelectionTo(1, 11);
     if (!lucid::ai::cleanupRequest(doc, "sample.cpp", request, error) ||

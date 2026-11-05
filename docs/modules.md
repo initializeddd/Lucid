@@ -84,10 +84,12 @@ supports up to 32 fields and an optional final `{{cursor}}`. Tab moves to the ne
 field, Shift+Tab moves back, and Escape ends navigation. Navigation ends if the
 document changes outside the active field. For documents over 16 MiB, the template
 is inserted but field navigation is unavailable. Linked fields are not supported.
-The Local Error Explainer sends the current diagnostic or a bounded debugger state
-(including available stack frames and variables) to Lucid's local model after the
+The Local Error Explainer sends the current diagnostic with up to five bounded nearby
+source lines, or a bounded debugger state (including available stack frames and variables), to Lucid's local model after the
 user confirms. It does not send that context to OpenRouter, even when other AI actions
-use that provider. Lucid may download the local model on first use.
+use that provider. Source and variable values may contain sensitive data. If the
+document changes before an explanation starts, select the diagnostic again.
+Lucid may download the local model on first use.
 Removal deletes the entire module folder after confirmation. Manifest changes are
 rechecked before commands run. To change a manifest, disable the module first and
 then reopen the manager.
@@ -351,7 +353,9 @@ and uncovered lines, with uncovered lines first, and can open their source files
 **Browse files** shows per-file counts; select a file to filter the line list, then
 choose **All files** to clear that filter. Unknown branch outcomes are shown separately.
 The imported-line summary shows covered and uncovered counts and a percentage;
-filters switch between all, covered, and uncovered lines while preserving navigation.
+filters switch between all, covered, and uncovered lines or lines with known uncovered
+or unknown branch outcomes while preserving navigation. Unknown outcomes are not
+counted as uncovered.
 The summary reflects only lines retained from the report, and labels incomplete imports.
 **Compare with baseline** reads a second project-local report in the same format
 and shows coverage changes by exact path and line number, with one-sided entries

@@ -1080,6 +1080,7 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                 const auto px = [originX, factor](double value) { return originX + static_cast<float>(value) * factor; };
                 const auto py = [originY, factor](double value) { return originY + static_cast<float>(value) * factor; };
                 const float stroke = std::max(1.0F, 1.5F * contentScale);
+                std::vector<WelcomeRectSpec> edgeLabelRects;
                 for (const auto& edge : state.diagramEdges) {
                     for (std::size_t i = 1; i < edge.points.size(); ++i) {
                         const auto a = edge.points[i - 1], b = edge.points[i];
@@ -1103,9 +1104,12 @@ void UiPass::draw(VkCommandBuffer commandBuffer, std::uint32_t frameIndex,
                         const auto a=edge.points[longest-1], b=edge.points[longest]; const float x=px((a.x+b.x)*0.5), y=py((a.y+b.y)*0.5);
                         std::string label=edge.label; const float maxWidth=120.0F*contentScale;
                         while (!label.empty() && measureText(label)>maxWidth) label.resize(text::lastUtf8Start(label));
-                        if (!label.empty()) { const float labelWidth=measureText(label); diagramRect({x-labelWidth*0.5F-4.0F*contentScale,y-lineHeight*0.5F,x+labelWidth*0.5F+4.0F*contentScale,y+lineHeight*0.5F},2.0F*contentScale,0.0F,0.98F,ui::theme::kSurface,ui::theme::kSurface); appendText(diagramVertices,label,x-labelWidth*0.5F,y+fontCenter,normalText); }
+                        if (!label.empty()) { const float labelWidth=measureText(label); edgeLabelRects.push_back({x-labelWidth*0.5F-4.0F*contentScale,y-lineHeight*0.5F,x+labelWidth*0.5F+4.0F*contentScale,y+lineHeight*0.5F,2.0F*contentScale,0.0F,0.0F,0.98F,ui::theme::kSurface,ui::theme::kSurface}); appendText(diagramVertices,label,x-labelWidth*0.5F,y+fontCenter,normalText); }
                     }
                 }
+                // Edge labels cover every line, including lines emitted by later
+                // branches, so shared paths cannot strike through their text.
+                diagramRects.insert(diagramRects.end(),edgeLabelRects.begin(),edgeLabelRects.end());
                 for (const auto& node : state.diagramNodes) {
                     const float nx0 = px(node.x), ny0 = py(node.y), nx1 = px(node.x + node.width), ny1 = py(node.y + node.height);
                     float radius = 4.0F * contentScale;

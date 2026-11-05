@@ -3265,10 +3265,12 @@ void Application::refreshModuleSuggestions() {
                     add(m_coverageFilter == 0 ? "All lines (selected)" : "All lines", "Show covered and uncovered lines", -151);
                     add(m_coverageFilter == 1 ? "Uncovered lines (selected)" : "Uncovered lines", "Show lines with no hits", -152);
                     add(m_coverageFilter == 2 ? "Covered lines (selected)" : "Covered lines", "Show lines with hits", -153);
+                    add(m_coverageFilter == 3 ? "Uncovered branches (selected)" : "Uncovered branches", "Show lines with known uncovered branch outcomes", -701);
+                    add(m_coverageFilter == 4 ? "Branches without counts (selected)" : "Branches without counts", "Show lines with unknown branch outcomes; these are not counted as uncovered", -702);
                     add("Compare with baseline…", "Choose a second report in the same format", -213);
                     for (std::size_t i = 0; i < m_coverageReport.lines.size(); ++i) {
                         const auto& line = m_coverageReport.lines[i];
-                        if ((!m_coverageFile.empty() && line.path != m_coverageFile) || (m_coverageFilter == 1 && line.covered) || (m_coverageFilter == 2 && !line.covered)) continue;
+                        if ((!m_coverageFile.empty() && line.path != m_coverageFile) || (m_coverageFilter == 1 && line.covered) || (m_coverageFilter == 2 && !line.covered) || (m_coverageFilter == 3 && !line.branchesUncovered) || (m_coverageFilter == 4 && !line.branchesUnknown)) continue;
                         std::string lineDetail = line.covered ? "Covered" : "Uncovered";
                         if (line.branchesCovered || line.branchesUncovered || line.branchesUnknown) lineDetail += " · branches " + std::to_string(line.branchesCovered) + " covered, " + std::to_string(line.branchesUncovered) + " uncovered, " + std::to_string(line.branchesUnknown) + " no count";
                         add(line.path + ":" + std::to_string(line.line + 1), lineDetail, static_cast<int>(i));
@@ -5333,8 +5335,8 @@ void Application::applyModuleCommand() {
     if (m_coverageShowing && choice == -154) { m_coverageFilesMode = !m_coverageFilesMode; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if (m_coverageShowing && choice == -155) { m_coverageFile.clear(); m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if (m_coverageShowing && m_coverageFilesMode && choice >= 0 && static_cast<std::size_t>(choice) < m_coverageSummary.files.size()) { m_coverageFile = m_coverageSummary.files[static_cast<std::size_t>(choice)].path; m_coverageFilesMode = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
-    if (m_coverageShowing && (choice == -151 || choice == -152 || choice == -153)) {
-        m_coverageFilter = choice == -151 ? 0 : choice == -152 ? 1 : 2;
+    if (m_coverageShowing && (choice == -151 || choice == -152 || choice == -153 || choice == -701 || choice == -702)) {
+        m_coverageFilter = choice == -151 ? 0 : choice == -152 ? 1 : choice == -153 ? 2 : choice == -701 ? 3 : 4;
         m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return;
     }
     if (choice == -21 && m_benchmarkShowing) { if (m_benchmarkSelected) m_benchmarkSelected.reset(); else { if (m_benchmarkCancel) m_benchmarkCancel->store(true); m_benchmarkShowing = false; } m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
@@ -6223,16 +6225,20 @@ void Application::applyModuleCommand() {
         }
         if (found->commands[static_cast<std::size_t>(choice)].action == "explain-diagnostic-local") {
             if (!m_hasDocument || m_activeDiagnosticMessage.empty()) { setCommandStatus("Select a diagnostic in an open file first", true); return; }
+            if (!m_diagnosticsValid || m_diagnosticsRevision != m_document.revision() || m_compilerAppliedPath != absoluteDocumentPath() ||
+                m_activeDiagnosticKey.empty() || m_ignoredDiagnostics.contains(m_activeDiagnosticKey) ||
+                std::none_of(m_diagnostics.begin(), m_diagnostics.end(), [this](const auto& d) {
+                    return d.key() == m_activeDiagnosticKey && d.message == m_activeDiagnosticMessage &&
+                           d.line == static_cast<std::uint32_t>(m_activeDiagnosticLine) && d.column == static_cast<std::uint32_t>(m_activeDiagnosticColumn);
+                })) { setCommandStatus("Diagnostic changed; select it again", true); return; }
             if (m_aiFuture.valid()) { setCommandStatus("An AI request is still running", true); return; }
-            const auto diagnostic = m_activeDiagnosticMessage;
+            const auto context = ai::diagnosticContext(m_document, static_cast<std::size_t>(std::max(0, m_activeDiagnosticLine)), static_cast<std::size_t>(std::max(0, m_activeDiagnosticColumn - 1)), m_activeDiagnosticMessage);
             openAiPrompt();
             if (m_searchBar.kind() == ui::PromptKind::Ai) {
-                m_aiDebugExplanation = true; m_aiDebugOpenRouter = false;
-                auto count = std::min<std::size_t>(diagnostic.size(), 2048);
-                while (count > 0 && count < diagnostic.size() && (static_cast<unsigned char>(diagnostic[count]) & 0xc0U) == 0x80U) --count;
-                m_aiDebugContext = "Diagnostic (untrusted compiler output): " + diagnostic.substr(0, count);
+                m_aiDebugExplanation = true; m_aiDiagnosticExplanation = true; m_aiDebugOpenRouter = false;
+                m_aiDebugContext = context;
                 m_searchBar.setQuery("Explain this diagnostic clearly and suggest how to investigate it. State uncertainty.");
-                setCommandStatus("Local model sees the diagnostic; first use may download it. Enter explains", false);
+                setCommandStatus("Local model sees the diagnostic and nearby code; first use may download it. Enter explains", false);
             }
             return;
         }
@@ -8879,7 +8885,7 @@ void Application::openAiPrompt() {
     }
     m_aiReady = false;
     m_aiCleanup = false;
-    m_aiDebugExplanation = false; m_aiDebugOpenRouter = false; m_aiDebugContext.clear();
+    m_aiDebugExplanation = false; m_aiDiagnosticExplanation = false; m_aiDebugOpenRouter = false; m_aiDebugContext.clear();
     m_aiResponse.clear();
     m_aiLines.clear();
     m_aiScroll = 0;
@@ -9053,6 +9059,9 @@ void Application::applyCommand(bool forceFolder) {
         }
         const std::string query(m_searchBar.query());
         if (!m_aiCleanup && query.empty()) { setCommandStatus("Describe what you need", true); return; }
+        if (m_aiDiagnosticExplanation && (!m_hasDocument || m_filePath != m_aiFile || m_document.revision() != m_aiRevision)) {
+            setCommandStatus("Document changed; select the diagnostic again", true); return;
+        }
         std::string cleanup, cleanupError;
         if (m_aiCleanup && (!m_hasDocument || m_filePath != m_aiFile || m_document.revision() != m_aiRevision ||
             !ai::cleanupRequest(m_document, m_filePath, cleanup, cleanupError))) {

@@ -450,7 +450,7 @@ private:
     std::string m_coverageRoot;
     bool m_coverageCobertura = false;
     bool m_coverageShowing = false;
-    int m_coverageFilter = 0; // 0: all, 1: uncovered, 2: covered.
+    int m_coverageFilter = 0; // 0: all, 1: uncovered lines, 2: covered lines, 3: uncovered branches, 4: unknown branches.
     struct BenchmarkResult { modules::BenchmarkComparison comparison; std::string error; };
     std::future<BenchmarkResult> m_benchmarkFuture;
     std::shared_ptr<std::atomic_bool> m_benchmarkCancel;
@@ -1154,6 +1154,7 @@ private:
     bool m_aiReady = false;
     bool m_aiCleanup = false;
     bool m_aiDebugExplanation = false;
+    bool m_aiDiagnosticExplanation = false;
     bool m_aiDebugOpenRouter = false;
     int m_aiSettingsWorkflow = 0;
     std::string m_aiSecret;

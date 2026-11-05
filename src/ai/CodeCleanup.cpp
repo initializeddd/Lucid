@@ -1,6 +1,36 @@
 #include "ai/CodeCleanup.hpp"
 #include <algorithm>
 namespace lucid::ai {
+namespace {
+void appendCodepoint(std::string& out, char32_t c) {
+    if(c>0x10ffff || (c>=0xd800 && c<=0xdfff)) c=0xfffd;
+    if(c<0x80) out.push_back(static_cast<char>(c));
+    else if(c<0x800) {out.push_back(static_cast<char>(0xc0|(c>>6)));out.push_back(static_cast<char>(0x80|(c&63)));}
+    else if(c<0x10000) {out.push_back(static_cast<char>(0xe0|(c>>12)));out.push_back(static_cast<char>(0x80|((c>>6)&63)));out.push_back(static_cast<char>(0x80|(c&63)));}
+    else {out.push_back(static_cast<char>(0xf0|(c>>18)));out.push_back(static_cast<char>(0x80|((c>>12)&63)));out.push_back(static_cast<char>(0x80|((c>>6)&63)));out.push_back(static_cast<char>(0x80|(c&63)));}
+}
+}
+std::string diagnosticContext(const editor::Document& document, std::size_t line,
+                              std::size_t column, std::string_view diagnostic) {
+    auto count=std::min<std::size_t>(diagnostic.size(),2048);
+    while(count>0 && count<diagnostic.size() && (static_cast<unsigned char>(diagnostic[count])&0xc0U)==0x80U) --count;
+    std::string out="Diagnostic (untrusted compiler output): "; out.append(diagnostic.substr(0,count));
+    if(count<diagnostic.size()) out+=" [truncated]";
+    if(line>=document.lineCount()) return out;
+    out+="\nNearby source (untrusted, may contain sensitive data):\n";
+    const auto first=line>2 ? line-2 : 0;
+    const auto last=std::min(document.lineCount()-1,line+std::min<std::size_t>(2,document.lineCount()-1-line));
+    for(auto i=first;i<=last;++i) {
+        const auto& text=document.line(i); const auto focus=i==line ? std::min(column,text.size()) : std::size_t{0};
+        const auto start=focus>160 ? focus-160 : 0; const auto end=std::min(text.size(),start+400);
+        out+=std::to_string(i+1); out+=i==line ? " > " : " | ";
+        if(start) out+="...";
+        for(auto j=start;j<end;++j) appendCodepoint(out,text[j]);
+        if(end<text.size()) out+="...";
+        out+='\n';
+    }
+    return out;
+}
 bool cleanupRequest(const editor::Document& document, std::string_view file,
                     std::string& request, std::string& error) {
     request.clear();

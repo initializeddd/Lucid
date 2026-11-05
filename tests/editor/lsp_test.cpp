@@ -1,5 +1,6 @@
 #include "editor/lsp/Client.hpp"
 #include "editor/lsp/TextEdits.hpp"
+#include "debug/AdapterProcess.hpp"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -40,7 +41,21 @@ int main() {
         if (!capabilities.ready() || !capabilities.supports("textDocument/completion") || capabilities.supports("textDocument/signatureHelp") || !capabilities.supports("workspace/symbol") || !capabilities.supports("textDocument/documentSymbol") || !capabilities.supports("textDocument/definition") || !capabilities.supports("textDocument/declaration") ||
             !capabilities.supports("textDocument/formatting") || capabilities.supports("textDocument/references") ||
             capabilities.supports("textDocument/rangeFormatting") || capabilities.request("textDocument/references", "{}", requestId, error) ||
-            requestId != 0 || error.find("does not support") == std::string::npos) { std::fprintf(stderr, "capabilities test failed: ready=%d error=%s messages=%zu\n", capabilities.ready(), error.c_str(), messages.size()); return 33; }
+            requestId != 0 || error.find("does not support") == std::string::npos) { std::fprintf(stderr, "capabilities test failed: ready=%d error=%s messages=%zu\n", capabilities.ready(), error.c_str(), messages.size());
+            lucid::debug::AdapterProcess probe; std::string probeError, bytes, chunk;
+            if (probe.start((fakeDir / "clangd").string(), {}, probeError)) {
+                const auto probeLimit = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                while (std::chrono::steady_clock::now() < probeLimit) {
+                    if (!probe.poll(chunk, probeError)) break;
+                    bytes += chunk;
+                    if (bytes.size() >= response.size() + config.size()) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                probe.close();
+            }
+            std::fprintf(stderr, "probe error=%s bytes=%zu hex=", probeError.c_str(), bytes.size());
+            for (unsigned char byte : bytes) std::fprintf(stderr, "%02x", byte);
+            std::fprintf(stderr, "\n"); return 33; }
         if (capabilities.request("textDocument/signatureHelp", "{}", requestId, error) || requestId != 0 || error.find("does not support") == std::string::npos) return 42;
         if (!capabilities.request("textDocument/definition", "{}", requestId, error) || !capabilities.cancel(requestId, error)) return 35;
         bool receivedCancel = false;

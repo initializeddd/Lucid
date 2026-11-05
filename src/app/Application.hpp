@@ -41,6 +41,7 @@
 #include "modules/AccessibilityAudit.hpp"
 #include "modules/ApiRequests.hpp"
 #include "modules/ApiAssertions.hpp"
+#include "modules/ApiPreflight.hpp"
 #include "modules/SqlChanges.hpp"
 #include "modules/SqlRowDiff.hpp"
 #include "modules/DesignTokenAliases.hpp"
@@ -755,6 +756,14 @@ private:
     std::future<modules::ApiResponse> m_apiFuture;
     std::shared_ptr<std::atomic_bool> m_apiCancel;
     std::vector<modules::ApiRequest> m_apiRequests;
+    struct ApiPreflightResult { modules::ApiPreflightReport report; std::string error; };
+    std::future<ApiPreflightResult> m_apiPreflightFuture;
+    std::shared_ptr<std::atomic_bool> m_apiPreflightCancel;
+    modules::ApiPreflightReport m_apiPreflight;
+    std::optional<std::size_t> m_apiPreflightSelected;
+    std::string m_apiEnvironmentFile, m_apiEnvironmentSnapshot;
+    std::uint64_t m_apiPreflightGeneration=0;
+    bool m_apiPreflightShowing=false;
     std::vector<modules::ApiEnvironment> m_apiEnvironments;
     bool m_apiEditMode = false, m_apiEditAdding = false, m_apiEditConfirm = false;
     std::vector<std::string> m_apiEditNames;

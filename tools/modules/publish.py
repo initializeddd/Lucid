@@ -133,6 +133,8 @@ def collect(owner):
             raise ValueError(f"Configured container actions require project, network and process access: {path}")
         if "api-response-assertions-v1" in requirements and (not permissions["project"] or not permissions["network"] or "api-request-studio-v1" not in requirements or not any(command.get("action") in ("open-api-requests", "open-api-environment") for command in commands)):
             raise ValueError(f"Response assertions require project access and an API request command: {path}")
+        if "api-environment-preflight-v1" in requirements and (not permissions["project"] or not permissions["network"] or "api-environments-v1" not in requirements or not any(command.get("action") == "open-api-environment" for command in commands)):
+            raise ValueError(f"API preflight requires project access and environment profiles: {path}")
         if "junit-producer-compat-v1" in requirements and (not permissions["project"] or "junit-import-v1" not in requirements or not any(command.get("action") == "import-junit" for command in commands)):
             raise ValueError(f"JUnit producer compatibility requires project access and JUnit import: {path}")
         if "junit-import-v1" in requirements and (not permissions["project"] or not any(command.get("action") == "import-junit" for command in commands)):

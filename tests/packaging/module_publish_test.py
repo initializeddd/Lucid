@@ -334,6 +334,12 @@ class PublishTest(unittest.TestCase):
             self.invoke("--publish")
         self.assertFalse(self.registry)
 
+    def test_api_preflight_requires_environment_capability(self):
+        data={"name":"API","version":"1","requires":["api-environments-v1","api-environment-preflight-v1"],"permissions":{"project":True,"network":True,"processes":False,"settings":False},"commands":[{"title":"Profiles","action":"open-api-environment"}]}
+        self.manifest.write_text(json.dumps(data));self.invoke("--publish");self.registry.clear();data["requires"].remove("api-environments-v1");self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):self.invoke("--publish")
+        self.assertFalse(self.registry)
+
     def test_junit_producer_compat_requires_import(self):
         data={"name":"JUnit","version":"1","requires":["junit-import-v1","junit-producer-compat-v1"],"permissions":{"project":True,"network":False,"processes":False,"settings":False},"commands":[{"title":"Import","action":"import-junit"}]}
         self.manifest.write_text(json.dumps(data));self.invoke("--publish");self.registry.clear();data["requires"].remove("junit-import-v1");self.manifest.write_text(json.dumps(data))

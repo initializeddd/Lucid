@@ -540,15 +540,14 @@ not live register values; wildcard/binary-pattern encodings and derived enumerat
 groups are not expanded. It does not access hardware. Its
 conservative XML subset accepts predefined and numeric text entities but rejects
 DTDs and custom or external entities. It does not expand field derived definitions,
-forward or qualified references, derived peripheral arrays, index
-ranges or nested and derived clusters. Single-level clusters, including simple
+forward or qualified references, derived peripheral arrays or nested and derived clusters. Single-level clusters, including simple
 arrays with explicit increments and numeric or comma-separated indexes, expand
 register names and addresses; cluster-level defaults are not inherited. A peripheral can inherit from a unique earlier complete peripheral when it has an explicit name and base address and no register or default-property overrides; copied register addresses are relocated. Unsupported or ambiguous inheritance is marked incomplete. A register can inherit from a unique earlier register in the
 same peripheral, with complete explicit field overrides. Simple peripheral arrays expand up to 256 elements with one `%s` placeholder, a nonzero address increment and numeric or unique comma-separated literal indexes; array properties must precede registers. Simple register arrays with explicit increments
 and numeric or comma-separated indexes are expanded. Field arrays expand up to
 64 elements with a nonzero bit increment, one `%s` name placeholder and numeric
 or comma-separated literal indexes; bit ranges and expanded metadata are bounded.
-Omitted data is marked incomplete with a reason. Device and peripheral size,
+Array `dimIndex` also accepts one inclusive decimal or same-case ASCII-letter range with exactly `dim` entries; zero-padded decimal endpoints must have equal width. Comma-separated indexes are treated as literals, so mixed ranges and lists are not expanded. Combining register arrays with cluster arrays is unsupported. Omitted data is marked incomplete with a reason. Device and peripheral size,
 access and reset defaults are inherited when declared before registers, and
 register access is inherited by fields. Other linker-map formats
 and active target management are not supported.
@@ -741,3 +740,11 @@ with jest-junit 16, and JUnit Platform 1.11.4. Repeated same-kind failures are
 retained. Suite totals must agree with emitted rows or distinct class/name
 identities; the latter accommodates pytest call-plus-teardown rows, which remain
 ambiguous. Other producer versions and dialect options are not guaranteed.
+
+Before preparing an environment-backed API request, **Check** runs an optional
+local template preflight. It lists referenced and missing variable names,
+malformed placeholders, secret-marked values referenced in URLs and unused
+profile variables without showing values or sending a request. Names can be
+sensitive. If placeholders are malformed the unused list is withheld. The
+check uses the imported saved environment snapshot and may become stale; it
+does not validate destination safety or replace send-time checks and consent.

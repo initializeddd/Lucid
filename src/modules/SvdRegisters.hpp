@@ -16,7 +16,8 @@ struct SvdRegisters { std::vector<SvdRegister> registers; std::vector<std::strin
 // Registers may derive from a unique earlier register in the same peripheral.
 // Peripherals may derive from a unique earlier complete peripheral with an explicit
 // name/base and no register or default-property overrides.
-// Peripheral, register and field arrays with explicit increments and simple indexes are expanded. Device and
+// Peripheral, register, field and cluster arrays support literal indexes and single
+// inclusive decimal or ASCII-letter dimIndex ranges. Device and
 // peripheral size, access and resetValue defaults are inherited.
 [[nodiscard]] SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes = 4*1024*1024, std::size_t maxRegisters = 10000);
 }

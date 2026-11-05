@@ -6,6 +6,25 @@ namespace lucid::modules {
 namespace {
 std::string_view trim(std::string_view s) { while(!s.empty() && (s.front()==' '||s.front()=='\n'||s.front()=='\r'||s.front()=='\t')) s.remove_prefix(1); while(!s.empty() && (s.back()==' '||s.back()=='\n'||s.back()=='\r'||s.back()=='\t')) s.remove_suffix(1); return s; }
 bool number(std::string_view s, std::uint64_t& v) { s=trim(s); int base=10; if(s.starts_with("0x")||s.starts_with("0X")){s.remove_prefix(2);base=16;} if(s.empty()) return false; auto [p,e]=std::from_chars(s.data(),s.data()+s.size(),v,base); return e==std::errc{} && p==s.data()+s.size(); }
+// Expand only a single inclusive decimal or ASCII-letter range. Comma-separated
+// lists retain their existing literal semantics; unsupported ranges stay literal.
+bool expandDimIndex(std::string& value,std::uint64_t count) {
+    if(value.find(',')!=std::string::npos)return true;
+    const auto dash=value.find('-');if(dash==std::string::npos || dash==0 || dash+1==value.size() || value.find('-',dash+1)!=std::string::npos)return true;
+    const auto first=std::string_view(value).substr(0,dash),last=std::string_view(value).substr(dash+1);
+    const auto digits=[](std::string_view v){return std::all_of(v.begin(),v.end(),[](unsigned char c){return c>='0'&&c<='9';});};
+    std::string result;
+    if(digits(first)&&digits(last)) {
+        std::uint64_t start=0,end=0;auto [p1,e1]=std::from_chars(first.data(),first.data()+first.size(),start);auto [p2,e2]=std::from_chars(last.data(),last.data()+last.size(),end);
+        if(e1!=std::errc{}||e2!=std::errc{}||p1!=first.data()+first.size()||p2!=last.data()+last.size()||end<start||end-start!=count-1)return false;
+        const bool padded=(first.size()>1&&first.front()=='0')||(last.size()>1&&last.front()=='0');if(padded && first.size()!=last.size())return false;
+        for(std::uint64_t i=0;i<count;++i){auto part=std::to_string(start+i);if(padded && part.size()<first.size())part.insert(0,first.size()-part.size(),'0');if(i)result+=',';result+=part;}
+    } else if(first.size()==1 && last.size()==1 && ((first[0]>='A'&&first[0]<='Z'&&last[0]>='A'&&last[0]<='Z')||(first[0]>='a'&&first[0]<='z'&&last[0]>='a'&&last[0]<='z'))) {
+        if(last[0]<first[0] || static_cast<std::uint64_t>(last[0]-first[0])!=count-1)return false;
+        for(std::uint64_t i=0;i<count;++i){if(i)result+=',';result+=static_cast<char>(first[0]+i);}
+    } else return true;
+    value=std::move(result);return true;
+}
 bool decodeXml(std::string_view input,std::string& output) {
     output.clear();
     for (std::size_t i=0;i<input.size();) {
@@ -151,6 +170,7 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                 const bool array=field.dim || field.increment || !field.dimIndex.empty();
                 if(array) {
                     if(!field.dim || !field.increment || !*field.dim || !*field.increment || *field.dim>64 || field.name.find("%s")==std::string::npos || field.name.find("%s")!=field.name.rfind("%s")) return fail("Invalid field array definition");
+                    if(!expandDimIndex(field.dimIndex,*field.dim)) return fail("Invalid field dimIndex range");
                     if(field.dimIndex.empty()) {for(std::uint64_t i=0;i<*field.dim;++i) indexes.push_back(std::to_string(i));}
                     else {std::string_view list=field.dimIndex; while(true) {auto comma=list.find(',');auto item=trim(list.substr(0,comma));if(item.empty() || item.size()>64 || !std::all_of(item.begin(),item.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';}) || std::find(indexes.begin(),indexes.end(),item)!=indexes.end()) return fail("Unsupported field dimIndex");indexes.emplace_back(item);if(comma==std::string_view::npos) break;list.remove_prefix(comma+1);if(indexes.size()>*field.dim) return fail("Field dimIndex count mismatch");}if(indexes.size()!=*field.dim) return fail("Field dimIndex count mismatch");}
                 } else indexes.emplace_back();
@@ -178,7 +198,8 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
                         if (!reg.dim || !reg.increment || !*reg.dim || !*reg.increment || *reg.dim>10000 || reg.name.find("%s")==std::string::npos || reg.name.find("%s")!=reg.name.rfind("%s")) return fail("Invalid register array definition");
                         if (*reg.dim-1 > (std::numeric_limits<std::uint64_t>::max()-first)/ *reg.increment) return fail("Register array address overflow");
                         std::vector<std::string> indexes;
-                        if (reg.dimIndex.empty()) { for (std::uint64_t i=0;i<*reg.dim;++i) indexes.push_back(std::to_string(i)); }
+                        if(!expandDimIndex(reg.dimIndex,*reg.dim)) return fail("Invalid register dimIndex range");
+                    if (reg.dimIndex.empty()) { for (std::uint64_t i=0;i<*reg.dim;++i) indexes.push_back(std::to_string(i)); }
                         else {
                             std::string_view list=reg.dimIndex; while (true) { auto comma=list.find(','); auto part=trim(list.substr(0,comma)); if (part.empty() || part.size()>64 || !std::all_of(part.begin(),part.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';})) return fail("Unsupported register dimIndex"); indexes.emplace_back(part); if (comma==std::string_view::npos) break; list.remove_prefix(comma+1); if (indexes.size()>*reg.dim) return fail("Register dimIndex count mismatch"); }
                             if (indexes.size()!=*reg.dim) return fail("Register dimIndex count mismatch");
@@ -209,7 +230,8 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
             if(peripheralArray && peripheralDerivedFrom.empty() && !peripheralSkip) {
                 if(!peripheralDim || !peripheralIncrement || !*peripheralDim || !*peripheralIncrement || *peripheralDim>256 || !base || peripheral.find("%s")==std::string::npos || peripheral.find("%s")!=peripheral.rfind("%s"))return fail("Invalid peripheral array definition");
                 std::vector<std::string> indexes;
-                if(peripheralIndexes.empty()){for(std::uint64_t i=0;i<*peripheralDim;++i)indexes.push_back(std::to_string(i));}
+                if(!expandDimIndex(peripheralIndexes,*peripheralDim)) return fail("Invalid peripheral dimIndex range");
+                    if(peripheralIndexes.empty()){for(std::uint64_t i=0;i<*peripheralDim;++i)indexes.push_back(std::to_string(i));}
                 else {std::string_view list=peripheralIndexes;while(true){auto comma=list.find(',');auto item=trim(list.substr(0,comma));if(item.empty()||item.size()>64||!std::all_of(item.begin(),item.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';})||std::find(indexes.begin(),indexes.end(),item)!=indexes.end())return fail("Unsupported peripheral dimIndex");indexes.emplace_back(item);if(comma==std::string_view::npos)break;list.remove_prefix(comma+1);if(indexes.size()>*peripheralDim)return fail("Peripheral dimIndex count mismatch");}if(indexes.size()!=*peripheralDim)return fail("Peripheral dimIndex count mismatch");}
                 const auto templateEnd=out.registers.size();const auto marker=peripheral.find("%s");
                 if((*peripheralDim-1)>(std::numeric_limits<std::uint64_t>::max()-*base)/ *peripheralIncrement)return fail("Peripheral array address overflow");
@@ -227,7 +249,8 @@ SvdRegisters parseSvdRegisters(std::string_view xml, std::size_t maxBytes, std::
             if (clusterDim || clusterIncrement || !clusterIndexes.empty()) {
                 if (!clusterDim || !clusterIncrement || !*clusterDim || !*clusterIncrement || *clusterDim>10000 || clusterName.find("%s")==std::string::npos || clusterName.find("%s")!=clusterName.rfind("%s")) return fail("Invalid cluster array definition");
                 std::vector<std::string> indexes;
-                if (clusterIndexes.empty()) {for (std::uint64_t i=0;i<*clusterDim;++i) indexes.push_back(std::to_string(i));}
+                if(!expandDimIndex(clusterIndexes,*clusterDim)) return fail("Invalid cluster dimIndex range");
+                    if (clusterIndexes.empty()) {for (std::uint64_t i=0;i<*clusterDim;++i) indexes.push_back(std::to_string(i));}
                 else {std::string_view list=clusterIndexes; while(true) {auto comma=list.find(','); auto item=trim(list.substr(0,comma)); if(item.empty() || item.size()>64 || !std::all_of(item.begin(),item.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';})) return fail("Unsupported cluster dimIndex"); indexes.emplace_back(item); if(comma==std::string_view::npos) break; list.remove_prefix(comma+1); if(indexes.size()>*clusterDim) return fail("Cluster dimIndex count mismatch");} if(indexes.size()!=*clusterDim) return fail("Cluster dimIndex count mismatch");}
                 std::vector<SvdRegister> templates(out.registers.begin()+static_cast<std::ptrdiff_t>(clusterStart),out.registers.end());
                 const auto marker=clusterName.find("%s");

@@ -41,6 +41,7 @@
 #include "modules/AccessibilityAudit.hpp"
 #include "modules/ApiRequests.hpp"
 #include "modules/ApiAssertions.hpp"
+#include "modules/ApiResponseCompare.hpp"
 #include "modules/ApiPreflight.hpp"
 #include "modules/SqlChanges.hpp"
 #include "modules/SqlRowDiff.hpp"
@@ -772,6 +773,11 @@ private:
     modules::ApiAssertionReport m_apiAssertions;
     int m_apiAssertionStage = 0;
     std::uint64_t m_apiAssertionGeneration = 0, m_apiAssertionResponseGeneration = 0;
+    std::future<modules::ApiResponseComparison> m_apiCompareFuture;
+    std::shared_ptr<std::atomic_bool> m_apiCompareCancel;
+    modules::ApiResponseComparison m_apiComparison;
+    int m_apiCompareStage = 0; // choose baseline, comparing, result
+    std::uint64_t m_apiCompareGeneration = 0, m_apiCompareResponseGeneration = 0;
     std::future<modules::ApiResponse> m_apiFuture;
     std::shared_ptr<std::atomic_bool> m_apiCancel;
     std::vector<modules::ApiRequest> m_apiRequests;
@@ -891,14 +897,16 @@ private:
     struct SnippetSession { std::string file, root, snapshot; std::vector<modules::SnippetRange> fields; std::size_t active = 0, finalOffset = 0, finalFieldIndex = 0; std::uint64_t revision = 0; };
     std::optional<SnippetSession> m_snippetSession;
     void synchronizeSnippet(std::uint64_t previousRevision);
-    struct ModuleHistoryResult { std::vector<workspace::GitFileHistoryEntry> entries; std::vector<workspace::GitRangeHistoryEntry> ranges; workspace::GitReview diff; std::string error; bool isDiff = false, isSnapshot = false, stoppedAtBoundary = false; };
+    struct ModuleHistoryResult { std::vector<workspace::GitFileHistoryEntry> entries; std::vector<workspace::GitRangeHistoryEntry> ranges; std::vector<workspace::GitLineAttribution> attribution; workspace::GitReview diff; std::string error; bool isDiff = false, isSnapshot = false, isAttribution = false, truncated = false, stoppedAtBoundary = false; };
     std::future<ModuleHistoryResult> m_moduleHistoryFuture;
     std::vector<workspace::GitFileHistoryEntry> m_moduleHistoryEntries;
     std::vector<workspace::GitRangeHistoryEntry> m_moduleRangeHistory;
+    std::vector<workspace::GitLineAttribution> m_moduleAttribution;
     workspace::GitReview m_moduleHistoryDiff;
     std::string m_moduleHistoryRoot, m_moduleHistoryFile;
     bool m_moduleHistoryShowing = false, m_moduleHistoryDiffShowing = false;
     bool m_moduleHistorySnapshotShowing = false;
+    bool m_moduleHistoryAttribution = false;
     std::optional<std::size_t> m_moduleHistorySelected;
     bool m_moduleHistoryRange = false;
     std::uint64_t m_moduleHistoryRevision = 0;

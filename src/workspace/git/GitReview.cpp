@@ -406,6 +406,41 @@ bool gitRangeHistory(const std::filesystem::path& root, std::string_view path,
     entries = std::move(result); return true;
 }
 
+bool gitLineAttribution(const std::filesystem::path& root, std::string_view path,
+                        std::string_view expectedSource, std::vector<GitLineAttribution>& entries,
+                        bool& truncated, std::string& error) {
+    entries.clear(); truncated=false; error.clear();
+    if (!safePath(path) || path.find_first_of("\r\n")!=std::string_view::npos || expectedSource.size()>2U*1024U*1024U || expectedSource.find('\0')!=expectedSource.npos) {error="Invalid source path or text";return false;}
+    std::string prefix, head, committed;
+    if(!git(root,{"rev-parse","--show-prefix"},prefix,error)) return false;
+    while(!prefix.empty() && (prefix.back()=='\n' || prefix.back()=='\r')) prefix.pop_back();
+    if(!git(root,{"rev-parse","--verify","HEAD"},head,error)) return false;
+    while(!head.empty() && (head.back()=='\n' || head.back()=='\r')) head.pop_back();
+    if((head.size()!=40 && head.size()!=64) || !std::all_of(head.begin(),head.end(),[](char c){return (c>='0'&&c<='9') || (c>='a'&&c<='f');})) {error="Invalid Git HEAD";return false;}
+    if(!git(root,{"cat-file","blob",head+":"+prefix+std::string(path)},committed,error)) return false;
+    if(committed!=expectedSource) {error="Save and commit this exact file before viewing attribution";return false;}
+    if(committed.empty()) return true;
+    const auto lines=static_cast<std::size_t>(std::count(committed.begin(),committed.end(),'\n'))+(committed.back()=='\n'?0:1);
+    const auto count=std::min<std::size_t>(lines,1000);truncated=lines>count;
+    std::string output;
+    if(!git(root,{"blame","--line-porcelain","--no-progress","-L","1,"+std::to_string(count),head,"--",std::string(path)},output,error)) return false;
+    std::istringstream stream(output); std::string row; std::vector<GitLineAttribution> result;
+    while(std::getline(stream,row)) {
+        std::istringstream header(row); GitLineAttribution entry; std::size_t original=0, final=0;
+        if(!(header>>entry.hash>>original>>final) || (entry.hash.size()!=40 && entry.hash.size()!=64) || !std::all_of(entry.hash.begin(),entry.hash.end(),[](char c){return (c>='0'&&c<='9') || (c>='a'&&c<='f');}) || final!=result.size()+1 || !original) {error="Invalid Git attribution output";return false;}
+        entry.line=final-1; bool found=false;
+        while(std::getline(stream,row)) {
+            if(!row.empty() && row.front()=='\t') {entry.text=row.substr(1);found=true;break;}
+            if(row.starts_with("author ")) entry.author=row.substr(7);
+            else if(row.starts_with("summary ")) entry.summary=row.substr(8);
+        }
+        if(!found || entry.author.size()>4096 || entry.summary.size()>4096 || entry.text.size()>1024U*1024U) {error="Incomplete Git attribution output";return false;}
+        result.push_back(std::move(entry));
+    }
+    if(result.size()!=count) {error="Incomplete Git attribution output";return false;}
+    entries=std::move(result);return true;
+}
+
 bool gitHistoricalFileDiff(const std::filesystem::path& root, std::string_view path, std::string_view commit, GitReview& review, std::string& error, std::string_view previousPath) {
     review.lines.clear();
     const bool validHash = (commit.size() == 40 || commit.size() == 64) && std::all_of(commit.begin(), commit.end(), [](char c) {

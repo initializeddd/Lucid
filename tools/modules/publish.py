@@ -157,6 +157,8 @@ def collect(owner):
             raise ValueError(f"Localization editing requires project access and a comparison command: {path}")
         if "container-project-actions-v1" in requirements and (not permissions["project"] or not permissions["network"] or not permissions["processes"] or not any(command.get("action") == "configured-container-actions" for command in commands)):
             raise ValueError(f"Configured container actions require project, network and process access: {path}")
+        if "api-response-compare-v1" in requirements and "api-response-assertions-v1" not in requirements:
+            raise ValueError(f"Response comparison requires response assertions capability: {path}")
         if "api-response-assertions-v1" in requirements and (not permissions["project"] or not permissions["network"] or "api-request-studio-v1" not in requirements or not any(command.get("action") in ("open-api-requests", "open-api-environment") for command in commands)):
             raise ValueError(f"Response assertions require project access and an API request command: {path}")
         if "api-environment-preflight-v1" in requirements and (not permissions["project"] or not permissions["network"] or "api-environments-v1" not in requirements or not any(command.get("action") == "open-api-environment" for command in commands)):

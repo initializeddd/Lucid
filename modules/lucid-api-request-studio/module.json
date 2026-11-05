@@ -8,6 +8,7 @@
     "api-response-save-v1",
     "api-collection-edit-v1",
     "api-response-assertions-v1",
+    "api-response-compare-v1",
     "api-environment-preflight-v1"
   ],
   "permissions": {

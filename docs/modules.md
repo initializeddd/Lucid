@@ -134,6 +134,9 @@ group access tokens with the default `glpat-` prefix and 20-character suffix.
 GitLab instances can use custom prefixes, which this pattern does not detect.
 Private-key header detection includes PEM, OpenSSH and PGP private-key blocks;
 public-key blocks do not produce this finding.
+The scanner also flags a bounded subset of Slack bot and user token formats
+with numeric ID sections. Other Slack token formats are not covered, and a
+finding does not establish whether a token is valid or active.
 
 The CMake Navigator reads an existing CMake File API codemodel from a selected
 project-relative build directory and shows targets, source files, compile groups,
@@ -324,6 +327,13 @@ file after explicit confirmation; existing files are not overwritten. The exact 
 may be binary and may contain sensitive data, so protect the saved file. Transport errors
 and incomplete responses cannot be exported. Binary responses, large responses and more
 than 200 displayed lines are limited in the preview.
+**Compare response body** compares the received body with an explicitly selected,
+saved project-local file without making another request. It reports exact byte
+lengths and the first differing byte; plain UTF-8 also gets approximate changed
+line ranges. Body contents are not shown in the comparison, but the underlying
+files and response may be sensitive. The baseline is a snapshot and may change
+after it is read; unsaved edits to that file must be resolved first. This is a
+byte comparison, so formatting changes can affect JSON even when values match.
 
 Diagram-as-Code Preview renders the current `.mmd` or `.mermaid` buffer locally,
 including unsaved edits. It accepts a small Mermaid flowchart subset: directed
@@ -442,6 +452,12 @@ Change Archaeology runs local Git commands to list up to 100 commits for the ope
 file and display a selected commit's diff. The list and diffs follow renames within
 the open project; history stops at a rename across its boundary. Historical
 lines are read-only and are not presented as locations in the current buffer.
+**View line attribution** shows the author and commit summary for up to 1,000
+lines of the current file and lets you navigate to a line. The saved file must
+match the committed HEAD content exactly; Lucid checks the open document and disk
+again before navigation. Attribution reflects a captured Git snapshot and can
+become stale if history changes. Large Git output is rejected rather than treated
+as a complete result.
 From a file-history diff, **View historical file** reads that commit's project-local
 blob without altering the open document. Binary and unsupported text are refused;
 the preview shows at most 1,000 lines and truncates long lines. It follows the

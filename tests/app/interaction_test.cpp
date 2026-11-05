@@ -911,7 +911,19 @@ struct ApplicationInteractionTest {
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
                 while (app.m_moduleHistoryFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
                 if (app.m_moduleHistoryFuture.valid() || app.m_commandStatusIsError || app.m_moduleHistoryEntries.size() != 2 || app.m_moduleHistoryEntries[1].path != "old-name.cpp") return 421;
-                app.m_selectedSuggestion = 2; app.applyModuleCommand();
+                const auto attributionChoice=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-800);
+                if(attributionChoice==app.m_moduleChoices.end()) return 1140;
+                app.m_selectedSuggestion=static_cast<int>(attributionChoice-app.m_moduleChoices.begin());app.applyModuleCommand();
+                while(app.m_moduleHistoryFuture.valid() && std::chrono::steady_clock::now()<deadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+                if(app.m_moduleHistoryFuture.valid() || app.m_commandStatusIsError || !app.m_moduleHistoryAttribution || app.m_moduleAttribution.empty() || app.m_moduleAttribution[0].text!="historic content") return 1141;
+                auto blameRow=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0);if(blameRow==app.m_moduleChoices.end())return 1142;
+                app.m_selectedSuggestion=static_cast<int>(blameRow-app.m_moduleChoices.begin());app.applyModuleCommand();if(app.m_searchBar.isOpen() || app.m_document.cursorLine()!=0)return 1145;
+                app.m_moduleHistoryShowing=true;app.m_moduleHistoryAttribution=true;app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();
+                app.m_document.insert(U'!');blameRow=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0);if(blameRow==app.m_moduleChoices.end())return 1142;
+                app.m_selectedSuggestion=static_cast<int>(blameRow-app.m_moduleChoices.begin());app.applyModuleCommand();if(!app.m_commandStatusIsError || !app.m_moduleHistoryAttribution)return 1143;
+                app.m_document.undo();app.m_moduleHistoryAttribution=false;app.m_moduleHistoryRevision=app.m_document.revision();app.clearCommandFeedback();app.refreshSuggestions();
+                const auto oldCommit=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),1);if(oldCommit==app.m_moduleChoices.end())return 1144;
+                app.m_selectedSuggestion=static_cast<int>(oldCommit-app.m_moduleChoices.begin()); app.applyModuleCommand();
                 while (app.m_moduleHistoryFuture.valid() && std::chrono::steady_clock::now() < deadline) { app.pollModules(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
                 if (app.m_moduleHistoryFuture.valid() || app.m_commandStatusIsError || !app.m_moduleHistoryDiffShowing || std::none_of(app.m_moduleHistoryDiff.lines.begin(), app.m_moduleHistoryDiff.lines.end(), [](const auto& line) { return line.text == "+historic content" && line.line == 0; })) return 422;
                 const auto snapshotChoice=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-740);
@@ -1406,7 +1418,7 @@ struct ApplicationInteractionTest {
             app.m_selectedSuggestion = 0; app.applyModuleCommand();
             { std::ofstream env(temp / "nested" / "api-env.json"); env << R"({"environments":[{"name":"local","variables":{"PORT":{"type":"number","value":"4444"},"TOKEN":{"type":"string","value":"private-test-token","secret":true}}}]})"; }
             app.m_moduleRoot = temp / "api-env-modules";
-            const std::string environmentManifest = R"({"name":"API Profiles","version":"1","requires":["api-environments-v1","api-response-save-v1","api-request-studio-v1","api-response-assertions-v1","api-environment-preflight-v1"],"permissions":{"project":true,"network":true,"processes":false,"settings":false},"commands":[{"title":"Profiles","action":"open-api-environment"}]})";
+            const std::string environmentManifest = R"({"name":"API Profiles","version":"1","requires":["api-environments-v1","api-response-save-v1","api-request-studio-v1","api-response-assertions-v1","api-response-compare-v1","api-environment-preflight-v1"],"permissions":{"project":true,"network":true,"processes":false,"settings":false},"commands":[{"title":"Profiles","action":"open-api-environment"}]})";
             if (!modules::install(app.m_moduleRoot, "api-profile", environmentManifest, error) || !modules::setEnabled(app.m_moduleRoot, "api-profile", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 546;
             app.m_document = editor::Document::fromUtf8(R"({"requests":[{"name":"Profile request","method":"GET","url":"http://127.0.0.1:{{PORT}}/","headers":{"Authorization":"{{TOKEN}}"}}]})");
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
@@ -1425,9 +1437,18 @@ struct ApplicationInteractionTest {
             app.m_selectedSuggestion = 1; app.applyModuleCommand();
             if (!app.m_apiSelected || app.m_apiConfirmed || app.m_apiFuture.valid() || std::any_of(app.m_suggestions.begin(), app.m_suggestions.end(), [](const auto& item) { return item.path.find("private-test-token") != std::string::npos || item.detail.find("private-test-token") != std::string::npos; })) return 551;
             app.m_apiConfirmed=true; app.m_apiResponse={}; app.m_apiResponse.status=200; app.m_apiResponse.body=std::string("body\0data",9); app.m_apiResponseView=0; app.m_apiSaveStage=0; app.refreshSuggestions();
+            {std::ofstream baseline(temp/"nested"/"api-baseline.bin",std::ios::binary);const std::string content("body\0xxxx",9);baseline.write(content.data(),static_cast<std::streamsize>(content.size()));}
+            auto findApiChoice=[&](int code) {for(std::size_t page=0;page<10;++page){app.m_modulePage=page;app.refreshSuggestions();auto it=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),code);if(it!=app.m_moduleChoices.end()){app.m_selectedSuggestion=static_cast<int>(it-app.m_moduleChoices.begin());return true;}}return false;};
+            if(!findApiChoice(-750)) return 1150;app.applyModuleCommand();
+            if(app.m_apiCompareStage!=1 || app.m_searchBar.kind()!=ui::PromptKind::ModuleApiSavePath) return 1151;
+            app.m_searchBar.setQuery("api-baseline.bin");app.applyModuleCommand();
+            const auto compareDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);while(app.m_apiCompareFuture.valid() && std::chrono::steady_clock::now()<compareDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_apiCompareFuture.valid() || app.m_apiCompareStage!=3 || !app.m_apiComparison.error.empty() || app.m_apiComparison.identical || app.m_apiComparison.text || app.m_apiComparison.commonPrefix!=5 || app.m_apiFuture.valid()) return 1152;
+            if(!findApiChoice(-751)) return 1153;app.applyModuleCommand();if(app.m_apiCompareStage!=0)return 1154;
+            std::filesystem::remove(temp/"nested"/"api-baseline.bin");app.m_modulePage=0;app.refreshSuggestions();
             { std::ofstream assertions(temp/"nested"/"checks.json"); assertions << R"({"assertions":[{"type":"status","value":200},{"type":"body_contains","value":"body"},{"type":"body_contains","value":"private-expected"}]})"; }
-            auto assertChoice=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-303); if (assertChoice==app.m_moduleChoices.end()) return 1020;
-            app.m_selectedSuggestion=static_cast<int>(assertChoice-app.m_moduleChoices.begin()); app.applyModuleCommand();
+            if(!findApiChoice(-303)) return 1020;
+            app.applyModuleCommand();
             if (app.m_searchBar.kind()!=ui::PromptKind::ModuleApiSavePath || app.m_apiAssertionStage!=1) return 1021;
             app.m_searchBar.setQuery("checks.json"); app.applyModuleCommand();
             const auto assertDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
@@ -1435,8 +1456,8 @@ struct ApplicationInteractionTest {
             if (app.m_apiAssertionFuture.valid() || app.m_apiAssertionStage!=3 || !app.m_apiAssertions.error.empty() || app.m_apiAssertions.results.size()!=3 || !app.m_apiAssertions.results[0].passed || !app.m_apiAssertions.results[1].passed || app.m_apiAssertions.results[2].passed) return 1022;
             for (std::size_t page=0;page<10;++page) { app.m_modulePage=page; app.refreshSuggestions(); for (const auto& item:app.m_suggestions) if (item.path.find("private-expected")!=std::string_view::npos || item.detail.find("private-expected")!=std::string_view::npos || item.path.find(std::string_view("body\0data",9))!=std::string_view::npos || item.detail.find(std::string_view("body\0data",9))!=std::string_view::npos) return 1023; }
             std::filesystem::remove(temp/"nested"/"checks.json"); app.m_apiAssertionStage=0; app.m_apiAssertions={}; app.m_modulePage=0; app.refreshSuggestions();
-            auto saveResponse=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-202); if (saveResponse==app.m_moduleChoices.end()) return 824;
-            app.m_selectedSuggestion=static_cast<int>(saveResponse-app.m_moduleChoices.begin()); app.applyModuleCommand();
+            if(!findApiChoice(-202)) return 824;
+            app.applyModuleCommand();
             if (app.m_searchBar.kind()!=ui::PromptKind::ModuleApiSavePath) return 825;
             app.m_searchBar.setQuery("response.bin"); app.applyModuleCommand(); auto confirmSave=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-201);
             if (confirmSave==app.m_moduleChoices.end() || std::filesystem::exists(temp/"nested"/"response.bin")) return 826;

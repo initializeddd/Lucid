@@ -14,6 +14,23 @@ bool alphaNumeric(unsigned char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
 }
 bool gitlabTokenCharacter(unsigned char c) { return alphaNumeric(c) || c == '_' || c == '-'; }
+// Slack's documented bot/user token forms have numeric ID sections and an
+// alphanumeric secret. Match the structured subset only; deployments may use
+// other token forms and findings never prove that a token is still valid.
+bool slackToken(std::string_view value) {
+    const bool bot=value.starts_with("xoxb-"), user=value.starts_with("xoxp-");
+    if(!bot && !user) return false;
+    std::size_t i=5;
+    for(int section=0;section<(bot?2:3);++section) {
+        const auto start=i;
+        while(i<value.size() && value[i]>='0' && value[i]<='9' && i-start<20) ++i;
+        if(i==start || i>=value.size() || value[i]!='-') return false;
+        ++i;
+    }
+    const auto secret=i;
+    while(i<value.size() && alphaNumeric(static_cast<unsigned char>(value[i])) && i-secret<128) ++i;
+    return i-secret>=6 && (i==value.size() || !gitlabTokenCharacter(static_cast<unsigned char>(value[i])));
+}
 }
 SecretScanResult scanSecretText(std::string_view path, std::string_view contents, const std::atomic_bool* cancel, std::size_t limit) {
     SecretScanResult result;
@@ -37,6 +54,7 @@ SecretScanResult scanSecretText(std::string_view path, std::string_view contents
             else if ((i == 0 || !gitlabTokenCharacter(static_cast<unsigned char>(contents[i - 1]))) && tail.starts_with("glpat-") &&
                      tail.size() >= 26 && std::all_of(tail.begin() + 6, tail.begin() + 26, gitlabTokenCharacter) &&
                      (tail.size() == 26 || !gitlabTokenCharacter(static_cast<unsigned char>(tail[26])))) kind = "GitLab access token";
+            else if ((i == 0 || !gitlabTokenCharacter(static_cast<unsigned char>(contents[i - 1]))) && slackToken(tail)) kind = "Slack token";
             else if (tail.starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----") || tail.starts_with("-----BEGIN PRIVATE KEY-----") || tail.starts_with("-----BEGIN RSA PRIVATE KEY-----") ||
                      tail.starts_with("-----BEGIN EC PRIVATE KEY-----") || tail.starts_with("-----BEGIN DSA PRIVATE KEY-----") ||
                      tail.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") || tail.starts_with("-----BEGIN PGP PRIVATE KEY BLOCK-----")) kind = "Private key";

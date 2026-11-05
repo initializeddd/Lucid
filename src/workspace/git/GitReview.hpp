@@ -11,6 +11,7 @@ struct GitReview { std::vector<GitReviewLine> lines; };
 struct GitHistoryEntry { std::string hash, author, date, subject; };
 struct GitFileHistoryEntry { std::string hash, author, date, subject, path, previousPath; };
 struct GitRangeHistoryEntry { std::string hash, author, date, subject; GitReview review; };
+struct GitLineAttribution { std::size_t line = 0; std::string hash, author, summary, text; };
 struct GitBranch { std::string name, commit; bool current = false; };
 struct GitBranches { std::string head; std::vector<GitBranch> branches; };
 [[nodiscard]] bool gitBranches(const std::filesystem::path& root, GitBranches& result, std::string& error);
@@ -26,6 +27,10 @@ struct GitBranches { std::string head; std::vector<GitBranch> branches; };
 [[nodiscard]] bool gitRangeHistory(const std::filesystem::path& root, std::string_view path,
                                    std::string_view expectedSource, std::size_t first, std::size_t last,
                                    std::vector<GitRangeHistoryEntry>& entries, std::string& error);
+// Attribution is anchored to a captured HEAD and requires the exact committed
+// bytes. Returns at most 1000 current lines; metadata is untrusted Git data.
+[[nodiscard]] bool gitLineAttribution(const std::filesystem::path& root, std::string_view path,
+    std::string_view expectedSource, std::vector<GitLineAttribution>& entries, bool& truncated, std::string& error);
 [[nodiscard]] bool gitHistoricalFileDiff(const std::filesystem::path& root, std::string_view path, std::string_view commit, GitReview& review, std::string& error, std::string_view previousPath = {});
 // Reads a historical project-relative blob without consulting or changing the working tree.
 // Rejects binary and incomplete output; contents are untrusted historical text.

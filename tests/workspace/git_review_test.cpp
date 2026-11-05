@@ -68,11 +68,11 @@ int main() {
     std::string stagedBlob; bool blobPresent = false;
     if (!gitReadReviewedBlob(root / "nested", preview, "a file.txt", stagedBlob, blobPresent, error) || !blobPresent || stagedBlob != "one\nchanged\n++added\n") { std::fprintf(stderr, "staged read: %s, present=%d, bytes=%zu\n", error.c_str(), blobPresent, stagedBlob.size()); return 58; }
     if (gitReadReviewedBlob(root / "nested", preview, "../outside.txt", stagedBlob, blobPresent, error)) return 59;
-    { std::ofstream file(root / "nested/a file.txt"); file << "ghp_" << std::string(36, 'A') << "\n" << "glpat-" << std::string(20, 'B') << "\n"; }
+    { std::ofstream file(root / "nested/a file.txt"); file << "ghp_" << std::string(36, 'A') << "\n" << "glpat-" << std::string(20, 'B') << "\n" << "xoxb-" << "12-34-" << std::string(24,'C') << "\n"; }
     if (cmd("add 'nested/a file.txt'") || !gitCommitPreview(root / "nested", preview, error)) return 60;
     { std::ofstream file(root / "nested/a file.txt"); file << "safe working tree\n"; }
     const auto stagedScan = lucid::modules::scanStagedSecrets(root / "nested", preview);
-    if (stagedScan.incomplete || stagedScan.findings.size() != 2 || stagedScan.findings[0].kind != "GitHub token" || stagedScan.findings[1].kind != "GitLab access token") return 61;
+    if (stagedScan.incomplete || stagedScan.findings.size() != 3 || stagedScan.findings[0].kind != "GitHub token" || stagedScan.findings[1].kind != "GitLab access token" || stagedScan.findings[2].kind != "Slack token") return 61;
     if (cmd("add 'nested/a file.txt'")) return 62;
     if (!lucid::modules::scanStagedSecrets(root / "nested", preview).incomplete) return 63;
     GitCommitPreview cleanPreview;
@@ -152,6 +152,9 @@ int main() {
     std::vector<GitRangeHistoryEntry> rangeHistory;
     if (!gitRangeHistory(emptyRoot, "first.txt", "first", 1, 1, rangeHistory, error) || rangeHistory.size() != 1 ||
         rangeHistory[0].subject != "Initial commit" || std::none_of(rangeHistory[0].review.lines.begin(), rangeHistory[0].review.lines.end(), [](const auto& line) { return line.text == "+first" && line.line == 0; })) return 77;
+    std::vector<GitLineAttribution> attribution; bool attributionTruncated=false;
+    if(!gitLineAttribution(emptyRoot,"first.txt","first",attribution,attributionTruncated,error) || attributionTruncated || attribution.size()!=1 || attribution[0].line!=0 || attribution[0].author!="Alice" || attribution[0].text!="first") return 82;
+    if(gitLineAttribution(emptyRoot,"first.txt","modified",attribution,attributionTruncated,error) || !attribution.empty() || gitLineAttribution(emptyRoot,"../first.txt","first",attribution,attributionTruncated,error)) return 83;
     if (gitRangeHistory(emptyRoot, "first.txt", "changed", 1, 1, rangeHistory, error) || !rangeHistory.empty() || error.find("commit") == std::string::npos ||
         gitRangeHistory(emptyRoot, "../first.txt", "first", 1, 1, rangeHistory, error) ||
         gitRangeHistory(emptyRoot, "first.txt", "first", 0, 1, rangeHistory, error)) return 78;
@@ -173,6 +176,7 @@ int main() {
     if (!gitFileHistory(emptyRoot / "sub", "inside.txt", fileHistory, error, &stoppedAtBoundary) || !stoppedAtBoundary || fileHistory.size() != 1 ||
         fileHistory[0].path != "inside.txt" || !fileHistory[0].previousPath.empty()) return 75;
     if (!gitHistoricalFileText(emptyRoot / "sub", "inside.txt", fileHistory[0].hash, historicalText, error) || historicalText!="first") return 81;
+    if(!gitLineAttribution(emptyRoot/"sub","inside.txt","first",attribution,attributionTruncated,error) || attribution.size()!=1 || attribution[0].text!="first") return 84;
     if (gitHistoricalFileDiff(emptyRoot / "sub", "inside.txt", fileHistory[0].hash, review, error, "../renamed.txt")) return 76;
     if (gitRangeHistory(emptyRoot / "sub", "inside.txt", "first", 1, 1, rangeHistory, error) || error.find("repository root") == std::string::npos) return 79;
     std::filesystem::remove_all(root); return 0;

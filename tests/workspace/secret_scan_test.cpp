@@ -24,5 +24,11 @@ int main() {
     for (const auto& invalid : {"x" + token, "-" + token, token + "x", token + "-", token.substr(0, token.size()-1), std::string("glpat-") + std::string(19,'A') + "!"})
         if (!scanSecretText("fixture", invalid).findings.empty()) return 8;
     if (!scanSecretText("fixture", token, nullptr, 0).incomplete) return 9;
+    const auto bot=std::string("xoxb-")+"123-456-"+std::string(24,'A');
+    const auto user=std::string("xoxp-")+"12-34-56-"+std::string(6,'B');
+    const auto slack=scanSecretText("fixture", "β " + bot + "\n" + user);
+    if(slack.incomplete || slack.findings.size()!=2 || slack.findings[0].kind!="Slack token" || slack.findings[0].column!=2 || slack.findings[1].line!=1 || slack.findings[0].contentSha256!=slack.findings[1].contentSha256) return 10;
+    for(const auto& invalid:{"x"+bot, bot+"-", std::string("xoxb-")+"123-456-ABC", std::string("xoxp-")+"12-34-ABCDEF", std::string("xoxb-")+std::string(21,'1')+"-2-"+std::string(24,'A'), std::string("xoxb-")+"1-2-"+std::string(129,'A')}) if(!scanSecretText("fixture",invalid).findings.empty()) return 11;
+    if(!scanSecretText("fixture",bot,nullptr,0).incomplete) return 12;
     return 0;
 }

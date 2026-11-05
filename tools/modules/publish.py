@@ -135,6 +135,8 @@ def collect(owner):
             raise ValueError(f"Response assertions require project access and an API request command: {path}")
         if "design-token-aliases-v1" in requirements and (not permissions["project"] or "design-token-explorer-v1" not in requirements or not any(command.get("action") == "design-token-explorer" for command in commands)):
             raise ValueError(f"Design token aliases require project access and token exploration: {path}")
+        if "diagram-flow-branches-v1" in requirements and ("diagram-preview-v1" not in requirements or not any(command.get("action") == "diagram-preview" for command in commands)):
+            raise ValueError(f"Diagram branches require diagram preview support: {path}")
         if "diagram-flow-bidirectional-v1" in requirements and ("diagram-preview-v1" not in requirements or "diagram-flow-cycles-v1" not in requirements or not any(command.get("action") == "diagram-preview" for command in commands)):
             raise ValueError(f"Bidirectional diagrams require cyclic diagram preview support: {path}")
         if "diagram-flow-chains-v1" in requirements and ("diagram-preview-v1" not in requirements or not any(command.get("action") == "diagram-preview" for command in commands)):

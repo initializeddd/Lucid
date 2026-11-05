@@ -66,6 +66,10 @@ int main() {
     if(!parseMermaidFlowchart("flowchart LR\nA <--> B -->|then| C <--> |back| D\n",graph,error) || graph.edges.size()!=3 || !graph.edges[0].bidirectional || graph.edges[1].bidirectional || !graph.edges[2].bidirectional || graph.edges[2].label!="back") return 42;
     if(!layoutMermaidFlowchart(graph,layout,error) || layout.edges.size()!=3 || !layout.edges[0].bidirectional || layout.edges[1].bidirectional || !layout.edges[2].bidirectional || layout.nodes[0].x!=layout.nodes[1].x) return 43;
     for(const auto* invalid:{"flowchart LR\nA <-- B", "flowchart LR\nA <<--> B", "flowchart LR\nA <-->|| B", "flowchart LR\nA <--> <script>"}) if(parseMermaidFlowchart(invalid,graph,error) || !graph.nodes.empty()) return 44;
+    if(!parseMermaidFlowchart("flowchart LR\nA[First] & B -->|join| C & D <--> E\n",graph,error) || graph.nodes.size()!=5 || graph.edges.size()!=6) return 45;
+    if(graph.edges[0].from!="A" || graph.edges[0].to!="C" || graph.edges[0].label!="join" || graph.edges[3].from!="B" || graph.edges[3].to!="D" || !graph.edges[4].bidirectional || !graph.edges[5].bidirectional || !layoutMermaidFlowchart(graph,layout,error)) return 46;
+    for(const auto* invalid:{"flowchart LR\nA & --> B", "flowchart LR\nA --> B &", "flowchart LR\nA & A --> B", "flowchart LR\nA --> B & B", "flowchart LR\nA & <script> --> B"}) if(parseMermaidFlowchart(invalid,graph,error) || !graph.nodes.empty()) return 47;
+    std::string expansion="flowchart LR\n";for(int i=0;i<101;++i) {if(i)expansion+=" & ";expansion+="a"+std::to_string(i);} expansion+=" --> ";for(int i=0;i<100;++i) {if(i)expansion+=" & ";expansion+="b"+std::to_string(i);} if(parseMermaidFlowchart(expansion,graph,error) || !graph.nodes.empty() || error.find("Too many edges")==std::string::npos) return 48;
     std::atomic_bool cancel{true}; graph.nodes={{"old","old"}};
     if (parseMermaidFlowchart("flowchart LR\nA",graph,error,&cancel) || !graph.nodes.empty() || error.find("cancelled")==std::string::npos) return 29;
     cancel=false; if (!parseMermaidFlowchart("flowchart LR\nA --> B",graph,error,&cancel)) return 30;

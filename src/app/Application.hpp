@@ -82,6 +82,7 @@
 #include "modules/UsbDescriptors.hpp"
 #include "modules/CrashDump.hpp"
 #include "modules/UnixCrashReport.hpp"
+#include "modules/AppleCrashReport.hpp"
 #include "modules/CrashSymbols.hpp"
 #include "modules/RustOwnership.hpp"
 #include "modules/RustDiagnosticRun.hpp"
@@ -568,10 +569,11 @@ private:
     std::uint64_t m_toolchainGeneration = 0;
     std::optional<std::size_t> m_toolchainSelected;
     bool m_toolchainShowing = false;
-    struct CrashInspectionResult { modules::CrashDump dump; modules::UnixCrashReport gdb; bool isGdb=false; };
+    struct CrashInspectionResult { modules::CrashDump dump; modules::UnixCrashReport gdb; modules::AppleCrashReport apple; bool isGdb=false, isApple=false; };
     std::future<CrashInspectionResult> m_crashFuture;
     modules::UnixCrashReport m_crashGdb;
-    bool m_crashIsGdb=false;
+    bool m_crashIsGdb=false, m_crashIsApple=false;
+    modules::AppleCrashReport m_crashApple;
     std::shared_ptr<std::atomic_bool> m_crashCancel;
     modules::CrashDump m_crashDump;
     modules::CrashSourceMap m_crashSourceMap;

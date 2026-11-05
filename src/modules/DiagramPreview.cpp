@@ -1,5 +1,6 @@
 #include "modules/DiagramPreview.hpp"
 #include <map>
+#include <set>
 #include <algorithm>
 #include <queue>
 #include <functional>
@@ -36,6 +37,14 @@ bool node(std::string_view s, ParsedNode& out) {
     if (!plainText(label, 4096)) return false;
     out.label=std::string(label); out.explicitLabel=true; return true;
 }
+bool nodeGroup(std::string_view text,std::vector<ParsedNode>& group) {
+    group.clear(); std::set<std::string> ids;
+    for (;;) {
+        const auto separator=text.find('&'); ParsedNode item;
+        if(!node(text.substr(0,separator),item) || !ids.insert(item.id).second || group.size()>=maxItems) return false;
+        group.push_back(std::move(item)); if(separator==text.npos) return true; text=text.substr(separator+1);
+    }
+}
 }
 bool parseMermaidFlowchart(std::string_view source, DiagramGraph& graph, std::string& error, const std::atomic_bool* cancel) {
     graph={}; error.clear(); if (cancel && cancel->load()) { error="Diagram parsing cancelled"; return false; } if (source.size()>maxBytes) { error="Diagram exceeds size limit"; return false; }
@@ -65,7 +74,9 @@ bool parseMermaidFlowchart(std::string_view source, DiagramGraph& graph, std::st
         auto arrow=findArrow(s); ParsedNode a;
         if(arrow.position==s.npos) { if(!node(s,a) || !add(a)) return bad("Unsupported node or conflicting label"); }
         else {
-            if(!node(s.substr(0,arrow.position),a) || !add(a)) return bad("Unsupported edge or conflicting label");
+            std::vector<ParsedNode> sources;
+            if(!nodeGroup(s.substr(0,arrow.position),sources)) return bad("Unsupported edge group");
+            for(const auto& item:sources) if(!add(item)) return bad("Too many nodes or conflicting labels");
             auto remainder=s.substr(arrow.position+arrow.length);
             for (;;) {
                 if(cancel && cancel->load()) {error="Diagram parsing cancelled";return false;}
@@ -75,10 +86,15 @@ bool parseMermaidFlowchart(std::string_view source, DiagramGraph& graph, std::st
                     if(closing==target.npos || !plainText(target.substr(1,closing-1),256,true)) return bad("Unsupported edge label");
                     label=std::string(target.substr(1,closing-1)); target=trim(target.substr(closing+1));
                 }
-                const auto nextArrow=findArrow(target); ParsedNode b;
-                if(!node(target.substr(0,nextArrow.position),b)) return bad("Unsupported edge");
-                if(!add(b) || result.edges.size()>=maxItems) return bad("Too many nodes or conflicting labels");
-                result.edges.push_back({a.id,b.id,std::move(label),arrow.bidirectional}); a=std::move(b);
+                const auto nextArrow=findArrow(target); std::vector<ParsedNode> targets;
+                if(!nodeGroup(target.substr(0,nextArrow.position),targets)) return bad("Unsupported edge group");
+                for(const auto& item:targets) if(!add(item)) return bad("Too many nodes or conflicting labels");
+                if(targets.size()>(maxItems-result.edges.size())/sources.size()) return bad("Too many edges");
+                for(const auto& origin:sources) for(const auto& destination:targets) {
+                    if(cancel && cancel->load()) {error="Diagram parsing cancelled";return false;}
+                    result.edges.push_back({origin.id,destination.id,label,arrow.bidirectional});
+                }
+                sources=std::move(targets);
                 if(nextArrow.position==target.npos) break;
                 arrow=nextArrow; remainder=target.substr(nextArrow.position+nextArrow.length);
             }

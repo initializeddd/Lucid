@@ -341,6 +341,13 @@ class PublishTest(unittest.TestCase):
         with self.assertRaises(ValueError): self.invoke("--publish")
         self.assertFalse(self.registry)
 
+    def test_diagram_branches_require_preview_capability(self):
+        data = {"name":"Diagram", "version":"1", "requires":["diagram-preview-v1","diagram-flow-branches-v1"], "permissions":{"project":False,"network":False,"processes":False,"settings":False}, "commands":[{"title":"Preview","action":"diagram-preview"}]}
+        self.manifest.write_text(json.dumps(data)); self.invoke("--publish"); self.registry.clear()
+        data["requires"].remove("diagram-preview-v1"); self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError): self.invoke("--publish")
+        self.assertFalse(self.registry)
+
     def test_diagram_bidirectional_requires_cycle_capability(self):
         data = {"name":"Diagram", "version":"1", "requires":["diagram-preview-v1","diagram-flow-cycles-v1","diagram-flow-bidirectional-v1"], "permissions":{"project":False,"network":False,"processes":False,"settings":False}, "commands":[{"title":"Preview","action":"diagram-preview"}]}
         self.manifest.write_text(json.dumps(data)); self.invoke("--publish"); self.registry.clear()

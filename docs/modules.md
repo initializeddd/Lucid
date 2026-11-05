@@ -273,10 +273,11 @@ Diagram-as-Code Preview renders the current `.mmd` or `.mermaid` buffer locally,
 including unsaved edits. It accepts a small Mermaid flowchart subset: directed
 graphs, including cycles, self-loops and bidirectional `<-->` links, with plain node labels and simple edge labels such as `A -->|yes| B`,
 with one node or edge chain per line (for example, `A --> B -->|yes| C`).
-Branching operators, custom shapes and styling are unsupported. Edge labels are
+Branch groups such as `A & B --> C & D` expand to all four links; members of
+one group must be unique. Custom shapes and styling are unsupported. Edge labels are
 plain text up to 256 bytes and may
 be truncated visually; their full text is exposed to screen readers. The preview limits
-graphs to 24 nodes and 48 edges and reports unsupported syntax instead of running
+graphs to 24 nodes and 48 edges after branch expansion and reports unsupported syntax instead of running
 scripts or fetching content. Drag to pan and use the scroll wheel to zoom; arrow
 keys pan, plus/minus zoom, and 0 resets to fit. Escape closes the preview. Layout
 may contain overlapping edges, and other Mermaid diagram types are not supported.
@@ -565,7 +566,7 @@ remain unverified. Absolute FILE paths and PUBLIC-only symbols are not mapped. M
 candidates are unverified and may be wrong or stale; ambiguous matches are not
 navigable. Source must be inside the project, readable as text and contain the
 specified line; resolve unsaved edits before navigation. No PDB/DWARF parsing,
-automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Other debugger text formats are not supported.
+automatic symbol download or direct core dump parsing are supported. Saved GDB `thread apply all bt` text is also accepted up to 4 MiB; it displays reported signals, thread headings and frame text as unverified, with no source navigation or symbolication. The supported text subset is bounded to 256 threads, 4096 frames and 4096 bytes per line; only 512 frames are displayed. Unsupported lines and truncation are marked incomplete. Legacy Apple crash report text is also accepted with the same limits; reported code type, exception, threads and frames are unverified and cannot be navigated. Unsupported sections are marked incomplete. JSON `.ips`, thread state, binary image metadata and other debugger text formats are not supported.
 
 Rust Ownership Lens reads saved rustc or Cargo newline-delimited JSON diagnostics
 from the project. It presents supported ownership and borrowing errors, compiler

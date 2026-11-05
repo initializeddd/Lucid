@@ -1564,7 +1564,7 @@ struct ApplicationInteractionTest {
         {
             const auto oldRoot = app.m_moduleRoot; auto oldModules = app.m_modules; const auto oldSelected = app.m_moduleSelected; auto oldDocument = app.m_document; const auto oldPath = app.m_filePath;
             app.m_moduleRoot = temp / "diagram-modules"; std::string error;
-            const std::string manifest = R"({"name":"Diagram","version":"1","requires":["diagram-preview-v1","diagram-flow-cycles-v1","diagram-flow-chains-v1","diagram-flow-bidirectional-v1"],"permissions":{"project":false,"network":false,"processes":false,"settings":false},"commands":[{"title":"Preview","action":"diagram-preview"}]})";
+            const std::string manifest = R"({"name":"Diagram","version":"1","requires":["diagram-preview-v1","diagram-flow-cycles-v1","diagram-flow-chains-v1","diagram-flow-bidirectional-v1","diagram-flow-branches-v1"],"permissions":{"project":false,"network":false,"processes":false,"settings":false},"commands":[{"title":"Preview","action":"diagram-preview"}]})";
             if (!modules::install(app.m_moduleRoot, "diagram", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "diagram", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 506;
             app.m_document = editor::Document::fromUtf8("flowchart LR\nA[Start] -->|approved| B[End]\n"); app.m_filePath = "diagram.mmd"; const auto original = app.m_document.toUtf8();
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
@@ -1583,10 +1583,10 @@ struct ApplicationInteractionTest {
             app.handleChar(U'0'); if (app.m_diagramZoom!=1.0 || app.m_diagramPanX!=0 || app.m_diagramPanY!=0) return 814;
             input::KeyEvent escape{}; escape.key = input::Key::Escape; escape.action = input::KeyAction::Press; app.handleKey(escape);
             if (app.m_diagramPreviewVisible) return 508;
-            app.m_document=editor::Document::fromUtf8("flowchart LR\nA <--> |first| B -->|second| A --> A\n");
+            app.m_document=editor::Document::fromUtf8("flowchart LR\nA & B <--> |first| C -->|second| A --> A\n");
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand();
             const auto cycleDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15); while(app.m_diagramPreviewFuture.valid() && std::chrono::steady_clock::now()<cycleDeadline) {app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
-            const auto cycleFrame=app.makeFrameState(1.0); if(app.m_diagramPreviewFuture.valid() || !app.m_diagramPreviewVisible || cycleFrame.diagramNodes.size()!=2 || cycleFrame.diagramEdges.size()!=3 || cycleFrame.diagramEdges[2].points.size()!=6 || !cycleFrame.diagramEdges[0].bidirectional || cycleFrame.diagramEdges[1].bidirectional || cycleFrame.diagramEdges[0].label!="first" || cycleFrame.diagramEdges[1].label!="second") return 1054;
+            const auto cycleFrame=app.makeFrameState(1.0); if(app.m_diagramPreviewFuture.valid() || !app.m_diagramPreviewVisible || cycleFrame.diagramNodes.size()!=3 || cycleFrame.diagramEdges.size()!=4 || cycleFrame.diagramEdges[3].points.size()!=6 || !cycleFrame.diagramEdges[0].bidirectional || !cycleFrame.diagramEdges[1].bidirectional || cycleFrame.diagramEdges[2].bidirectional || cycleFrame.diagramEdges[0].label!="first" || cycleFrame.diagramEdges[1].label!="first" || cycleFrame.diagramEdges[2].label!="second") return 1054;
             app.handleKey(escape); if(app.m_diagramPreviewVisible) return 1055; app.m_document=editor::Document::fromUtf8(original);
             app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             app.m_searchBar.close(); app.m_searchBar.open(ui::PromptKind::ModuleCommands);
@@ -1667,7 +1667,7 @@ struct ApplicationInteractionTest {
             put(56, 1, 4); put(60, 42, 4); put(84, 0x1234, 8); put(108, 42, 4); put(116, 0xc0000005, 4); put(132, 0xdeadbeef, 8);
             { std::ofstream out(temp / "nested" / "crash.dmp", std::ios::binary); out.write(dump.data(), static_cast<std::streamsize>(dump.size())); }
             app.m_moduleRoot = temp / "crash-modules"; std::string error;
-            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
+            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-apple-text-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
             if (!modules::install(app.m_moduleRoot, "crash", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "crash", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 490;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleCrashPath) return 491;
@@ -1715,6 +1715,14 @@ struct ApplicationInteractionTest {
             if(app.m_crashFuture.valid() || !app.m_crashIsGdb || !app.m_crashGdb.incomplete || app.m_crashGdb.threads.size()!=1) return 1104;
             bool sawGdb=false,sawGdbFrame=false,sawGdbIncomplete=false,sawMap=false;for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions){sawGdb|=row.path=="GDB backtrace text";sawGdbFrame|=row.path=="Frame #0" && row.detail.find("unverified")!=std::string_view::npos;sawGdbIncomplete|=row.path=="Incomplete backtrace";}sawMap|=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220)!=app.m_moduleChoices.end();}
             if(!sawGdb || !sawGdbFrame || !sawGdbIncomplete || sawMap) return 1105;
+            app.m_crashShowing=false; app.m_modulePage=0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion=0; app.applyModuleCommand();
+            { std::ofstream out(temp / "nested" / "apple.crash"); out << "Code Type: ARM-64 (Native)\nException Type: EXC_BAD_ACCESS\nThread 0 Crashed:: Dispatch queue: main\n0 MyApp 0x1234 main + 2\nBinary Images:\n"; }
+            app.m_searchBar.setQuery("apple.crash"); app.applyModuleCommand(); const auto appleDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+            while(app.m_crashFuture.valid() && std::chrono::steady_clock::now()<appleDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_crashFuture.valid() || !app.m_crashIsApple || !app.m_crashApple.incomplete || app.m_crashApple.threads.size()!=1) return 1106;
+            bool sawApple=false,sawAppleFrame=false,sawAppleIncomplete=false,sawAppleMap=false;for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions){sawApple|=row.path=="Apple crash report text";sawAppleFrame|=row.path=="Frame #0" && row.detail.find("unverified")!=std::string_view::npos;sawAppleIncomplete|=row.path=="Incomplete crash report";}sawAppleMap|=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220)!=app.m_moduleChoices.end();}
+            if(!sawApple || !sawAppleFrame || !sawAppleIncomplete || sawAppleMap) return 1107;
+            app.m_crashIsApple=false; std::filesystem::remove(temp / "nested" / "apple.crash");
             app.m_crashIsGdb=false; std::filesystem::remove(temp / "nested" / "trace.txt");
             app.openFile("example.txt", false); std::filesystem::remove(temp / "nested" / "crash-map.tsv"); std::filesystem::remove(temp / "nested" / "crash.sym"); std::filesystem::remove(temp / "nested" / "crash-source.cpp");
             app.m_crashShowing = false; app.m_searchBar.close(); app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected;

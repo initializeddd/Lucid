@@ -1,8 +1,8 @@
 {
   "name": "Crash Dump Reader",
   "version": "0.1.0",
-  "description": "Inspect minidumps and saved GDB backtrace text locally.",
-  "requires": ["crash-dump-reader-v1", "crash-gdb-text-v1"],
+  "description": "Inspect minidumps, saved GDB backtraces and legacy Apple crash text locally.",
+  "requires": ["crash-dump-reader-v1", "crash-gdb-text-v1", "crash-apple-text-v1"],
   "permissions": {"project": true, "network": false, "processes": false, "settings": false},
   "commands": [{"title": "Inspect crash dump", "action": "crash-dump-reader"}]
 }

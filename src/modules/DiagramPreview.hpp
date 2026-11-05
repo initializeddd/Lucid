@@ -9,7 +9,8 @@ struct DiagramEdge { std::string from, to; std::string label{}; bool bidirection
 struct DiagramGraph { std::string direction; std::vector<DiagramNode> nodes; std::vector<DiagramEdge> edges; };
 // Supports flowchart/graph TD, TB, BT, LR, RL; one node or directed edge
 // per line, optionally labeled as A -->|label| B; bidirectional <--> and chained links are
-// supported (A --> B -->|label| C). Identifiers [A-Za-z_][A-Za-z0-9_]* and
+// supported (A --> B -->|label| C), as are branch groups (A & B --> C & D).
+// Branches expand to the Cartesian product of each linked group. Identifiers [A-Za-z_][A-Za-z0-9_]* and
 // optional plain [label].
 // Rejects unsupported syntax; no rendering, scripts, or network access.
 [[nodiscard]] bool parseMermaidFlowchart(std::string_view source, DiagramGraph& graph, std::string& error, const std::atomic_bool* cancel = nullptr);

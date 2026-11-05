@@ -11,5 +11,5 @@ struct ModuleProcessResult { std::string output, error; int exitCode = -1; bool 
 // combined, stdin is closed, and output/time are bounded. No PATH lookup.
 [[nodiscard]] ModuleProcessResult runModuleProcess(const std::filesystem::path& executable, const std::vector<std::string>& args,
     std::chrono::milliseconds timeout = std::chrono::seconds(30), std::size_t outputLimit = 1024 * 1024,
-    const std::atomic_bool* cancel = nullptr);
+    const std::atomic_bool* cancel = nullptr, const std::filesystem::path& workingDirectory = {});
 }

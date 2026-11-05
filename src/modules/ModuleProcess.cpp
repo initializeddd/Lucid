@@ -37,10 +37,12 @@ std::wstring quote(const std::wstring& s) {
 }
 #endif
 }
-ModuleProcessResult runModuleProcess(const std::filesystem::path& executable, const std::vector<std::string>& args, std::chrono::milliseconds timeout, std::size_t outputLimit, const std::atomic_bool* cancel) {
+ModuleProcessResult runModuleProcess(const std::filesystem::path& executable, const std::vector<std::string>& args, std::chrono::milliseconds timeout, std::size_t outputLimit, const std::atomic_bool* cancel, const std::filesystem::path& workingDirectory) {
     ModuleProcessResult result;
     if (cancel && cancel->load()) { result.cancelled = true; return result; }
     if (!executable.is_absolute() || timeout.count() <= 0) { result.error = "Executable must be absolute and timeout positive"; return result; }
+    std::error_code directoryError;
+    if (!workingDirectory.empty() && (workingDirectory.native().find(std::filesystem::path::value_type{})!=std::filesystem::path::string_type::npos || !workingDirectory.is_absolute() || !std::filesystem::is_directory(workingDirectory,directoryError) || directoryError)) { result.error="Working directory must be an existing absolute directory";return result; }
     for (const auto& arg : args) if (arg.find('\0') != std::string::npos) { result.error = "Argument contains NUL"; return result; }
 #ifdef _WIN32
     if (executable.native().find(L'\0') != std::wstring::npos) { result.error = "Executable contains NUL"; return result; }
@@ -61,7 +63,7 @@ ModuleProcessResult runModuleProcess(const std::filesystem::path& executable, co
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.StartupInfo.dwFlags = STARTF_USESTDHANDLES; si.StartupInfo.hStdInput = input; si.StartupInfo.hStdOutput = writePipe; si.StartupInfo.hStdError = writePipe; si.lpAttributeList = attributes; PROCESS_INFORMATION pi{};
     HANDLE job = CreateJobObjectW(nullptr, nullptr); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { if (job) CloseHandle(job); DeleteProcThreadAttributeList(attributes); CloseHandle(input); CloseHandle(readPipe); CloseHandle(writePipe); result.error = "Cannot create process job"; return result; }
-    BOOL ok = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &si.StartupInfo, &pi);
+    BOOL ok = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, workingDirectory.empty()?nullptr:workingDirectory.c_str(), &si.StartupInfo, &pi);
     DeleteProcThreadAttributeList(attributes);
     CloseHandle(input); CloseHandle(writePipe);
     if (!ok) { CloseHandle(job); CloseHandle(readPipe); result.error = "Cannot start process"; return result; }
@@ -89,13 +91,13 @@ ModuleProcessResult runModuleProcess(const std::filesystem::path& executable, co
     }
     int readFlags = fcntl(pipefd[0], F_GETFL);
     if (readFlags < 0 || fcntl(pipefd[0], F_SETFL, readFlags | O_NONBLOCK) < 0) { close(pipefd[0]); close(pipefd[1]); result.error = "Cannot configure output pipe"; return result; }
-    std::string program = executable.string(); if (program.find('\0') != std::string::npos) { close(pipefd[0]); close(pipefd[1]); result.error = "Executable contains NUL"; return result; }
+    std::string program = executable.string(), directory=workingDirectory.string(); if (program.find('\0') != std::string::npos || directory.find('\0') != std::string::npos) { close(pipefd[0]); close(pipefd[1]); result.error = "Executable or working directory contains NUL"; return result; }
     std::vector<char*> argv; argv.reserve(args.size() + 2); argv.push_back(program.data()); for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str())); argv.push_back(nullptr);
     long maxFd = sysconf(_SC_OPEN_MAX); if (maxFd < 0) maxFd = 1024;
     pid_t pid = fork();
     if (pid < 0) { close(pipefd[0]); close(pipefd[1]); result.error = "Cannot start process"; return result; }
     if (!pid) {
-        setpgid(0, 0); int nullfd = open("/dev/null", O_RDONLY); if (nullfd < 0 || dup2(nullfd, STDIN_FILENO) < 0 || dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
+        setpgid(0, 0); if(!directory.empty() && chdir(directory.c_str())!=0) _exit(126); int nullfd = open("/dev/null", O_RDONLY); if (nullfd < 0 || dup2(nullfd, STDIN_FILENO) < 0 || dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
         for (long fd = 3; fd < maxFd; ++fd) close(static_cast<int>(fd));
         execv(program.c_str(), argv.data()); _exit(127);
     }

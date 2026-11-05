@@ -55,6 +55,7 @@
 #include "modules/ReleaseNotes.hpp"
 #include "modules/SqlWorkbench.hpp"
 #include "modules/Coverage.hpp"
+#include "modules/CoverageRun.hpp"
 #include "modules/CoverageSummary.hpp"
 #include "modules/BenchmarkComparison.hpp"
 #include "modules/BinaryInspector.hpp"
@@ -450,6 +451,11 @@ private:
     std::string m_coverageRoot;
     bool m_coverageCobertura = false;
     bool m_coverageShowing = false;
+    int m_coverageRunStage = 0; // 1: config input, 2: review, 3: running.
+    modules::CoverageRunPlan m_coverageRunPlan;
+    std::future<modules::ModuleProcessResult> m_coverageRunFuture;
+    std::shared_ptr<std::atomic_bool> m_coverageRunCancel;
+    std::string m_coverageRunModule;
     int m_coverageFilter = 0; // 0: all, 1: uncovered lines, 2: covered lines, 3: uncovered branches, 4: unknown branches.
     struct BenchmarkResult { modules::BenchmarkComparison comparison; std::string error; };
     std::future<BenchmarkResult> m_benchmarkFuture;

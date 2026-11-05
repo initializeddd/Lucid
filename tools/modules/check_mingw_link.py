@@ -33,7 +33,10 @@ def main():
             command = [compiler, "-std=c++20", "-I" + str(ROOT / "src"),
                        str(ROOT / "tests/workspace" / (test + "_test.cpp")),
                        str(ROOT / "src/modules" / source),
-                       str(ROOT / "src/editor/json/Json.cpp"), "-o", str(output)]
+                       str(ROOT / "src/editor/json/Json.cpp")]
+            if test == "rust_ownership":
+                command.append(str(ROOT / "src/editor/document/Document.cpp"))
+            command.extend(["-o", str(output)])
             result = subprocess.run(command, check=False)
             if result.returncode:
                 return result.returncode

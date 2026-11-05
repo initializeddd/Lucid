@@ -1,19 +1,24 @@
 {
   "name": "Test Coverage Lens",
   "version": "0.1.0",
-  "description": "Import local LCOV or Cobertura line and supported branch coverage; reports may be stale.",
+  "description": "Run a reviewed coverage generator or import local LCOV and Cobertura reports.",
   "requires": [
     "coverage-lcov-v1",
     "coverage-cobertura-v1",
-    "coverage-cobertura-branches-v1"
+    "coverage-cobertura-branches-v1",
+    "coverage-run-v1"
   ],
   "permissions": {
     "project": true,
     "network": false,
-    "processes": false,
+    "processes": true,
     "settings": false
   },
   "commands": [
+    {
+      "title": "Run configured coverage generator",
+      "action": "run-coverage"
+    },
     {
       "title": "Import LCOV report",
       "action": "coverage-lcov"

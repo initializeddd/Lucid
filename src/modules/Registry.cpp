@@ -26,6 +26,15 @@ bool validName(std::string_view value, bool slash) {
     return slash ? separators == 1 && value.front() != '/' && value.back() != '/' : separators == 0;
 }
 
+// OCI tags have different rules from repository names: they are case
+// sensitive, may begin with an underscore, and may end with punctuation.
+bool validTag(std::string_view value) {
+    if (value.empty() || value.size() > 128) return false;
+    const auto word = [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; };
+    if (!word(static_cast<unsigned char>(value.front()))) return false;
+    return std::all_of(value.begin() + 1, value.end(), [&](unsigned char c) { return word(c) || c == '.' || c == '-'; });
+}
+
 const editor::JsonValue* field(const editor::JsonValue& json, std::string_view name, editor::JsonType type) {
     const auto* value = json.find(name);
     return value && value->type == type ? value : nullptr;
@@ -89,6 +98,23 @@ bool get(std::string_view url, const std::vector<std::string>& headers,
 }
 } // namespace
 
+bool packageModuleId(std::string_view package, std::string& id, std::string& error) {
+    id.clear();
+    if (!validName(package, true)) { error = "Invalid package reference"; return false; }
+    const auto name = package.substr(package.find('/') + 1);
+    id.assign(name);
+    const bool needsMapping = id.size() > 80 || id.find('.') != std::string::npos;
+    if (needsMapping) {
+        std::replace(id.begin(), id.end(), '.', '-');
+        // Include the full repository in the suffix so similar names or
+        // different owners do not silently map to the same local directory.
+        const auto digest = picosha2::hash256_hex_string(package.begin(), package.end());
+        if (id.size() > 67) id.resize(67);
+        id += '-' + digest.substr(0, 12);
+    }
+    error.clear(); return true;
+}
+
 bool parseCatalog(std::string_view text, std::vector<RegistryEntry>& entries, std::string& error) {
     entries.clear();
     if (text.size() > kMaxResponse) { error = "Module catalog exceeds size limit"; return false; }
@@ -109,7 +135,7 @@ bool parseCatalog(std::string_view text, std::vector<RegistryEntry>& entries, st
             (requirements && (requirements->type != editor::JsonType::Array || requirements->children.size() > 32)) ||
             id->stringValue.size() > 80 || id->stringValue.find('.') != std::string::npos ||
             !validName(id->stringValue, false) || !validName(package->stringValue, true) ||
-            !validName(version->stringValue, false) ||
+            !validTag(version->stringValue) ||
             std::any_of(entries.begin(), entries.end(), [&](const auto& e) { return e.id == id->stringValue; })) {
             entries.clear(); error = "Invalid or duplicate module catalog entry"; return false;
         }
@@ -134,7 +160,7 @@ bool fetchPackage(std::string_view package, std::string_view version, std::strin
 bool fetchPackage(std::string_view package, std::string_view version, std::string_view mediaType,
                   std::string& contents, std::string& error, const RegistryRequest& request) {
     contents.clear();
-    if (!request || !validName(package, true) || !validName(version, false) ||
+    if (!request || !validName(package, true) || !validTag(version) ||
         (mediaType != "application/vnd.lucid.module.v1+json" && mediaType != "application/vnd.lucid.catalog.v1+json")) {
         error = "Invalid package reference"; return false;
     }

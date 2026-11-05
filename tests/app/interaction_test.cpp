@@ -496,6 +496,8 @@ struct ApplicationInteractionTest {
         if (app.m_searchBar.kind() != ui::PromptKind::ModuleImport) return 117;
         app.m_searchBar.setQuery("ghcr.io/invalid"); app.applyCommand(false);
         if (app.m_searchBar.kind() != ui::PromptKind::ModuleImport || !app.m_commandStatusIsError || app.m_moduleFetchFuture.valid()) return 123;
+        app.m_searchBar.setQuery("ghcr.io/owner/../bad:_RC1"); app.applyCommand(false);
+        if (app.m_searchBar.kind() != ui::PromptKind::ModuleImport || !app.m_commandStatusIsError || app.m_moduleFetchFuture.valid()) return 1140;
         app.m_searchBar.setQuery((importDir / "module.json").string()); app.applyCommand(false);
         if (app.m_searchBar.kind() != ui::PromptKind::ModulePreview || app.m_modulePreview.description != "Test module" || app.m_modulePreviewSource != (importDir / "module.json").string()) return 118;
         app.m_selectedSuggestion = 1;
@@ -2390,6 +2392,25 @@ struct ApplicationInteractionTest {
             if(!spreadVisible || !inferenceVisible) return 1053;
             app.m_benchmarkShowing = false; app.m_searchBar.close(); app.m_moduleRoot = oldRoot; app.m_modules = std::move(oldModules); app.m_moduleSelected = oldSelected;
             std::filesystem::remove(temp / "nested" / "before.json"); std::filesystem::remove(temp / "nested" / "after.json");
+        }
+        {
+#if !defined(_WIN32)
+            const auto oldRoot=app.m_moduleRoot;auto oldModules=app.m_modules;const auto oldSelected=app.m_moduleSelected;const bool hadDocument=app.m_hasDocument;auto oldInactive=std::move(app.m_inactiveDocuments);app.m_hasDocument=false;
+            const auto generator=temp/"nested"/"coverage-generator";{std::ofstream script(generator);script<<"#!/bin/sh\nprintf 'SF:coverage-source.txt\\nDA:1,1\\nend_of_record\\n' > \"$(dirname \"$0\")/generated.info\"\n";}std::filesystem::permissions(generator,std::filesystem::perms::owner_all);
+            {std::ofstream source(temp/"nested"/"coverage-source.txt");source<<"one\n";}
+            {std::ofstream config(temp/"nested"/"coverage-run.json");config<<"{\"executable\":\""<<generator.generic_string()<<"\",\"arguments\":[],\"report\":\"generated.info\",\"format\":\"lcov\"}";}
+            app.m_moduleRoot=temp/"coverage-run-modules";std::string error;
+            const std::string manifest=R"({"name":"Coverage","version":"1","requires":["coverage-run-v1","coverage-cobertura-v1"],"permissions":{"project":true,"network":false,"processes":true,"settings":false},"commands":[{"title":"Run","action":"run-coverage"},{"title":"LCOV","action":"coverage-lcov"},{"title":"XML","action":"coverage-cobertura"}]})";
+            if(!modules::install(app.m_moduleRoot,"coverage-run",manifest,error) || !modules::setEnabled(app.m_moduleRoot,"coverage-run",true,error) || !modules::list(app.m_moduleRoot,app.m_modules,error))return 1140;
+            app.m_moduleSelected=0;app.m_modulePage=0;app.m_searchBar.open(ui::PromptKind::ModuleCommands);app.refreshSuggestions();app.m_selectedSuggestion=0;app.applyModuleCommand();
+            if(app.m_coverageRunStage!=1 || app.m_searchBar.kind()!=ui::PromptKind::ModuleCoveragePath)return 1141;
+            app.m_searchBar.setQuery("coverage-run.json");app.applyModuleCommand();if(app.m_coverageRunStage!=2 || std::filesystem::exists(temp/"nested"/"generated.info"))return 1142;
+            auto run=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-740);if(run==app.m_moduleChoices.end())return 1143;app.m_selectedSuggestion=static_cast<int>(run-app.m_moduleChoices.begin());app.applyModuleCommand();
+            const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(15);while((app.m_coverageRunFuture.valid() || app.m_coverageFuture.valid()) && std::chrono::steady_clock::now()<until){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            if(app.m_coverageRunFuture.valid() || app.m_coverageFuture.valid() || app.m_coverageReport.lines.size()!=1 || !app.m_coverageReport.lines[0].covered)return 1144;
+            app.m_coverageShowing=false;app.m_searchBar.close();app.m_moduleRoot=oldRoot;app.m_modules=std::move(oldModules);app.m_moduleSelected=oldSelected;app.m_inactiveDocuments=std::move(oldInactive);app.m_hasDocument=hadDocument;
+            std::filesystem::remove(generator);std::filesystem::remove(temp/"nested"/"coverage-source.txt");std::filesystem::remove(temp/"nested"/"coverage-run.json");std::filesystem::remove(temp/"nested"/"generated.info");
+#endif
         }
         {
             const auto oldRoot = app.m_moduleRoot; auto oldModules = app.m_modules; const auto oldSelected = app.m_moduleSelected;

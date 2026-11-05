@@ -17,6 +17,10 @@ the form `ghcr.io/owner/package:version`. Lucid shows the module's commands and
 requested permissions before installing it. Installation never overwrites an
 existing module and new modules start disabled. Downloads require HTTPS and
 the package layer's SHA-256 digest is checked before use.
+Package tags are case-sensitive and follow OCI tag rules; use the exact tag
+published by the module author.
+For manual imports, dotted or long package names receive a stable local ID with
+a short hash suffix. If that ID already exists, Lucid refuses to overwrite it.
 
 To publish a module, package its `module.json` as the single OCI layer with
 media type `application/vnd.lucid.module.v1+json`. Catalog entries contain an
@@ -419,7 +423,17 @@ covered/total fractions are summed; percentages without totals cannot be inferre
 Ambiguous, missing or outside-project
 paths are skipped and marked incomplete. External DTDs are never fetched, and
 internal entities and unsupported XML constructs are rejected as incomplete. The
-module does not run coverage tools itself.
+The optional **Run configured coverage generator** action reads a saved
+project-relative JSON file, for example
+`{"executable":"/absolute/path/to/coverage-tool","arguments":["--example"],"report":"coverage.info","format":"lcov"}`.
+Choose `lcov` or `cobertura`; arguments are passed directly, without a shell or
+PATH lookup. Lucid displays the executable, arguments and report before explicit
+confirmation, verifies the configuration again, then runs it with the user's
+privileges, a five-minute time limit and bounded output. The process runs from
+the project root, can execute arbitrary code, access the network and
+change files. Cancellation cannot undo changes. The report is read only after
+the process succeeds and must be project-local; Lucid cannot establish whether
+the process actually regenerated it, so imported results may be stale.
 
 Change Archaeology runs local Git commands to list up to 100 commits for the open
 file and display a selected commit's diff. The list and diffs follow renames within

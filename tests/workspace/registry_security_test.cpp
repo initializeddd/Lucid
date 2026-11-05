@@ -30,5 +30,22 @@ int main() {
         output = url.find("/token?") != std::string_view::npos ? R"({"token":"abc"})" : url.find("/manifests/") != std::string_view::npos ? manifest : "abc"; return true;
     };
     if (!fetchPackage("owner/pkg", "1", media, contents, error, success) || contents != "abc") return 8;
+    if (!parseCatalog(R"({"modules":[{"id":"a","package":"owner/pkg","version":"_RC1."}]})", entries, error) || entries[0].version != "_RC1.") return 9;
+    bool exactTagSeen=false;
+    auto tagged=[&](std::string_view url, const std::vector<std::string>& headers, std::string& output, std::string& err) {
+        if (url.find("/manifests/_RC1.") != std::string_view::npos) exactTagSeen=true;
+        return success(url,headers,output,err);
+    };
+    if (!fetchPackage("owner/pkg", "_RC1.", media, contents, error, tagged) || !exactTagSeen || contents != "abc") return 10;
+    for (const std::string& tag : std::vector<std::string>{"", ".bad", "-bad", "a/b", "a?x", "a#x", "a:b", std::string(129, 'a')}) {
+        if (fetchPackage("owner/pkg", tag, media, contents, error, success) || !contents.empty()) return 11;
+    }
+    if (!fetchPackage("owner/pkg", std::string(128, 'A'), media, contents, error, success)) return 12;
+    std::string id, other;
+    if (!packageModuleId("owner/simple-name", id, error) || id != "simple-name") return 13;
+    if (!packageModuleId("owner/my.module", id, error) || id.size() != 22 || id.rfind("my-module-",0)!=0) return 14;
+    if (!packageModuleId("other/my.module", other, error) || id == other) return 15;
+    if (!packageModuleId("owner/" + std::string(100,'a'), id, error) || id.size()!=80) return 16;
+    if (packageModuleId("owner/../escape", id, error) || !id.empty()) return 17;
     return 0;
 }

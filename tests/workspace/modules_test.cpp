@@ -331,5 +331,8 @@ int main() {
     const std::string externalNoNetwork = R"({"name":"Links","version":"1","requires":["markdown-external-links-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Check","action":"markdown-external-links"}]})";
     const std::string externalNoCapability = R"({"name":"Links","version":"1","permissions":{"project":true,"network":true,"processes":false,"settings":false},"commands":[{"title":"Check","action":"markdown-external-links"}]})";
     if (!supportsCapability("markdown-external-links-v1") || !preview("external", externalLinks).valid || !preview("external", externalLinks).error.empty() || preview("external", externalNoNetwork).valid || preview("external", externalNoCapability).valid) return 242;
+    const std::string coverageRun=R"({"name":"Coverage","version":"1","requires":["coverage-run-v1","coverage-cobertura-v1"],"permissions":{"project":true,"network":false,"processes":true,"settings":false},"commands":[{"title":"Run","action":"run-coverage"},{"title":"LCOV","action":"coverage-lcov"},{"title":"XML","action":"coverage-cobertura"}]})";
+    const std::string coverageNoProcess=R"({"name":"Coverage","version":"1","requires":["coverage-run-v1","coverage-cobertura-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Run","action":"run-coverage"},{"title":"LCOV","action":"coverage-lcov"},{"title":"XML","action":"coverage-cobertura"}]})";
+    if (!preview("coverage-run",coverageRun).valid || !preview("coverage-run",coverageRun).error.empty() || preview("coverage-run",coverageNoProcess).valid) return 244;
     std::filesystem::remove_all(root); return 0;
 }

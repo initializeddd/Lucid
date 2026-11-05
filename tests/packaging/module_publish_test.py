@@ -126,7 +126,7 @@ class PublishTest(unittest.TestCase):
         self.assertFalse(self.registry)
 
     def test_reject_names_and_tags_the_installer_cannot_read(self):
-        for version in ("1..2", "1.0-", "1.0_", "1.0."):
+        for version in ("", ".1", "-1", "1/2", "1?2", "1#2"):
             data = json.loads(self.manifest.read_text())
             data["version"] = version
             self.manifest.write_text(json.dumps(data))
@@ -140,6 +140,14 @@ class PublishTest(unittest.TestCase):
         with patch.object(publisher, "MODULES", self.modules):
             with self.assertRaisesRegex(ValueError, "Invalid GitHub package owner"):
                 publisher.collect("bad-")
+
+    def test_oci_tag_case_and_punctuation_survive_publication(self):
+        data = json.loads(self.manifest.read_text())
+        data["version"] = "_RC1.."
+        self.manifest.write_text(json.dumps(data))
+        self.invoke("--publish")
+        self.assertIn("ghcr.io/test-owner/lucid-module-diagram-preview:_RC1..", self.registry)
+        self.invoke("--verify")
 
     def test_verify_uses_current_manifests_not_stale_catalog_file(self):
         self.invoke("--publish")

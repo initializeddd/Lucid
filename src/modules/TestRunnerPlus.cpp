@@ -6,6 +6,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
+#include <charconv>
+#include <optional>
 
 namespace lucid::modules {
 namespace {
@@ -79,6 +81,10 @@ bool parseCTestDiscovery(std::string_view input, TestDiscovery& result, std::str
 static bool parseJUnitImpl(std::string_view input, TestResults& result, std::string& error, bool strict) {
     result = {}; error.clear(); if (input.size() > maxBytes) { error = "JUnit report exceeds size limit"; return false; }
     if(!validXmlUtf8(input)) {error="Invalid JUnit XML characters or UTF-8";return false;}
+    struct SuiteCounts { std::optional<std::size_t> tests,failures,errors,skipped; std::size_t seen=0,failed=0,errored=0,skip=0; std::set<std::size_t> identities; };
+    std::vector<SuiteCounts> suites; std::map<std::pair<std::string,std::string>,std::size_t> identities; std::string failureKind;
+    const auto countAttr=[](const Tag& tag,const char* name,std::optional<std::size_t>& output) {const auto it=tag.attrs.find(name);if(it==tag.attrs.end())return true;std::size_t value=0;const auto parsed=std::from_chars(it->second.data(),it->second.data()+it->second.size(),value);if(parsed.ec!=std::errc{} || parsed.ptr!=it->second.data()+it->second.size() || value>maxTests)return false;output=value;return true;};
+    const auto countsAgree=[](const SuiteCounts& suite){return (!suite.tests || *suite.tests==suite.seen || *suite.tests==suite.identities.size()) && (!suite.failures || *suite.failures==suite.failed) && (!suite.errors || *suite.errors==suite.errored) && (!suite.skipped || *suite.skipped==suite.skip);};
     TestResults output; std::vector<std::string> stack; bool rootSeen = false, rootClosed = false; std::size_t pos = 0; TestResult* test = nullptr;
     auto fail = [&]() { error = "Invalid or unsupported JUnit XML"; return false; };
     auto addText = [&](std::string_view raw, bool encoded) {
@@ -101,10 +107,10 @@ static bool parseJUnitImpl(std::string_view input, TestResults& result, std::str
         if(strict && !tag.closing) {
             const auto parent=stack.empty()?std::string_view{}:std::string_view(stack.back());
             if(tag.name=="testsuites") {if(!stack.empty()) return fail();}
-            else if(tag.name=="testsuite") {if(!stack.empty() && parent!="testsuites" && parent!="testsuite") return fail();}
+            else if(tag.name=="testsuite") {if(!stack.empty() && parent!="testsuites" && parent!="testsuite") return fail();if(tag.attrs.count("status") || tag.attrs.count("result")) return fail(); SuiteCounts counts;if(!countAttr(tag,"tests",counts.tests) || !countAttr(tag,"failures",counts.failures) || !countAttr(tag,"errors",counts.errors) || !countAttr(tag,"skipped",counts.skipped)) return fail();suites.push_back(counts);}
             else if(tag.name=="testcase") {
                 if(parent!="testsuite") return fail();
-                for(const auto& [key,_]:tag.attrs) if(key!="name" && key!="classname" && key!="time" && key!="file" && key!="line" && key!="assertions") return fail();
+                for(const auto& [key,_]:tag.attrs) if(key!="name" && key!="classname" && key!="time" && key!="file" && key!="line" && key!="url" && key!="assertions") return fail();
             }
             else if(tag.name=="failure" || tag.name=="error" || tag.name=="skipped") {if(parent!="testcase") return fail();}
             else if(tag.name=="system-out" || tag.name=="system-err") {if(parent!="testcase" && parent!="testsuite") return fail();}
@@ -112,22 +118,30 @@ static bool parseJUnitImpl(std::string_view input, TestResults& result, std::str
             else if(tag.name=="property") {if(parent!="properties") return fail();}
             else return fail();
         }
-        if (tag.closing) { if (stack.empty() || stack.back() != tag.name) return fail(); if (tag.name == "testcase") test = nullptr; stack.pop_back(); if (stack.empty()) rootClosed = true; continue; }
+        if (tag.closing) { if (stack.empty() || stack.back() != tag.name) return fail(); if (tag.name == "testcase") {test = nullptr;failureKind.clear();} if(strict && tag.name=="testsuite") {if(suites.empty() || !countsAgree(suites.back()))return fail();suites.pop_back();} stack.pop_back(); if (stack.empty()) rootClosed = true; continue; }
         if (stack.empty()) { if (rootSeen || (tag.name != "testsuite" && tag.name != "testsuites")) return fail(); rootSeen = true; }
         else if (rootClosed) return fail();
         if (tag.name == "testcase") {
             if (test || stack.empty() || stack.back() != "testsuite" || output.tests.size() >= maxTests) return fail();
             auto name = tag.attrs.find("name"); if (name == tag.attrs.end() || name->second.empty()) return fail();
-            output.tests.push_back({}); test = &output.tests.back(); test->name = name->second;
+            output.tests.push_back({}); test = &output.tests.back(); test->name = name->second; failureKind.clear();
             if (auto it=tag.attrs.find("classname"); it!=tag.attrs.end()) test->className=it->second;
             if (auto it=tag.attrs.find("time"); it!=tag.attrs.end()) test->duration=it->second;
+            // pytest can emit separate call and teardown rows for one identity
+            // while its suite's tests count remains one. Preserve both rows as
+            // ambiguous, and accept either emitted-row or distinct-name totals.
+            if(strict) {auto [identity,_]=identities.try_emplace({test->className,test->name},identities.size());for(auto& suite:suites){++suite.seen;suite.identities.insert(identity->second);}}
         } else if (tag.name == "failure" || tag.name == "error" || tag.name == "skipped") {
-            if (!test || stack.empty() || stack.back() != "testcase" || test->status != TestResultStatus::Passed) return fail();
+            if (!test || stack.empty() || stack.back() != "testcase") return fail();
+            if(test->status != TestResultStatus::Passed && (!strict || tag.name=="skipped" || failureKind!=tag.name)) return fail();
+            const bool first=test->status==TestResultStatus::Passed;
+            if(!first && !test->failureText.empty()) test->failureText+='\n';
             test->status = tag.name == "skipped" ? TestResultStatus::Skipped : TestResultStatus::Failed;
-            if (auto it=tag.attrs.find("message"); it!=tag.attrs.end()) test->failureMessage=it->second;
+            if(strict && first) {failureKind=tag.name; for(auto& suite:suites) {if(tag.name=="skipped")++suite.skip;else if(tag.name=="failure")++suite.failed;else ++suite.errored;}}
+            if (auto it=tag.attrs.find("message"); it!=tag.attrs.end()) {if(!test->failureMessage.empty())test->failureMessage+='\n';test->failureMessage+=it->second;}
         }
         if (!tag.self) { if (stack.size() >= 64) return fail(); stack.push_back(tag.name); }
-        else { if (tag.name == "testcase") test = nullptr; if (stack.empty()) rootClosed = true; }
+        else { if (tag.name == "testcase") {test = nullptr;failureKind.clear();} if(strict && tag.name=="testsuite") {if(suites.empty() || !countsAgree(suites.back()))return fail();suites.pop_back();} if (stack.empty()) rootClosed = true; }
     }
     if (!rootSeen || !rootClosed || !stack.empty()) return fail();
     result = std::move(output); return true;

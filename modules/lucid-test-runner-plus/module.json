@@ -4,7 +4,8 @@
   "description": "Run selected CTest tests or import and compare local JUnit snapshots.",
   "requires": [
     "ctest-runner-v2",
-    "junit-import-v1"
+    "junit-import-v1",
+    "junit-producer-compat-v1"
   ],
   "permissions": {
     "project": true,

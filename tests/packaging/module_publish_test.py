@@ -334,6 +334,12 @@ class PublishTest(unittest.TestCase):
             self.invoke("--publish")
         self.assertFalse(self.registry)
 
+    def test_junit_producer_compat_requires_import(self):
+        data={"name":"JUnit","version":"1","requires":["junit-import-v1","junit-producer-compat-v1"],"permissions":{"project":True,"network":False,"processes":False,"settings":False},"commands":[{"title":"Import","action":"import-junit"}]}
+        self.manifest.write_text(json.dumps(data));self.invoke("--publish");self.registry.clear();data["requires"].remove("junit-import-v1");self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):self.invoke("--publish")
+        self.assertFalse(self.registry)
+
     def test_junit_import_requires_project_permission(self):
         data={"name":"JUnit","version":"1","requires":["junit-import-v1"],"permissions":{"project":True,"network":False,"processes":False,"settings":False},"commands":[{"title":"Import","action":"import-junit"}]}
         self.manifest.write_text(json.dumps(data));self.invoke("--publish");self.registry.clear();data["permissions"]["project"]=False;self.manifest.write_text(json.dumps(data))

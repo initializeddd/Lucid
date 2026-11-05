@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="1" tests="3" time="0.014" timestamp="2024-01-01T00:00:00" hostname="fixture"><testcase classname="test_examples" name="test_pass" time="0.000" /><testcase classname="test_examples" name="test_fail" time="0.000"><failure message="assert False">&gt;   def test_fail(): assert False
+E   assert False
+
+test_examples.py:5: AssertionError</failure></testcase><testcase classname="test_examples" name="test_skip" time="0.000"><skipped type="pytest.skip" message="not available">test_examples.py:7: not available</skipped></testcase></testsuite></testsuites>

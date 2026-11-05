@@ -1530,8 +1530,9 @@ struct ApplicationInteractionTest {
             app.m_selectedSuggestion=static_cast<int>(editConfig-app.m_moduleChoices.begin()); app.applyModuleCommand();
             auto drawChoice=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-313);if(drawChoice==app.m_moduleChoices.end())return 1070;app.m_selectedSuggestion=static_cast<int>(drawChoice-app.m_moduleChoices.begin());app.applyModuleCommand();
             if(!app.m_visualMaskMode || !app.m_visualVisible)return 1071;
+            const float originalZoom=app.m_uiZoom; app.m_uiZoom=1.5F;
             int uiWidth=0,uiHeight=0;app.uiSize(uiWidth,uiHeight);const auto pane=ui::visualReviewPaneRect(uiWidth,uiHeight,1,app.m_visualPreview.candidate.width,app.m_visualPreview.candidate.height);if(pane.width<=0 || pane.height<=0)return 1072;
-            const float zoom=app.m_uiZoom>0?app.m_uiZoom:1.0F;input::MouseButtonEvent maskClick{};maskClick.button=input::MouseButton::Left;maskClick.action=input::KeyAction::Press;maskClick.x=(pane.x+pane.width/2)*zoom;maskClick.y=(pane.y+pane.height/2)*zoom;app.handleMouseButton(maskClick);maskClick.action=input::KeyAction::Release;app.handleMouseButton(maskClick);
+            input::MouseButtonEvent maskClick{};maskClick.button=input::MouseButton::Left;maskClick.action=input::KeyAction::Press;maskClick.x=pane.x+pane.width/2;maskClick.y=pane.y+pane.height/2;app.handleMouseButton(maskClick);maskClick.action=input::KeyAction::Release;app.handleMouseButton(maskClick);app.m_uiZoom=originalZoom;
             if(!app.m_visualMaskSelected || app.m_visualMask.width!=1 || app.m_visualMask.height!=1 || !app.makeFrameState(0).visualMaskSelected)return 1073;
             input::KeyEvent maskEnter{};maskEnter.action=input::KeyAction::Press;maskEnter.key=input::Key::Enter;app.handleKey(maskEnter);while(app.m_visualConfigFuture.valid() && std::chrono::steady_clock::now()<configuredDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
             if(app.m_visualConfigFuture.valid() || app.m_visualConfigStage!=4 || app.m_visualConfigDraft.after.masks.size()!=2 || app.m_document.toUtf8()!=originalConfig)return 1074;
@@ -1691,7 +1692,7 @@ struct ApplicationInteractionTest {
             put(56, 1, 4); put(60, 42, 4); put(84, 0x1234, 8); put(108, 42, 4); put(116, 0xc0000005, 4); put(132, 0xdeadbeef, 8);
             { std::ofstream out(temp / "nested" / "crash.dmp", std::ios::binary); out.write(dump.data(), static_cast<std::streamsize>(dump.size())); }
             app.m_moduleRoot = temp / "crash-modules"; std::string error;
-            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-apple-text-v1","crash-apple-ips-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
+            const std::string manifest = R"({"name":"Crash","version":"1","requires":["crash-dump-reader-v1","crash-gdb-text-v1","crash-apple-text-v1","crash-apple-ips-v1","crash-ips-source-map-v1"],"permissions":{"project":true,"network":false,"processes":false,"settings":false},"commands":[{"title":"Inspect","action":"crash-dump-reader"}]})";
             if (!modules::install(app.m_moduleRoot, "crash", manifest, error) || !modules::setEnabled(app.m_moduleRoot, "crash", true, error) || !modules::list(app.m_moduleRoot, app.m_modules, error)) return 490;
             app.m_moduleSelected = 0; app.m_modulePage = 0; app.m_searchBar.open(ui::PromptKind::ModuleCommands); app.refreshSuggestions(); app.m_selectedSuggestion = 0; app.applyModuleCommand();
             if (app.m_searchBar.kind() != ui::PromptKind::ModuleCrashPath) return 491;
@@ -1751,7 +1752,15 @@ struct ApplicationInteractionTest {
             app.m_searchBar.setQuery("report.ips"); app.applyModuleCommand(); const auto ipsDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);while(app.m_crashFuture.valid() && std::chrono::steady_clock::now()<ipsDeadline){app.pollModules();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
             if(app.m_crashFuture.valid() || !app.m_crashIsIps || !app.m_crashIps.incomplete || app.m_crashIps.threads.size()!=1) return 1108;
             bool sawIps=false,sawIpsFrame=false,sawIpsIncomplete=false,sawIpsMap=false,sawSecret=false;for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();for(const auto& row:app.m_suggestions){sawIps|=row.path=="Apple JSON crash report" && row.detail.find("sensitive")!=std::string_view::npos;sawIpsFrame|=row.path=="Reported frame" && row.detail.find("unverified")!=std::string_view::npos;sawIpsIncomplete|=row.path=="Incomplete crash report";sawSecret|=row.detail.find("/secret")!=std::string_view::npos;}sawIpsMap|=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220)!=app.m_moduleChoices.end();}
-            if(!sawIps || !sawIpsFrame || !sawIpsIncomplete || sawIpsMap || sawSecret) return 1109;
+            if(!sawIps || !sawIpsFrame || !sawIpsIncomplete || !sawIpsMap || sawSecret) return 1109;
+            { std::ofstream out(temp / "nested" / "ips-map.tsv"); out << "App\t0\t100\tcrash-source.cpp\t2\tmain\n"; }
+            bool foundIpsMap=false;for(std::size_t page=0;page<5 && !foundIpsMap;++page){app.m_modulePage=page;app.refreshSuggestions();auto row=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-220);if(row!=app.m_moduleChoices.end()){app.m_selectedSuggestion=static_cast<int>(row-app.m_moduleChoices.begin());foundIpsMap=true;}}if(!foundIpsMap)return 1110;
+            app.applyModuleCommand();app.m_searchBar.setQuery("ips-map.tsv");app.applyModuleCommand();if(app.m_crashMapInput || app.m_crashSourceMap.ranges.size()!=1)return 1111;
+            app.m_modulePage=0;app.refreshSuggestions();if(std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0)!=app.m_moduleChoices.end())return 1112;
+            app.m_crashIps.incomplete=false; app.openFile("example.txt",false);app.m_searchBar.open(ui::PromptKind::ModuleCommands);
+            const auto chooseIpsFrame=[&](){for(std::size_t page=0;page<5;++page){app.m_modulePage=page;app.refreshSuggestions();auto row=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),0);if(row!=app.m_moduleChoices.end()){app.m_selectedSuggestion=static_cast<int>(row-app.m_moduleChoices.begin());return true;}}return false;};
+            if(!chooseIpsFrame())return 1113;app.m_document.insert(U'X');app.applyModuleCommand();if(!app.m_commandStatusIsError || app.m_filePath=="crash-source.cpp")return 1114;app.m_document.undo();if(!chooseIpsFrame())return 1115;app.applyModuleCommand();if(app.m_filePath!="crash-source.cpp" || app.m_document.cursorLine()!=1 || app.m_searchBar.isOpen())return 1116;
+            std::filesystem::remove(temp / "nested" / "ips-map.tsv");
             app.m_crashIsIps=false; std::filesystem::remove(temp / "nested" / "report.ips");
             app.m_crashIsApple=false; std::filesystem::remove(temp / "nested" / "apple.crash");
             app.m_crashIsGdb=false; std::filesystem::remove(temp / "nested" / "trace.txt");

@@ -2,6 +2,7 @@
 #include "ai/OpenRouter.hpp"
 #include "platform/security/Credentials.hpp"
 #include "app/Application.hpp"
+#include "modules/AppleIpsSymbols.hpp"
 #include "ai/LocalModel.hpp"
 #include "ai/ModelDownload.hpp"
 
@@ -1587,8 +1588,7 @@ void Application::handleMouseButton(const input::MouseButtonEvent& event) {
     if (m_diagramPreviewVisible) { if (event.button==input::MouseButton::Left || event.button==input::MouseButton::Middle) { if (event.action==input::KeyAction::Press && std::isfinite(event.x) && std::isfinite(event.y)) { m_diagramDragging=true; m_diagramDragX=event.x; m_diagramDragY=event.y; } else if (event.action==input::KeyAction::Release) m_diagramDragging=false; } return; }
     if (m_visualVisible) {
         if(m_visualMaskMode && event.button==input::MouseButton::Left) {
-            const float zoom=m_uiZoom>0?m_uiZoom:1.0F;
-            if(event.action==input::KeyAction::Press && m_visualReview) {int width=0,height=0;uiSize(width,height); const auto& image=m_visualPreview.candidate; auto rect=ui::visualReviewPaneRect(width,height,1,image.width,image.height); ui::VisualPreviewPoint point; if(ui::visualPreviewSourcePoint(rect,image.width,image.height,event.x/zoom,event.y/zoom,point)) {m_visualMaskFitted=rect;m_visualMaskStartX=event.x/zoom;m_visualMaskStartY=event.y/zoom;m_visualMaskDragging=true;m_visualMaskSelected=false;updateVisualMaskDrag(event.x,event.y);} }
+            if(event.action==input::KeyAction::Press && m_visualReview) {int width=0,height=0;uiSize(width,height); const auto& image=m_visualPreview.candidate; auto rect=ui::visualReviewPaneRect(width,height,1,image.width,image.height); ui::VisualPreviewPoint point; if(ui::visualPreviewSourcePoint(rect,image.width,image.height,event.x,event.y,point)) {m_visualMaskFitted=rect;m_visualMaskStartX=event.x;m_visualMaskStartY=event.y;m_visualMaskDragging=true;m_visualMaskSelected=false;updateVisualMaskDrag(event.x,event.y);} }
             else if(event.action==input::KeyAction::Release && m_visualMaskDragging) {updateVisualMaskDrag(event.x,event.y);m_visualMaskDragging=false;if(!m_visualMaskSelected)setStatus("Drag inside the candidate image",true);}
         }
         return;
@@ -2789,12 +2789,15 @@ void Application::refreshModuleSuggestions() {
             add("< Back to module commands", "", -57);
             if(m_crashIsIps) {
                 const auto safe=[](const std::string& value){std::string error;return editor::Document::canEditLosslessly(value,error) ? value : std::string("(unreadable text)");};
-                add("Apple JSON crash report","Unverified and potentially sensitive; no source navigation or symbolication",-58,ui::SuggestionKind::ReadOnlyText);
+                add("Apple JSON crash report","Unverified and potentially sensitive; source mappings are unverified",-58,ui::SuggestionKind::ReadOnlyText);
+                const bool canMap=std::find(m.requirements.begin(),m.requirements.end(),"crash-ips-source-map-v1")!=m.requirements.end();
+                if(canMap && !m_crashFuture.valid()) add("Load source map","Project-local TSV; mappings and source are unverified",-220);
+                if(!m_crashMapIdentity.empty()) add("Source map identity",m_crashMapIdentity,-58,ui::SuggestionKind::ReadOnlyText);
                 if(!m_crashIps.architecture.empty()) add("Reported code type",safe(m_crashIps.architecture),-58,ui::SuggestionKind::ReadOnlyText);
                 if(!m_crashIps.exceptionType.empty()) add("Reported exception",safe(m_crashIps.exceptionType),-58,ui::SuggestionKind::ReadOnlyText);
                 if(!m_crashIps.signal.empty()) add("Reported signal",safe(m_crashIps.signal),-58,ui::SuggestionKind::ReadOnlyText);
                 if(m_crashIps.incomplete) add("Incomplete crash report","Some data was omitted or a limit was reached",-58,ui::SuggestionKind::ReadOnlyText);
-                std::size_t shown=0;bool limited=false;std::size_t threadNumber=0;for(const auto& thread:m_crashIps.threads){add("Reported thread "+std::to_string(threadNumber++),thread.triggered?"Reported triggered":"Reported thread",-58,ui::SuggestionKind::ReadOnlyText);for(const auto& frame:thread.frames){if(shown++>=512){limited=true;break;}const auto& image=m_crashIps.images[frame.imageIndex];std::ostringstream detail;detail<<safe(image.name)<<" · image offset 0x"<<std::hex<<frame.imageOffset;if(!frame.symbol.empty())detail<<" · "<<safe(frame.symbol);detail<<" · unverified";add("Reported frame",detail.str(),-58,ui::SuggestionKind::ReadOnlyText);}if(limited)break;}if(limited)add("Frame display limited","Only the first 512 frames are shown",-58,ui::SuggestionKind::ReadOnlyText);
+                std::size_t shown=0;bool limited=false;std::size_t threadNumber=0;for(const auto& thread:m_crashIps.threads){add("Reported thread "+std::to_string(threadNumber++),thread.triggered?"Reported triggered":"Reported thread",-58,ui::SuggestionKind::ReadOnlyText);for(const auto& frame:thread.frames){if(shown>=512){limited=true;break;}const auto frameIndex=shown++;const auto& image=m_crashIps.images[frame.imageIndex];std::ostringstream detail;detail<<safe(image.name)<<" · image offset 0x"<<std::hex<<frame.imageOffset;if(!frame.symbol.empty())detail<<" · "<<safe(frame.symbol);const auto location=canMap?modules::locateIpsSource(m_crashIps,frame,m_crashSourceMap):modules::CrashLocation{};std::string error;const bool navigable=!location.path.empty() && editor::Document::canEditLosslessly(location.path,error);detail<<" · unverified";if(navigable)detail<<" · source line "<<std::dec<<location.line;add("Reported frame",detail.str(),navigable?static_cast<int>(frameIndex):-58,navigable?ui::SuggestionKind::Task:ui::SuggestionKind::ReadOnlyText);}if(limited)break;}if(limited)add("Frame display limited","Only the first 512 frames are shown",-58,ui::SuggestionKind::ReadOnlyText);
             } else if(m_crashIsApple) {
                 const auto safe=[](const std::string& value){std::string error;return editor::Document::canEditLosslessly(value,error) ? value : std::string("(unreadable text)");};
                 add("Apple crash report text","Unverified supplied text; no source navigation or symbolication",-58,ui::SuggestionKind::ReadOnlyText);
@@ -4289,10 +4292,12 @@ void Application::applyModuleCommand() {
         if (m_crashFuture.valid()) { setCommandStatus("A crash inspection is still finishing", false); return; }
         const std::string path(m_searchBar.query()); if (path.empty()) { setCommandStatus("Enter a project-relative path", true); return; }
         if (m_crashMapInput) {
+            if(m_crashIsIps && std::find(found->requirements.begin(),found->requirements.end(),"crash-ips-source-map-v1")==found->requirements.end()){setCommandStatus("Module capability changed; reopen crash report",true);return;}
             std::string text; if (!m_project.readFileBounded(path, text, error, 1024U * 1024U)) { setCommandStatus(error, true); return; }
             modules::CrashSourceMap map; std::string identityLabel;
             std::string ext = std::filesystem::path(path).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (ext == ".sym") {
+                if(m_crashIsIps){setCommandStatus("IPS source mapping accepts TSV only",true);return;}
                 auto symbols = modules::parseBreakpadSymbols(text, 1024U * 1024U);
                 if (!symbols.error.empty() || symbols.incomplete) { setCommandStatus(symbols.error.empty() ? "Symbol file exceeds limits" : symbols.error, true); return; }
                 const modules::CrashModule* matching = nullptr;
@@ -5394,7 +5399,7 @@ void Application::applyModuleCommand() {
         m_toolchainSaveFuture=std::async(std::launch::async,[project,file,draft,cancel]() mutable {std::string e;if(!project.writeFile(file,draft.updated,e,&draft.original,false,cancel.get()) && e.empty()) e="Could not save target profiles";return e;});m_modulePage=0;m_selectedSuggestion=-1;refreshSuggestions();setCommandStatus("Saving target profiles…",false);return;
     }
     if (choice == -193 && m_toolchainShowing) { if(m_targetConfigureFuture.valid()){if(m_targetConfigureCancel)m_targetConfigureCancel->store(true);setCommandStatus("Cancellation requested; build files may already be changed",true);return;} if(m_targetConfigureStage){m_targetConfigureStage=0;} else if(m_toolchainSaveFuture.valid()) {if(m_toolchainSaveCancel)m_toolchainSaveCancel->store(true);setCommandStatus("Cancelling target save; it may already have completed",true);return;} else if(m_toolchainEditMode){m_toolchainEditMode=0;m_toolchainDraft={};} else if (m_toolchainSelected) m_toolchainSelected.reset(); else { if (m_toolchainCancel) m_toolchainCancel->store(true); m_toolchainShowing=false; m_toolchainProfiles.clear(); } m_modulePage=0; m_pagedScroll=0; m_selectedSuggestion=-1; refreshSuggestions(); return; }
-    if (choice == -220 && m_crashShowing && !m_crashIsGdb && !m_crashIsApple && !m_crashIsIps && !m_crashFuture.valid() && m_hasProject && m_project.root().generic_string() == m_crashRoot) { m_crashMapInput = true; m_searchBar.open(ui::PromptKind::ModuleCrashPath); setCommandStatus("Enter project-relative TSV or Breakpad .sym; mappings are unverified", false); return; }
+    if (choice == -220 && m_crashShowing && !m_crashIsGdb && !m_crashIsApple && (!m_crashIsIps || (m_moduleSelected<m_modules.size() && std::find(m_modules[m_moduleSelected].requirements.begin(),m_modules[m_moduleSelected].requirements.end(),"crash-ips-source-map-v1")!=m_modules[m_moduleSelected].requirements.end())) && !m_crashFuture.valid() && m_hasProject && m_project.root().generic_string() == m_crashRoot) { m_crashMapInput = true; m_searchBar.open(ui::PromptKind::ModuleCrashPath); setCommandStatus(m_crashIsIps ? "Enter project-relative TSV; mapping and source are unverified" : "Enter project-relative TSV or Breakpad .sym; mappings are unverified", false); return; }
     if (choice == -57 && m_crashShowing) { if (m_crashCancel) m_crashCancel->store(true); m_crashDump = {}; m_crashShowing = false; m_modulePage = 0; m_pagedScroll = 0; m_selectedSuggestion = -1; refreshSuggestions(); return; }
     if(choice==-403 && m_rustOwnershipShowing && m_rustRunStage==2 && !m_rustRunFuture.valid()) {
         if(!m_hasProject || m_project.root().generic_string()!=m_rustOwnershipRoot || m_moduleSelected>=m_modules.size() || m_modules[m_moduleSelected].id!=m_rustRunModule){setCommandStatus("Rust project or module changed",true);return;}
@@ -5622,10 +5627,13 @@ void Application::applyModuleCommand() {
             if (!m_hasProject || m_project.root().generic_string() != m_crashRoot || m_moduleSelected >= m_modules.size() || m_crashFuture.valid()) return;
             std::vector<modules::Module> fresh; std::string error; const auto id = m_modules[m_moduleSelected].id;
             if (!modules::list(m_moduleRoot, fresh, error) || std::none_of(fresh.begin(), fresh.end(), [&](const auto& m) { return m.id==id && m.enabled && m.valid && m.project && std::any_of(m.commands.begin(), m.commands.end(), [](const auto& c) { return c.action=="crash-dump-reader"; }); })) { setCommandStatus("Module changed; reopen crash dump",true); return; }
-            std::size_t index = 0; const modules::CrashFrame* frame = nullptr;
-            for (const auto& thread : m_crashDump.threads) for (const auto& candidate : thread.frames) { if (index++ == static_cast<std::size_t>(choice) && index <= 512) frame = &candidate; }
-            if (!frame) return;
-            const auto location = modules::locateCrashAddress(frame->address, m_crashDump.modules, m_crashSourceMap);
+            std::size_t index = 0; modules::CrashLocation location;
+            if(m_crashIsIps) {
+                if(std::none_of(fresh.begin(),fresh.end(),[&](const auto& m){return m.id==id && std::find(m.requirements.begin(),m.requirements.end(),"crash-ips-source-map-v1")!=m.requirements.end();})){setCommandStatus("Module capability changed; reopen crash report",true);return;}
+                const modules::IpsFrame* frame=nullptr;for(const auto& thread:m_crashIps.threads)for(const auto& candidate:thread.frames)if(index++==static_cast<std::size_t>(choice) && index<=512)frame=&candidate;if(!frame)return;location=modules::locateIpsSource(m_crashIps,*frame,m_crashSourceMap);
+            } else {
+                const modules::CrashFrame* frame=nullptr;for(const auto& thread:m_crashDump.threads)for(const auto& candidate:thread.frames)if(index++==static_cast<std::size_t>(choice) && index<=512)frame=&candidate;if(!frame)return;location=modules::locateCrashAddress(frame->address,m_crashDump.modules,m_crashSourceMap);
+            }
             if (location.path.empty() || !location.line) { setCommandStatus("No unique source mapping for this frame", true); return; }
             const auto resolved = m_project.resolve(location.path, error); if (!error.empty()) { setCommandStatus("Mapped source is outside the project",true); return; }
             std::error_code ec; const auto root = std::filesystem::weakly_canonical(m_project.root(), ec); if (ec) { setCommandStatus("Project unavailable",true); return; }
@@ -6243,8 +6251,8 @@ void Application::updateVisualMaskDrag(double x,double y) {
     if(!m_visualMaskMode || !m_visualReview) return;
     int width=0,height=0;uiSize(width,height);const auto& image=m_visualPreview.candidate;const auto fitted=ui::visualReviewPaneRect(width,height,1,image.width,image.height);
     if(fitted.x!=m_visualMaskFitted.x || fitted.y!=m_visualMaskFitted.y || fitted.width!=m_visualMaskFitted.width || fitted.height!=m_visualMaskFitted.height) {m_visualMaskSelected=false;return;}
-    const auto& source=m_visualReview->candidateImage();const float zoom=m_uiZoom>0?m_uiZoom:1.0F;
-    m_visualMaskSelected=ui::visualMaskFromDrag(fitted,source.width,source.height,{0,0,source.width,source.height},m_visualMaskStartX,m_visualMaskStartY,x/zoom,y/zoom,m_visualMask);
+    const auto& source=m_visualReview->candidateImage();
+    m_visualMaskSelected=ui::visualMaskFromDrag(fitted,source.width,source.height,{0,0,source.width,source.height},m_visualMaskStartX,m_visualMaskStartY,x,y,m_visualMask);
 }
 void Application::prepareVisualConfigChange(const modules::VisualConfigChange& change) {
     if(!m_visualShowing || !m_visualReview || m_visualReview!=m_visualConfigReview || !m_hasProject || m_project.root().generic_string()!=m_visualRoot || !m_hasDocument || m_filePath!=m_visualConfigFile || m_document.revision()!=m_visualConfigRevision || m_document.toUtf8()!=m_visualConfigOriginal || !visualConfigAuthorized()) {setCommandStatus("Review or document changed; start again",true);return;}
@@ -12237,7 +12245,7 @@ ui::FrameState Application::makeFrameState(double timeSeconds) {
     case ui::PromptKind::ModuleVisualPath: state.commandPlaceholder = m_visualConfigured && m_visualConfigPath.empty() ? "Visual configuration JSON path..." : m_visualBaseline.empty() ? "Baseline PNG path..." : "Candidate PNG path..."; break;
     case ui::PromptKind::ModuleSqlExportPath: state.commandPlaceholder = "New project-relative CSV path..."; break;
     case ui::PromptKind::ModuleSqlPath: state.commandPlaceholder = m_sqlBound && !m_sqlDatabase.empty() ? "Project-relative typed bindings JSON..." : "Project-relative SQLite database..."; break;
-    case ui::PromptKind::ModuleCrashPath: state.commandPlaceholder = m_crashMapInput ? "Project-relative TSV or Breakpad .sym..." : "Project-relative minidump, GDB or Apple report..."; break;
+    case ui::PromptKind::ModuleCrashPath: state.commandPlaceholder = m_crashMapInput ? (m_crashIsIps ? "Project-relative TSV source map..." : "Project-relative TSV or Breakpad .sym...") : "Project-relative minidump, GDB or Apple report..."; break;
     case ui::PromptKind::ModuleRustPath: state.commandPlaceholder = m_rustRunStage==1 ? "Absolute Cargo executable..." : "Project-relative Rust JSON diagnostics..."; break;
     case ui::PromptKind::ModulePreview: state.commandPlaceholder = "Review module before installing..."; break;
     case ui::PromptKind::ModuleCatalog: state.commandPlaceholder = "Search GitHub modules..."; break;

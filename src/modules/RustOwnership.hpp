@@ -30,7 +30,7 @@ struct RustOwnershipDiagnostic {
 
 struct RustSuggestionEdit {
     editor::TextPosition start{}, end{};
-    std::string replacement;
+    std::string original, replacement;
 };
 // Prepares a single compiler-suggested edit, without mutating the document.
 // The caller must independently ensure this is not part of a multipart fix,

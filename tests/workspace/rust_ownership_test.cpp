@@ -15,13 +15,13 @@ int main() {
     RustOwnershipSpan fix; fix.file="src/main.rs"; fix.lineStart=1; fix.lineEnd=1; fix.columnStart=2; fix.columnEnd=3;
     fix.hasReplacement=true; fix.applicability="MachineApplicable"; fix.replacement="a"; fix.sourceLines.push_back({"xβy",2,3});
     auto document=lucid::editor::Document::fromUtf8("xβy\nsecond"); RustSuggestionEdit edit;
-    ok = ok && prepareRustSuggestion(fix,document,edit,error) && edit.start.line==0 && edit.start.column==1 && edit.end.column==2 && edit.replacement=="a";
+    ok = ok && prepareRustSuggestion(fix,document,edit,error) && edit.start.line==0 && edit.start.column==1 && edit.end.column==2 && edit.original=="β" && edit.replacement=="a";
     auto stale=lucid::editor::Document::fromUtf8("xγy\nsecond"); ok=ok && !prepareRustSuggestion(fix,stale,edit,error);
     fix.applicability="MaybeIncorrect"; ok=ok && !prepareRustSuggestion(fix,document,edit,error);
     fix.applicability="MachineApplicable"; fix.sourceLines.clear(); ok=ok && !prepareRustSuggestion(fix,document,edit,error);
     fix.sourceLines.push_back({"xβy",2,3}); fix.columnEnd=20; ok=ok && !prepareRustSuggestion(fix,document,edit,error);
     fix.columnStart=2; fix.columnEnd=2; fix.replacement=".clone()"; ok=ok && prepareRustSuggestion(fix,document,edit,error) && edit.start.column==edit.end.column;
-    fix.lineEnd=2; fix.columnEnd=3; fix.sourceLines.push_back({"second",1,3}); ok=ok && prepareRustSuggestion(fix,document,edit,error) && edit.end.line==1;
+    fix.lineEnd=2; fix.columnEnd=3; fix.sourceLines.push_back({"second",1,3}); ok=ok && prepareRustSuggestion(fix,document,edit,error) && edit.end.line==1 && edit.original=="βy\nse";
     fix.replacement=std::string("\xff",1); ok=ok && !prepareRustSuggestion(fix,document,edit,error);
     return ok ? 0 : 1;
 }

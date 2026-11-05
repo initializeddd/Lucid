@@ -636,9 +636,9 @@ automatic symbol download or direct core dump parsing are supported. Saved GDB `
 Rust Ownership Lens reads saved rustc or Cargo newline-delimited JSON diagnostics
 from the project. It presents supported ownership and borrowing errors, compiler
 notes, explanations, spans and suggestions. Eligible single-span
-`MachineApplicable` suggestions can be reviewed and applied as an undoable,
+`MachineApplicable` suggestions can be reviewed with their original and replacement text and applied as an undoable,
 unsaved edit after their compiler source lines and the saved file are checked.
-Multipart fixes, missing source excerpts, and replacements over 2048 bytes cannot
+Multipart fixes, missing source excerpts, text over 2048 bytes, and unsupported control characters cannot
 be applied this way; matching excerpts do not prove other project files are current. Source
 navigation is limited to Rust files inside the project. Primary, related and note
 spans are labelled; all compiler-provided source lines are checked before opening,

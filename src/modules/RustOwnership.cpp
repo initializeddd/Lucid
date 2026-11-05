@@ -1,5 +1,6 @@
 #include "modules/RustOwnership.hpp"
 #include "editor/json/Json.hpp"
+#include <algorithm>
 #include <cmath>
 #include <set>
 namespace lucid::modules {
@@ -112,16 +113,22 @@ bool prepareRustSuggestion(const RustOwnershipSpan& span, const editor::Document
     edit = {}; error.clear();
     const auto fail=[&](const char* message) { error=message; return false; };
     if (!span.hasReplacement || span.applicability!="MachineApplicable") return fail("Suggestion is not machine-applicable.");
-    if (span.replacement.size()>2048 || !editor::Document::canEditLosslessly(span.replacement,error)) return fail("Suggestion replacement is not editable text or exceeds preview limit.");
+    if (span.replacement.size()>2048 || std::any_of(span.replacement.begin(),span.replacement.end(),[](unsigned char c){return (c<32 && c!='\n' && c!='\t') || c==127;}) || !editor::Document::canEditLosslessly(span.replacement,error)) return fail("Suggestion replacement is not editable text or exceeds preview limit.");
     if (!span.lineStart || span.lineEnd<span.lineStart || span.lineEnd>document.lineCount() || !span.columnStart || !span.columnEnd) return fail("Suggestion range is invalid.");
     const auto first=span.lineStart-1, last=span.lineEnd-1;
     if (last-first>=200 || span.sourceLines.size()!=last-first+1) return fail("Compiler source context is incomplete.");
+    std::string source;
     for(std::size_t i=0;i<span.sourceLines.size();++i) {
         if(document.lineUtf8(first+i)!=span.sourceLines[i].text) return fail("Compiler source context does not match the document.");
+        if((i && source.size()==4096) || span.sourceLines[i].text.size()>4096-source.size()-(i?1:0)) return fail("Compiler source context exceeds preview limit.");
+        if(i) source+='\n'; source+=span.sourceLines[i].text;
     }
     const auto start=span.columnStart-1,end=span.columnEnd-1;
     if (start>document.line(first).size() || end>document.line(last).size() || (first==last && end<start)) return fail("Suggestion range is invalid.");
-    edit.start={first,start}; edit.end={last,end}; edit.replacement=span.replacement;
+    auto excerpt=editor::Document::fromUtf8(source);
+    excerpt.setCursor(0,start); excerpt.extendSelectionTo(last-first,end);
+    auto original=excerpt.selectionUtf8(); if(original.size()>2048 || std::any_of(original.begin(),original.end(),[](unsigned char c){return (c<32 && c!='\n' && c!='\t') || c==127;})) return fail("Suggestion text is not supported by the preview.");
+    edit.start={first,start}; edit.end={last,end}; edit.original=std::move(original); edit.replacement=span.replacement;
     return true;
 }
 }

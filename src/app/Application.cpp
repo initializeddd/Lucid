@@ -2777,9 +2777,9 @@ void Application::refreshModuleSuggestions() {
             if (m_rustSuggestionEdit) {
                 add("Review compiler suggestion", "Source excerpt matched; other changes may exist", -60, ui::SuggestionKind::ReadOnlyText);
                 add("File",safe(m_rustSuggestionFile),-60,ui::SuggestionKind::ReadOnlyText);
-                std::string shown; for(unsigned char c:m_rustSuggestionEdit->replacement) { if(c=='\n') shown+="\\n"; else if(c=='\t') shown+="\\t"; else if(c=='\\') shown+="\\\\"; else if(c=='\r') shown+="\\r"; else shown+=static_cast<char>(c); }
-                add("Replacement (escaped)",shown.empty()?"[empty: delete selected text]":"Complete replacement follows",-60,ui::SuggestionKind::ReadOnlyText);
-                for(const auto& line:text::wrapLines(shown,58)) add(line.empty()?" ":line,"",-60,ui::SuggestionKind::ReadOnlyText);
+                const auto preview=[&](const std::string& title,const std::string& value,const char* empty) {std::string shown; for(unsigned char c:value) { if(c=='\n') shown+="\\n"; else if(c=='\t') shown+="\\t"; else if(c=='\\') shown+="\\\\"; else if(c=='\r') shown+="\\r"; else shown+=static_cast<char>(c); } add(title,shown.empty()?empty:"Complete text follows",-60,ui::SuggestionKind::ReadOnlyText); for(const auto& line:text::wrapLines(shown,58)) add(line.empty()?" ":line,"",-60,ui::SuggestionKind::ReadOnlyText);};
+                preview("Original text (escaped)",m_rustSuggestionEdit->original,"[empty: insertion]");
+                preview("Replacement (escaped)",m_rustSuggestionEdit->replacement,"[empty: deletion]");
                 add("Apply suggestion", "Makes one undoable unsaved edit after checking the source again",-731);
                 add("< Cancel suggestion", "Return without editing",-732);
             } else if(m_rustRunStage==2) {add("Review Cargo check","Runs Cargo, build scripts and procedural macros with your privileges; --offline does not sandbox scripts",-60,ui::SuggestionKind::ReadOnlyText);add("Cargo executable",safe(m_rustRunPlan.cargo.generic_string()),-60,ui::SuggestionKind::ReadOnlyText);for(const auto& arg:m_rustRunPlan.arguments)add("Argument",safe(arg),-60,ui::SuggestionKind::ReadOnlyText);add("Confirm Cargo check","Runs project code; output may contain sensitive data",-403);}

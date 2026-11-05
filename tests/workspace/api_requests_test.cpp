@@ -24,6 +24,12 @@ int main() {
     ApiEnvironment secretEnvironment{"safe", {{"TOKEN", {"s3cr3t", true}}, {"HOST", {"example.com", false}}, {"PREFIX", {"https://", false}}}};
     ok = ok && parseApiRequestsFromEnvironment(R"({"requests":[{"name":"safe","method":"GET","url":"{{PREFIX}}{{HOST}}/x?token={{TOKEN}}"}]})", secretEnvironment, requests, error) &&
         requests.size() == 1 && requests[0].url == "https://example.com/x?token=s3cr3t";
+    secretEnvironment.variables["TOKEN"].value="a b&/\xc3\xa9";
+    ok = ok && parseApiRequestsFromEnvironment(R"({"requests":[{"name":"encoded","method":"GET","url":"https://example.com/?q={{urlencode:TOKEN}}&plain={{HOST}}"}]})", secretEnvironment, requests, error) &&
+        requests.size()==1 && requests[0].url=="https://example.com/?q=a%20b%26%2F%C3%A9&plain=example.com";
+    ok = ok && !parseApiRequestsFromEnvironment(R"({"requests":[{"name":"unsafe","method":"GET","url":"https://{{urlencode:TOKEN}}.example/x"}]})", secretEnvironment, requests, error) && requests.empty();
+    ok = ok && !parseApiRequestsFromEnvironment(R"({"requests":[{"name":"invalid","method":"POST","url":"https://example.com/","body":"{{urlencode:TOKEN}}"}]})", secretEnvironment, requests, error) && requests.empty();
+    secretEnvironment.variables["TOKEN"].value="s3cr3t";
     for (const auto* unsafe : {
         R"({"requests":[{"name":"unsafe","method":"GET","url":"https://{{TOKEN}}.example/x"}]})",
         R"({"requests":[{"name":"unsafe","method":"GET","url":"{{PREFIX}}{{TOKEN}}.example/x"}]})",

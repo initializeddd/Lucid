@@ -130,9 +130,12 @@ public-key blocks do not produce this finding.
 
 The CMake Navigator reads an existing CMake File API codemodel from a selected
 project-relative build directory and shows targets, source files, compile groups,
-target dependencies and reported output artifact paths, as well as
+target dependencies, reported output artifact paths, link language and raw link-command
+fragments (including libraries and flags), as well as
 Boolean and supported text/path cache options. Dependencies and artifact paths are
 read-only declarations from the last configuration; output existence is not checked.
+Link fragments use the build system's native shell format, may be incomplete or contain
+sensitive paths, and are displayed without executing them.
 Text and path values are checked
 against simple declared STRINGS choices when present; complex escaped choices are
 unsupported. Values are reviewed before a conflict-checked write, paths are not
@@ -293,8 +296,12 @@ API Request Studio reads the open JSON collection, including unsaved edits. The
 collection contains a `requests` array with `name`, `method`, `url`, optional
 `headers` and `body`, and an optional `variables` object of string values used as
 `{{NAME}}` in URLs, headers and bodies. Select a request and explicitly confirm
-its destination before Lucid sends it. Escape cancels an in-flight request. The
-response display is bounded, with separate status, headers and body views and elapsed
+its destination before Lucid sends it. Escape cancels an in-flight request.
+URL-only form `{{urlencode:NAME}}` percent-encodes each UTF-8 byte outside the
+unreserved URL characters, so values can safely be used as a query parameter or
+path segment. It encodes delimiters as well; place URL structure outside the
+placeholder. Secret variables remain forbidden in the URL scheme or authority.
+The response display is bounded, with separate status, headers and body views and elapsed
 transport time. Connection, DNS, timeout, TLS and interrupted-response failures are
 reported without echoing URLs or credentials; redirects
 and proxies are not followed. Response
@@ -331,6 +338,7 @@ Accessibility Test Runner checks the current `.html` or `.htm` buffer, including
 unsaved changes, without executing code or making network requests. Findings can
 be selected to navigate to their source. It checks a limited set of possible
 missing HTML language, image alternative text and form-control labels, plus
+unnamed iframes and image-submit controls,
 repeated literal IDs that can make label and ARIA references ambiguous, possible
 keyboard focus on elements marked aria-hidden, and literal viewport settings that
 may restrict zoom below 200%. It flags empty document language and positive

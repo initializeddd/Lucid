@@ -47,5 +47,13 @@ int main() {
     if (r.incomplete || r.findings.size()!=2 || r.findings[0].rule!="html-lang" || r.findings[1].rule!="positive-tabindex" || r.findings[1].line!=2) return 24;
     r=auditHtml("<html lang='en'><div tabindex='1x'></div><div tabindex='1' hidden></div><div tabindex='1' inert></div><div tabindex='1' style='display:none'></div><input type='hidden' tabindex='1'><div tabindex='{{index}}'></div></html>");
     if (!r.incomplete || !r.findings.empty()) return 25;
+    r=auditHtml("<html lang='en'>\n <iframe src='frame.html'></iframe>\n<input type='IMAGE' alt=' '></html>");
+    if (r.incomplete || r.findings.size()!=2 || r.findings[0].rule!="iframe-name" || r.findings[0].line!=2 || r.findings[0].column!=2 || r.findings[1].rule!="image-input-name" || r.findings[1].line!=3) return 26;
+    r=auditHtml("<iframe title='Map'></iframe><iframe aria-label='Calendar'></iframe><iframe aria-labelledby='label'></iframe><p id='label'></p><iframe hidden></iframe><iframe aria-hidden='true'></iframe><input type='image' alt='Submit'><input type='image' title='Send'><input type='image' hidden><input type='image' aria-hidden='true'><img alt=''>");
+    if (r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="aria-hidden-focus") return 27;
+    r=auditHtml("<iframe title='{{name}}'></iframe><input type='image' alt='{{label}}'>");
+    if (!r.incomplete || !r.findings.empty()) return 28;
+    r=auditHtml("<iframe title=''></iframe><input type='image' aria-label=''>", 1000, 100, 1);
+    if (!r.incomplete || r.findings.size()!=1 || r.findings[0].rule!="iframe-name") return 29;
     return 0;
 }

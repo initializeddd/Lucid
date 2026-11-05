@@ -12,6 +12,8 @@ int main(){
  for(const auto* invalid:{R"({"requests":[{"name":"x","method":"GET","url":"x","headers":{"X":42}}]})",R"({"requests":[],"requests":[]})",R"({"variables":{"BAD!":"secret"},"requests":[]})"}) if(preflightApiEnvironment(invalid,env,report,error) || !report.requests.empty() || error.find("secret")!=std::string::npos)return 6;
  if(!preflightApiEnvironment(R"({"requests":[{"name":"x","method":"GET","url":"x}}"}]})",env,report,error) || !report.requests[0].invalidPlaceholder)return 7;
  if(!preflightApiEnvironment(R"({"requests":[{"name":"ok","method":"GET","url":"https://x/{{TOKEN}}"}]})",env,report,error) || !report.unusedReliable || !report.requests[0].secretInUrl || report.unusedEnvironmentVariables.size()!=1 || report.unusedEnvironmentVariables[0]!="UNUSED")return 10;
+ if(!preflightApiEnvironment(R"({"requests":[{"name":"encoded","method":"GET","url":"https://x/?q={{urlencode:TOKEN}}"}]})",env,report,error) || report.requests[0].invalidPlaceholder || !report.requests[0].secretInUrl || report.requests[0].references.size()!=1 || report.requests[0].references[0].name!="TOKEN" || !report.requests[0].references[0].secret)return 11;
+ if(!preflightApiEnvironment(R"({"requests":[{"name":"bad","method":"POST","url":"https://x/","body":"{{urlencode:TOKEN}}"}]})",env,report,error) || !report.requests[0].invalidPlaceholder)return 12;
  std::atomic_bool cancelled{true};if(preflightApiEnvironment(collection,env,report,error,&cancelled) || !report.requests.empty())return 8;
  env.variables["TOKEN"].value=std::string(256U*1024U+1,'x');if(preflightApiEnvironment(collection,env,report,error) || !report.requests.empty())return 9;
  return 0;

@@ -2749,6 +2749,9 @@ struct ApplicationInteractionTest {
             app.m_moduleCMakeModel.targets[0].dependencies.push_back("test-helper"); app.m_moduleCMakeModel.targets[0].artifacts.push_back("bin/example"); app.refreshSuggestions();
             if(std::find(app.m_suggestionPaths.begin(),app.m_suggestionPaths.end(),"Depends on: test-helper")==app.m_suggestionPaths.end() || std::find(app.m_suggestionPaths.begin(),app.m_suggestionPaths.end(),"Output: bin/example")==app.m_suggestionPaths.end()) return 928;
             app.m_moduleCMakeModel.targets[0].dependencies.clear(); app.m_moduleCMakeModel.targets[0].artifacts.clear(); app.refreshSuggestions();
+            app.m_moduleCMakeModel.targets[0].linkLanguage="CXX"; app.m_moduleCMakeModel.targets[0].linkFragments={{"libraries","libtest.a"}}; app.refreshSuggestions();
+            if(std::find(app.m_suggestionPaths.begin(),app.m_suggestionPaths.end(),"Link language: CXX")==app.m_suggestionPaths.end() || std::find(app.m_suggestionPaths.begin(),app.m_suggestionPaths.end(),"Link libraries: libtest.a")==app.m_suggestionPaths.end()) return 1130;
+            app.m_moduleCMakeModel.targets[0].linkLanguage.clear(); app.m_moduleCMakeModel.targets[0].linkFragments.clear(); app.refreshSuggestions();
 #if !defined(_WIN32)
             const auto fakeBuild=temp/"fake-cmake-build";{std::ofstream out(fakeBuild);out << "#!/bin/sh\nprintf ran > \"$0.ran\"\nexit 0\n";}std::filesystem::permissions(fakeBuild,std::filesystem::perms::owner_all);
             auto buildChoice=std::find(app.m_moduleChoices.begin(),app.m_moduleChoices.end(),-400);if(buildChoice==app.m_moduleChoices.end())return 896;app.m_selectedSuggestion=static_cast<int>(buildChoice-app.m_moduleChoices.begin());app.applyModuleCommand();

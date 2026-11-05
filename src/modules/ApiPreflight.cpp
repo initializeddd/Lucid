@@ -39,7 +39,9 @@ bool preflightApiEnvironment(std::string_view collection,const ApiEnvironment& e
             for(std::size_t i=0;i<value.size();) {
                 if(value.substr(i,2)=="{{") {
                     const auto end=value.find("}}",i+2);if(end==value.npos) {item.invalidPlaceholder=true;return true;}
-                    const auto name=value.substr(i+2,end-i-2);if(!validName(name)) {item.invalidPlaceholder=true;return true;}
+                    auto name=value.substr(i+2,end-i-2);
+                    if(name.starts_with("urlencode:")) {if(location!=ApiRefUrl) {item.invalidPlaceholder=true;return true;} name.remove_prefix(10);}
+                    if(!validName(name)) {item.invalidPlaceholder=true;return true;}
                     auto [it,inserted]=references.emplace(std::string(name),item.references.size());
                     if(inserted) {if(item.references.size()>=maxReferences)return false;const auto found=variables.find(it->first);item.references.push_back({it->first,0,found==variables.end(),found!=variables.end() && found->second});}
                     auto& ref=item.references[it->second];ref.locations|=location;if(ref.secret && location==ApiRefUrl)item.secretInUrl=true;

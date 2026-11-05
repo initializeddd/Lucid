@@ -4006,6 +4006,8 @@ void Application::refreshModuleSuggestions() {
                 const auto safeCMakeText=[](const std::string& text) { std::string error; return std::none_of(text.begin(),text.end(),[](unsigned char c){return c<32 || c==127;}) && editor::Document::canEditLosslessly(text,error) ? text : std::string("[unreadable text]"); };
                 for (const auto& dependency : target.dependencies) add("Depends on: " + safeCMakeText(dependency), "CMake File API dependency; model may be stale", -10, ui::SuggestionKind::ReadOnlyText);
                 for (const auto& artifact : target.artifacts) add("Output: " + safeCMakeText(artifact), "CMake File API artifact path; existence is not verified", -10, ui::SuggestionKind::ReadOnlyText);
+                if (!target.linkLanguage.empty()) add("Link language: " + safeCMakeText(target.linkLanguage), "Reported by CMake; model may be stale", -10, ui::SuggestionKind::ReadOnlyText);
+                for (const auto& fragment : target.linkFragments) add("Link " + safeCMakeText(fragment.role) + ": " + safeCMakeText(fragment.fragment), "Raw CMake File API command fragment; not executed", -10, ui::SuggestionKind::ReadOnlyText);
                 for (std::size_t i = 0; i < target.sources.size(); ++i) add(target.sources[i].path, target.sources[i].generated ? "Generated source" : "Source", static_cast<int>(i));
                 for (const auto& group : target.groups) {
                     add("Language: " + group.language, "Compile group", -10);

@@ -29,6 +29,7 @@ int main() {
     const auto target = std::find_if(model.targets.begin(), model.targets.end(), [](const auto& t) { return t.name == "demo"; });
     if (target == model.targets.end() || target->type != "EXECUTABLE" || target->sources.empty() || target->groups.empty()) return 3;
     if (std::find(target->dependencies.begin(),target->dependencies.end(),"helper")==target->dependencies.end() || target->artifacts.empty() || target->artifacts[0].find("demo")==std::string::npos) return 8;
+    if (target->linkLanguage != "CXX" || std::none_of(target->linkFragments.begin(),target->linkFragments.end(),[](const auto& f) {return f.role=="libraries" && f.fragment.find("helper")!=std::string::npos;})) return 9;
     const auto main = std::find_if(target->sources.begin(), target->sources.end(), [](const auto& s) { return s.path == "main.cpp"; });
     if (main == target->sources.end() || main->compileGroup < 0) return 4;
     const auto& group = target->groups[static_cast<std::size_t>(main->compileGroup)];

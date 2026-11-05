@@ -121,6 +121,22 @@ bool readCMakeModel(const std::filesystem::path& buildDirectory, CMakeModel& mod
                 }
             }
             if(!strings(*target,"artifacts","path",output.artifacts)) {error="Invalid CMake artifacts";return false;}
+            if (const auto* link=target->find("link")) {
+                if (link->type!=JsonType::Object) {error="Invalid CMake link information";return false;}
+                if (const auto* language=link->find("language")) {
+                    if(language->type!=JsonType::String || language->stringValue.size()>1024) {error="Invalid CMake link language";return false;}
+                    output.linkLanguage=language->stringValue;
+                }
+                if (const auto* fragments=link->find("commandFragments")) {
+                    if(fragments->type!=JsonType::Array || fragments->children.size()>10000) {error="Invalid CMake link fragments";return false;}
+                    for(const auto& item:fragments->children) {
+                        if(item.type!=JsonType::Object) {error="Invalid CMake link fragment";return false;}
+                        const auto* fragment=field(item,"fragment",JsonType::String); const auto* role=field(item,"role",JsonType::String);
+                        if(!fragment || !role || fragment->stringValue.size()>16384 || role->stringValue.size()>1024) {error="Invalid CMake link fragment";return false;}
+                        output.linkFragments.push_back({role->stringValue,fragment->stringValue});
+                    }
+                }
+            }
             if (const auto* groups = target->find("compileGroups")) {
                 if (groups->type != JsonType::Array || groups->children.size() > 10000) { error = "Invalid CMake compile groups"; return false; }
                 for (const auto& group : groups->children) {

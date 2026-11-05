@@ -17,18 +17,32 @@ bool validName(std::string_view s) {
 }
 bool substitute(std::string_view input, const std::map<std::string, std::string>& variables, std::string& output, std::string& error,
                 const std::set<std::string>* secretNames = nullptr,
-                std::vector<std::size_t>* secretStarts = nullptr) {
+                std::vector<std::size_t>* secretStarts = nullptr, bool urlContext = false) {
     output.clear();
     for (std::size_t i = 0; i < input.size();) {
         if (input.substr(i, 2) == "{{") {
             auto end = input.find("}}", i + 2);
             if (end == std::string_view::npos) { error = "Unclosed environment variable."; return false; }
             auto key = input.substr(i + 2, end - i - 2);
+            const bool encode=key.starts_with("urlencode:");
+            if(encode) { if(!urlContext) {error="URL encoding is only supported in URLs.";return false;} key.remove_prefix(10); }
             if (!validName(key)) { error = "Invalid environment variable name."; return false; }
             auto it = variables.find(std::string(key));
             if (it == variables.end()) { error = "Unresolved environment variable: " + std::string(key); return false; }
-            if (it->second.size() > maxOutput - output.size()) { error = "Resolved request is too large."; return false; }
-            const auto start = output.size(); output += it->second;
+            const auto start = output.size();
+            if (encode) {
+                constexpr char hex[]="0123456789ABCDEF";
+                for(unsigned char c:it->second) {
+                    const bool unreserved=(c>='A'&&c<='Z') || (c>='a'&&c<='z') || (c>='0'&&c<='9') || c=='-' || c=='.' || c=='_' || c=='~';
+                    const std::size_t required=unreserved ? 1 : 3;
+                    if(required>maxOutput-output.size()) {error="Resolved request is too large.";return false;}
+                    if(unreserved) output.push_back(static_cast<char>(c));
+                    else {output.push_back('%');output.push_back(hex[c>>4]);output.push_back(hex[c&15]);}
+                }
+            } else {
+                if (it->second.size() > maxOutput - output.size()) { error = "Resolved request is too large."; return false; }
+                output += it->second;
+            }
             if (secretNames && secretStarts && secretNames->count(it->first)) secretStarts->push_back(start);
             i = end + 2;
         } else {
@@ -130,7 +144,7 @@ static bool parseApiRequestsImpl(std::string_view json, const std::map<std::stri
         if (request.method.empty() || request.method.size() > 16) { error = "Invalid HTTP method."; return false; }
         for (char c : request.method) if (c < 'A' || c > 'Z') { error = "Invalid HTTP method."; return false; }
         std::vector<std::size_t> secretStarts;
-        if (!substitute(url->stringValue, variables, request.url, error, secretNames, &secretStarts)) return false;
+        if (!substitute(url->stringValue, variables, request.url, error, secretNames, &secretStarts, true)) return false;
         if ((!request.url.starts_with("https://") && !request.url.starts_with("http://")) || !noControls(request.url) || request.url.find(' ') != std::string::npos || request.url.size() > 8192) { error = "Invalid HTTP URL."; return false; }
         auto authorityStart = request.url.find("://") + 3;
         auto authorityEnd = request.url.find_first_of("/?#", authorityStart);

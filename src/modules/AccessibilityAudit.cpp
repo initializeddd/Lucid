@@ -53,6 +53,21 @@ bool positiveTabindex(const Tag& t) {
     if (value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= '0' && c <= '9'; })) return false;
     return std::any_of(value.begin(), value.end(), [](char c) { return c != '0'; });
 }
+// This source-only approximation does not attempt accessible-name computation.
+// Nonempty name attributes may refer to dynamic content or entity references,
+// so only report cases where every supported name attribute is absent or blank.
+bool hasLiteralName(const Tag& t, bool allowAlt) {
+    constexpr const char* names[] = {"aria-label", "aria-labelledby", "title"};
+    for (const auto* name : names) {
+        const auto it=t.attrs.find(name);
+        if (it!=t.attrs.end() && !trim(it->second).empty()) return true;
+    }
+    if (allowAlt) {
+        const auto it=t.attrs.find("alt");
+        if (it!=t.attrs.end() && !trim(it->second).empty()) return true;
+    }
+    return false;
+}
 // The viewport declaration is a list of literal key/value pairs. We deliberately
 // ignore expressions and duplicated keys, whose browser behavior can differ.
 bool viewportMayRestrictZoom(const Tag& t) {
@@ -180,8 +195,13 @@ AccessibilityAudit auditHtml(std::string_view html, std::size_t maxBytes, std::s
             else if (trim(lang->second).empty()) add(t,"html-lang","HTML language is empty; specify the document language.");
         }
         if (t.name=="img" && !t.attrs.count("alt") && !t.attrs.count("aria-label") && !t.attrs.count("aria-labelledby")) add(t,"image-alt","Image has no alt attribute or ARIA name.");
+        if (t.name=="iframe" && !t.attrs.count("hidden") && !t.attrs.count("inert") &&
+            !(t.attrs.count("aria-hidden") && lower(trim(t.attrs.at("aria-hidden")))=="true") && !hasLiteralName(t,false))
+            add(t,"iframe-name","Frame has no nonempty title or ARIA name; verify its accessible name in the rendered page.");
         if (t.name=="input" || t.name=="select" || t.name=="textarea") {
-            auto type=t.attrs.find("type"); if (type!=t.attrs.end()) { auto v=lower(type->second); if (v=="hidden" || v=="submit" || v=="reset" || v=="button" || v=="image") continue; }
+            auto type=t.attrs.find("type"); if (type!=t.attrs.end()) { auto v=lower(trim(type->second));
+                if (v=="image") { if (!t.attrs.count("hidden") && !t.attrs.count("inert") && !(t.attrs.count("aria-hidden") && lower(trim(t.attrs.at("aria-hidden")))=="true") && !hasLiteralName(t,true)) add(t,"image-input-name","Image submit control has no nonempty alt or ARIA name; verify its accessible name."); continue; }
+                if (v=="hidden" || v=="submit" || v=="reset" || v=="button") continue; }
             auto id=t.attrs.find("id"); if (!labelDepth && !t.attrs.count("aria-label") && !t.attrs.count("aria-labelledby") && !t.attrs.count("title") && (id==t.attrs.end() || !labelFor.count(id->second))) add(t,"form-label","Form control has no associated label or ARIA name in the parsed markup.");
         }
     }
